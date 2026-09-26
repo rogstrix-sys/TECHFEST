@@ -19,9 +19,11 @@
             <div class="viewport-header-badge">
                 <span class="pulse-dot green"></span>
                 <span class="v-title">VIEWPORT 1: EXTERNAL THEATER (GROUND TRUTH REALITY)</span>
-                <span class="v-sub">OPTICAL 3D SENSING &bull; 8-UAV FLEET &bull; RF TUBES</span>
+                <span class="v-sub">OPTICAL 3D SENSING &bull; 16-UAV FLEET &bull; RF TUBES</span>
             </div>
             <div id="canvas-theater-container" class="canvas-holder"></div>
+            <!-- Military Aerospace Heads-Up Display (MIL-STD-1787D) Overlay Layer -->
+            <canvas id="web-military-hud" class="web-military-hud"></canvas>
         </div>
 
         <!-- Viewport 2: Autonomous Drone SLAM Perception -->
@@ -70,7 +72,7 @@
             </div>
             <div class="metric-card">
                 <span class="metric-label">DISASTER POIS</span>
-                <span class="metric-val text-purple" id="metric-pois">0 / 5</span>
+                <span class="metric-val text-purple" id="metric-pois">0 / 8</span>
             </div>
             <div class="metric-card">
                 <span class="metric-label">SURVEY RATE</span>
@@ -78,13 +80,17 @@
             </div>
             <div class="metric-card">
                 <span class="metric-label">MESH STATUS</span>
-                <span class="badge badge-active" id="badge-network">8 NODES MESH</span>
+                <span class="badge badge-active" id="badge-network">16 NODES MESH</span>
             </div>
         </div>
 
         <div class="hud-controls">
             <!-- Investor Demo Button -->
             <button id="btn-investor" class="btn btn-investor">★ INVESTOR DEMO</button>
+            <!-- Military HUD Overlay Toggle -->
+            <button id="btn-toggle-hud" class="btn btn-outline text-neon-green">HUD: ON</button>
+            <!-- Telemetry Inspector Panel Toggle -->
+            <button id="btn-toggle-telemetry" class="btn btn-outline text-cyan">TELEMETRY</button>
             <!-- Audio Synthesis Toggle -->
             <button id="btn-audio" class="btn btn-outline text-cyan">🔇 AUDIO</button>
             <!-- Snapshot Capture -->
@@ -122,7 +128,7 @@
             <div class="investor-badge-pill">★ EXECUTIVE DEMO ★</div>
             <div class="investor-phase-info">
                 <h3 id="investor-phase-title">PHASE 1: HETEROGENEOUS SWARM DEPLOYMENT</h3>
-                <p id="investor-phase-desc">8-UAV autonomous fleet executes coordinated takeoff and altitude corridor separation.</p>
+                <p id="investor-phase-desc">16-UAV autonomous fleet executes coordinated takeoff and altitude corridor separation.</p>
             </div>
         </div>
         <div class="investor-bar-kpis">
@@ -216,7 +222,7 @@
             <div class="chart-card glass-card">
                 <div class="chart-header">
                     <h4>FLEET BATTERY DISCHARGE &amp; ENDURANCE</h4>
-                    <span class="badge text-neon-orange" id="chart-battery-badge">8 UNITS ACTIVE</span>
+                    <span class="badge text-neon-orange" id="chart-battery-badge">16 UNITS ACTIVE</span>
                 </div>
                 <div class="chart-container">
                     <canvas id="chart-battery"></canvas>
@@ -229,7 +235,7 @@
     <aside class="hud-left glass-panel">
         <div class="panel-header">
             <h3>ACTIVE UAV FLEET</h3>
-            <span class="badge text-neon-green" id="fleet-count">8 UNITS</span>
+            <span class="badge text-neon-green" id="fleet-count">16 UNITS</span>
         </div>
         <div id="fleet-list" class="fleet-scroll-container">
             <!-- Dynamic drone items injected here -->

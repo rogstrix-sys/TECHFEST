@@ -145,11 +145,22 @@ def main() -> None:
     parser.add_argument("--drones", type=int, default=8, help="Number of UAVs in fleet")
     parser.add_argument("--pois", type=int, default=5, help="Number of Points of Interest")
     parser.add_argument("--port", type=int, default=8000, help="Web server port (default: 8000)")
+    parser.add_argument("--hud", action="store_true", help="Launch native desktop military HUD (no web browser)")
     parser.add_argument("--no-browser", action="store_true", help="Do not auto-open web browser")
     parser.add_argument("--weather", action="store_true", help="Enable Dryden atmospheric wind & turbulence")
     args = parser.parse_args()
 
     check_and_install_dependencies()
+
+    if args.hud:
+        from run_hud import ensure_gui_dependencies
+        ensure_gui_dependencies()
+        from vis.desktop_hud import TacticalDesktopHUD
+        hud = TacticalDesktopHUD(width=1280, height=720)
+        if args.weather and hasattr(hud.sim, "config"):
+            hud.sim.config.enable_weather = True
+        hud.run()
+        return
 
     if args.headless:
         run_headless_simulation(

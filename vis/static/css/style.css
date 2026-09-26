@@ -141,6 +141,10 @@ body {
     pointer-events: none;
 }
 
+#viewport-theater .viewport-header-badge {
+    left: 295px;
+}
+
 .viewport-header-badge .v-title {
     font-family: var(--font-mono);
     font-size: 11px;
@@ -383,6 +387,13 @@ body {
     color: #fff;
 }
 
+#btn-toggle-telemetry.active {
+    background: var(--neon-cyan);
+    color: #000;
+    font-weight: 800;
+    box-shadow: 0 0 14px var(--neon-cyan);
+}
+
 .btn-sm {
     padding: 4px 8px;
     font-size: 10px;
@@ -587,8 +598,8 @@ body {
 
 .poi-grid {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 8px;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 6px;
     flex: 1;
 }
 
@@ -942,4 +953,15 @@ body {
 .link-payload {
     color: var(--neon-cyan);
     font-weight: bold;
+}
+
+/* Military Aerospace Heads-Up Display (MIL-STD-1787D) Overlay Layer */
+.web-military-hud {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none; /* All mouse clicks, drags, orbits, and zooms pass through to Three.js OrbitControls */
+    z-index: 10;
 }
