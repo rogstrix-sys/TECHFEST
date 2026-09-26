@@ -7,6 +7,10 @@ REM ============================================================================
 
 echo [*] Initializing UAV-X Standalone Desktop HUD Cockpit...
 cd /d "%~dp0"
+set SHIM_MCCOMPAT=0x800000001
+set CUDA_VISIBLE_DEVICES=0
+set __NV_PRIME_RENDER_OFFLOAD=1
+set __GLX_VENDOR_LIBRARY_NAME=nvidia
 python run_hud.py %*
 if errorlevel 1 (
     echo [!] Launcher exited with code %errorlevel%.

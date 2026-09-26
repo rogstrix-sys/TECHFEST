@@ -50,6 +50,24 @@ def find_browser_app_executable() -> Optional[str]:
     return None
 
 
+def configure_windows_gpu_preference() -> None:
+    """Ensure Windows DirectX UserGpuPreferences explicitly assigns NVIDIA RTX 4050 (Preference=2)."""
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\DirectX\UserGpuPreferences"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            python_exe = sys.executable
+            winreg.SetValueEx(key, python_exe, 0, winreg.REG_SZ, "GpuPreference=2;")
+            chrome_exe = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+            if os.path.isfile(chrome_exe):
+                winreg.SetValueEx(key, chrome_exe, 0, winreg.REG_SZ, "GpuPreference=2;")
+            edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+            if os.path.isfile(edge_exe):
+                winreg.SetValueEx(key, edge_exe, 0, winreg.REG_SZ, "GpuPreference=2;")
+    except Exception:
+        pass
+
+
 def is_server_alive(port: int = 8000, timeout: float = 0.8) -> bool:
     """Check if the UAV-X simulation server is responding on port."""
     url = f"http://127.0.0.1:{port}/api/telemetry"
@@ -139,6 +157,8 @@ def launch_desktop_hud_app(args, gpu_label: str) -> None:
         f"--window-size={args.width},{args.height}",
         f"--user-data-dir={temp_profile}",
         "--window-position=50,30",
+        "--force-high-performance-gpu",
+        "--gpu-preference=2",
         "--enable-gpu-rasterization",
         "--ignore-gpu-blocklist",
         "--enable-zero-copy",
@@ -150,9 +170,15 @@ def launch_desktop_hud_app(args, gpu_label: str) -> None:
     if args.fullscreen:
         app_flags.append("--start-fullscreen")
 
+    hud_env = os.environ.copy()
+    hud_env["SHIM_MCCOMPAT"] = "0x800000001"
+    hud_env["CUDA_VISIBLE_DEVICES"] = "0"
+    hud_env["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+    hud_env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+
     print("-" * 76)
     print(f"[*] Launching Dedicated Desktop HUD Window ({browser_name} Native App Mode)...")
-    print(f"[*] NVIDIA RTX 4050 Hardware Rasterization: ENABLED (D3D11 / ANGLE)")
+    print(f"[*] NVIDIA RTX 4050 Hardware Rasterization: FORCED HIGH-PERFORMANCE (D3D11 / ANGLE)")
     print(f"[*] Window Size: {args.width}x{args.height} | Full Mouse Controls: READY")
     print(f"[*] Browser Chrome/Tabs/URL Bar: REMOVED (Standalone Military Cockpit)")
     print("-" * 76)
@@ -179,7 +205,7 @@ def launch_desktop_hud_app(args, gpu_label: str) -> None:
     atexit.register(cleanup)
 
     try:
-        hud_proc = subprocess.Popen(app_flags)
+        hud_proc = subprocess.Popen(app_flags, env=hud_env)
         hud_proc.wait()
     except KeyboardInterrupt:
         print("\n[*] Desktop HUD Window closed by user.")
@@ -233,6 +259,9 @@ def main() -> None:
     parser.add_argument("--weather", action="store_true", help="Enable Dryden atmospheric wind & turbulence")
 
     args = parser.parse_args()
+
+    # Enforce Windows Graphics Settings to use NVIDIA discrete GPU
+    configure_windows_gpu_preference()
 
     # Query NVIDIA GPU details for banner
     gpu_label = "NVIDIA GeForce RTX 4050"

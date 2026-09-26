@@ -150,6 +150,18 @@ def main() -> None:
     parser.add_argument("--weather", action="store_true", help="Enable Dryden atmospheric wind & turbulence")
     args = parser.parse_args()
 
+    # Enforce NVIDIA GeForce RTX 4050 high-performance GPU binding
+    try:
+        from run_hud import configure_windows_gpu_preference
+        configure_windows_gpu_preference()
+    except Exception:
+        pass
+
+    os.environ["SHIM_MCCOMPAT"] = "0x800000001"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+    os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+
     check_and_install_dependencies()
 
     if args.hud:
@@ -189,6 +201,25 @@ def main() -> None:
         if not args.no_browser:
             def open_browser():
                 time.sleep(1.2)
+                try:
+                    from run_hud import find_browser_app_executable
+                    browser_exe = find_browser_app_executable()
+                    if browser_exe:
+                        app_flags = [
+                            browser_exe,
+                            "--force-high-performance-gpu",
+                            "--gpu-preference=2",
+                            url,
+                        ]
+                        hud_env = os.environ.copy()
+                        hud_env["SHIM_MCCOMPAT"] = "0x800000001"
+                        hud_env["CUDA_VISIBLE_DEVICES"] = "0"
+                        hud_env["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+                        hud_env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+                        subprocess.Popen(app_flags, env=hud_env)
+                        return
+                except Exception:
+                    pass
                 try:
                     webbrowser.open(url)
                 except Exception:
