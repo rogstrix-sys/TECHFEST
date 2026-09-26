@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -43,84 +43,51 @@
         </div>
     </div>
 
-    <!-- Top Telemetry Header Bar -->
+    <!-- Top Telemetry Header Bar (2-row layout: no overflow) -->
     <header class="hud-header glass-panel">
-        <div class="hud-brand">
-            <div class="radar-ping"></div>
-            <div>
-                <h1>UAV-X AUTONOMY COCKPIT</h1>
-                <span class="subtitle">RESILIENT MULTI-HOP FANET &bull; 3D SLAM PERCEPTION</span>
+        <!-- ROW 1: Brand + Metrics -->
+        <div class="hud-header-row1">
+            <div class="hud-brand">
+                <div class="radar-ping"></div>
+                <div class="brand-text">
+                    <h1>UAV-X AUTONOMY</h1>
+                    <span class="subtitle">16-UAV FANET &bull; 3D SLAM</span>
+                </div>
+            </div>
+            <div class="hud-metrics">
+                <div class="metric-card" id="metric-card-time"><span class="metric-label">TIME</span><span class="metric-val" id="metric-time">00:00.0</span></div>
+                <div class="metric-card" id="metric-card-pdr"><span class="metric-label">PDR</span><span class="metric-val text-neon-green" id="metric-pdr">100.0%</span></div>
+                <div class="metric-card" id="metric-card-latency"><span class="metric-label">LAT</span><span class="metric-val text-cyan" id="metric-latency">8.5 ms</span></div>
+                <div class="metric-card" id="metric-card-ekf"><span class="metric-label">EKF</span><span class="metric-val text-neon-yellow" id="metric-ekf-err">0.08 m</span></div>
+                <div class="metric-card" id="metric-card-pois"><span class="metric-label">POIS</span><span class="metric-val text-purple" id="metric-pois">0 / 8</span></div>
+                <div class="metric-card" id="metric-card-rate"><span class="metric-label">SURVEY</span><span class="metric-val text-neon-green" id="metric-survey-rate">14.2k m&sup2;/m</span></div>
+                <div class="metric-card" id="metric-card-recovery"><span class="metric-label">RECOVERY</span><span class="badge badge-active" id="badge-recovery">FLEET ACTIVE</span></div>
+                <div class="metric-card" id="metric-card-mesh"><span class="metric-label">MESH</span><span class="badge badge-active" id="badge-network">16 NODES</span></div>
+                <div class="metric-card" id="metric-card-gpu"><span class="metric-label">GPU</span><span class="badge badge-active" id="badge-gpu-hw" style="color:#76b900;border-color:#76b900;background:rgba(118,185,0,0.12);">RTX 4050</span></div>
             </div>
         </div>
-
-        <div class="hud-metrics">
-            <div class="metric-card">
-                <span class="metric-label">MISSION TIME</span>
-                <span class="metric-val" id="metric-time">00:00.0</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">PACKET DELIVERY (PDR)</span>
-                <span class="metric-val text-neon-green" id="metric-pdr">100.0%</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">AVG LATENCY</span>
-                <span class="metric-val text-cyan" id="metric-latency">8.5 ms</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">EKF CONVERGENCE</span>
-                <span class="metric-val text-neon-yellow" id="metric-ekf-err">0.08 m</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">DISASTER POIS</span>
-                <span class="metric-val text-purple" id="metric-pois">0 / 8</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">SURVEY RATE</span>
-                <span class="metric-val text-neon-green" id="metric-survey-rate">14,200 m²/m</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">RECOVERY STATUS</span>
-                <span class="badge badge-active" id="badge-recovery">0 RETREATING</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">MESH STATUS</span>
-                <span class="badge badge-active" id="badge-network">16 NODES MESH</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">GPU ADAPTER</span>
-                <span class="badge badge-active" id="badge-gpu-hw" style="color: #76b900; border-color: #76b900; background: rgba(118, 185, 0, 0.12);">NVIDIA RTX 4050</span>
-            </div>
-        </div>
-
-        <div class="hud-controls">
-            <!-- Investor Demo Button -->
-            <button id="btn-investor" class="btn btn-investor">★ INVESTOR DEMO</button>
-            <!-- Military HUD Overlay Toggle -->
-            <button id="btn-toggle-hud" class="btn btn-outline text-dim">HUD: OFF</button>
-            <!-- Telemetry Inspector Panel Toggle -->
-            <button id="btn-toggle-telemetry" class="btn btn-outline text-cyan">TELEMETRY</button>
-            <!-- Audio Synthesis Toggle -->
-            <button id="btn-audio" class="btn btn-outline text-cyan">🔇 AUDIO</button>
-            <!-- Snapshot Capture -->
-            <button id="btn-snapshot" class="btn btn-outline text-neon-green">📷 SNAP</button>
-            <!-- Analytics Dashboard Toggle -->
-            <button id="btn-toggle-analytics" class="btn btn-outline text-purple">ANALYTICS</button>
-            <!-- Viewport Mode Switcher -->
+        <!-- ROW 2: Controls (always fully visible) -->
+        <div class="hud-header-row2">
+            <button id="btn-investor" class="btn btn-investor" title="Launch 4-Phase Executive Swarm Demonstration">&#9733; DEMO</button>
+            <button id="btn-toggle-hud" class="btn btn-outline text-dim" title="Toggle Military HUD (H)">HUD: OFF</button>
+            <button id="btn-toggle-telemetry" class="btn btn-outline text-cyan" title="Toggle Drone Telemetry">TELEM</button>
+            <button id="btn-audio" class="btn btn-outline text-cyan" title="Toggle Spatial Audio">&#128263; AUDIO</button>
+            <button id="btn-snapshot" class="btn btn-outline text-neon-green" title="Capture Snapshot">&#128247; SNAP</button>
+            <button id="btn-toggle-analytics" class="btn btn-outline text-purple" title="Toggle Analytics Dashboard">CHARTS</button>
             <div class="view-mode-group">
-                <button class="btn btn-sm btn-mode" data-mode="split">SPLIT 50/50</button>
+                <button class="btn btn-sm btn-mode" data-mode="split">SPLIT</button>
                 <button class="btn btn-sm btn-mode active" data-mode="theater">THEATER</button>
                 <button class="btn btn-sm btn-mode" data-mode="slam">SLAM</button>
                 <button class="btn btn-sm btn-mode" data-mode="pip">PiP</button>
             </div>
-            <!-- Simulation Controls -->
-            <button id="btn-pause" class="btn btn-outline">PAUSE</button>
-            <button id="btn-reset" class="btn btn-outline">RESET</button>
-            <button id="btn-retreat" class="btn btn-outline text-neon-yellow" title="Command Autonomous Fleet Return-to-Launch (RTL)">RETREAT ALL (RTL)</button>
-            <button id="btn-export-csv" class="btn btn-outline text-neon-yellow">EXPORT CSV</button>
-            <select id="select-speed" class="select-control">
-                <option value="1.0">1.0x Real-Time</option>
-                <option value="2.0">2.0x Fast</option>
-                <option value="5.0">5.0x Turbo</option>
+            <button id="btn-pause" class="btn btn-outline" title="Pause / Resume (Space)">PAUSE</button>
+            <button id="btn-reset" class="btn btn-outline" title="Reset Simulation">RESET</button>
+            <button id="btn-retreat" class="btn btn-outline text-neon-yellow" title="Autonomous Fleet RTL">RETREAT (RTL)</button>
+            <button id="btn-export-csv" class="btn btn-outline text-neon-yellow" title="Export Telemetry CSV">CSV</button>
+            <select id="select-speed" class="select-control" title="Simulation Speed">
+                <option value="1.0">1.0x</option>
+                <option value="2.0">2.0x</option>
+                <option value="5.0">5.0x</option>
             </select>
         </div>
     </header>

@@ -1327,6 +1327,7 @@ function updateAPFVectors(apfData) {
 
 // Select Active Drone for SLAM & Inspection
 function selectDrone(droneId, openPanel = true) {
+    if (!droneId) return;
     selectedDroneId = droneId;
     slamTrajectoryPoints = []; // reset trajectory trail for new drone
 
@@ -1340,16 +1341,34 @@ function selectDrone(droneId, openPanel = true) {
     const labelHeader = document.getElementById("slam-tracking-label");
     if (labelHeader) labelHeader.textContent = `TRACKING ${droneId} LIDAR & OCTOMAP &bull; APF GUIDANCE`;
 
+    // 1. Immediately reflect visual selection in DOM fleet cards
+    document.querySelectorAll("#fleet-list .drone-card").forEach(c => {
+        const isTarget = (c.getAttribute("data-drone-id") === droneId);
+        c.classList.toggle("selected", isTarget);
+        if (isTarget) {
+            c.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+    });
+
+    // 2. Smoothly center Theater 3D camera target on selected drone
+    const targetMesh = droneMeshes.get(droneId);
+    if (targetMesh && controlsTheater) {
+        controlsTheater.target.copy(targetMesh.position);
+        controlsTheater.update();
+    }
+
+    // 3. Open Telemetry Inspect Panel
     if (openPanel && typeof toggleInspectPanel === "function") {
         toggleInspectPanel(true);
     }
 
+    // 4. Update Inspect Panel with current telemetry data
     if (latestTelemetry) {
         const drone = (latestTelemetry.drones || []).find(d => d.id === droneId);
         if (drone && isInspectPanelOpen) updateInspectPanel(drone);
-        updateHUD(latestTelemetry);
     }
 }
+window.selectDrone = selectDrone;
 
 // ============================================================================
 // Scientific Analytics Dashboard (Chart.js)
@@ -1593,8 +1612,131 @@ function updateScientificCharts(telemetry) {
 }
 
 // ============================================================================
-// HUD Updates
+// HUD Updates & Persistent Fleet Reconciliation
 // ============================================================================
+
+// Persistent Fleet List Renderer (In-place DOM reconciliation - prevents click cancellation)
+function renderFleetList(drones) {
+    const fleetContainer = document.getElementById("fleet-list");
+    if (!fleetContainer) return;
+
+    const droneList = drones || [];
+    const existingCards = new Map();
+    fleetContainer.querySelectorAll(".drone-card").forEach(c => {
+        const id = c.getAttribute("data-drone-id");
+        if (id) existingCards.set(id, c);
+    });
+
+    const activeIds = new Set();
+
+    droneList.forEach(d => {
+        activeIds.add(d.id);
+        let card = existingCards.get(d.id);
+        const isSelected = (selectedDroneId === d.id);
+
+        const isRtl = d.flight_mode === "RTL" || d.flight_mode === "LANDING";
+        const isLanded = d.flight_mode === "LANDED";
+        const isEmergency = d.flight_mode === "EMERGENCY_LAND";
+        let modeColor = "text-cyan";
+        let modeLabel = d.flight_mode;
+        if (isLanded) {
+            modeColor = "text-neon-green";
+            modeLabel = "LANDED (SAFE)";
+        } else if (isRtl) {
+            modeColor = "text-neon-yellow";
+            modeLabel = d.flight_mode === "RTL" ? "RTL (RETREAT)" : "LANDING";
+        } else if (isEmergency) {
+            modeColor = "text-red";
+            modeLabel = "EMERGENCY LAND";
+        }
+
+        const roleClass = (d.role || "survey").toLowerCase();
+        const speed = Math.hypot(d.velocity[0], d.velocity[1]).toFixed(1);
+        const batClass = d.battery_pct < 20 ? 'text-red' : (d.battery_pct < 35 ? 'text-neon-yellow' : '');
+        const showRtl = (!isLanded && d.flight_mode !== "IDLE");
+
+        if (!card) {
+            card = document.createElement("div");
+            card.className = `drone-card ${roleClass}${isSelected ? ' selected' : ''}`;
+            card.setAttribute("data-drone-id", d.id);
+            card.setAttribute("role", "button");
+            card.setAttribute("tabindex", "0");
+            card.setAttribute("aria-label", `Select Drone ${d.id}`);
+
+            card.innerHTML = `
+                <div class="drone-header">
+                    <span class="drone-id-tag">${d.id} [${d.role}]</span>
+                    <div style="display: flex; align-items: center;">
+                        <span class="drone-mode-badge ${modeColor}">${modeLabel}</span>
+                        <button class="btn btn-sm btn-outline text-neon-yellow drone-card-rtl-btn" data-drone-id="${d.id}" style="padding: 1px 5px; font-size: 8px; margin-left: 6px; border-color: rgba(255,214,0,0.5); display: ${showRtl ? 'inline-block' : 'none'};" title="Command Drone to Return-to-Launch">RTL</button>
+                    </div>
+                </div>
+                <div class="drone-stats">
+                    <div>ALT: <span class="stat-alt">${d.position[2].toFixed(1)}m</span></div>
+                    <div>BAT: <span class="stat-bat ${batClass}">${d.battery_pct.toFixed(0)}%</span></div>
+                    <div>SPD: <span class="stat-spd">${speed} m/s</span></div>
+                    <div>POI: <span class="stat-poi">${d.assigned_poi_id || 'NONE'}</span></div>
+                </div>
+            `;
+            fleetContainer.appendChild(card);
+        } else {
+            // Update classes and text in-place without tearing down DOM elements
+            const expectedClass = `drone-card ${roleClass}${isSelected ? ' selected' : ''}`;
+            if (card.className !== expectedClass) {
+                card.className = expectedClass;
+            }
+
+            const idSpan = card.querySelector(".drone-id-tag");
+            if (idSpan && idSpan.textContent !== `${d.id} [${d.role}]`) {
+                idSpan.textContent = `${d.id} [${d.role}]`;
+            }
+
+            const modeSpan = card.querySelector(".drone-mode-badge");
+            if (modeSpan) {
+                if (modeSpan.textContent !== modeLabel) modeSpan.textContent = modeLabel;
+                const expectedModeClass = `drone-mode-badge ${modeColor}`;
+                if (modeSpan.className !== expectedModeClass) modeSpan.className = expectedModeClass;
+            }
+
+            const rtlBtn = card.querySelector(".drone-card-rtl-btn");
+            if (rtlBtn) {
+                const targetDisplay = showRtl ? "inline-block" : "none";
+                if (rtlBtn.style.display !== targetDisplay) rtlBtn.style.display = targetDisplay;
+            }
+
+            const altSpan = card.querySelector(".stat-alt");
+            if (altSpan) {
+                const altText = `${d.position[2].toFixed(1)}m`;
+                if (altSpan.textContent !== altText) altSpan.textContent = altText;
+            }
+
+            const batSpan = card.querySelector(".stat-bat");
+            if (batSpan) {
+                const batText = `${d.battery_pct.toFixed(0)}%`;
+                if (batSpan.textContent !== batText) batSpan.textContent = batText;
+                const expectedBatClass = `stat-bat ${batClass}`;
+                if (batSpan.className !== expectedBatClass) batSpan.className = expectedBatClass;
+            }
+
+            const spdSpan = card.querySelector(".stat-spd");
+            if (spdSpan) {
+                const spdText = `${speed} m/s`;
+                if (spdSpan.textContent !== spdText) spdSpan.textContent = spdText;
+            }
+
+            const poiSpan = card.querySelector(".stat-poi");
+            if (poiSpan) {
+                const poiText = d.assigned_poi_id || 'NONE';
+                if (poiSpan.textContent !== poiText) poiSpan.textContent = poiText;
+            }
+        }
+    });
+
+    // Remove any stale cards no longer present in telemetry
+    existingCards.forEach((c, id) => {
+        if (!activeIds.has(id)) c.remove();
+    });
+}
 
 function updateHUD(telemetry) {
     if (!telemetry) return;
@@ -1674,76 +1816,35 @@ function updateHUD(telemetry) {
         }
     }
 
-    // Fleet List
-    const fleetContainer = document.getElementById("fleet-list");
-    fleetContainer.innerHTML = "";
-    (telemetry.drones || []).forEach(d => {
-        const card = document.createElement("div");
-        card.className = `drone-card ${d.role.toLowerCase()} ${selectedDroneId === d.id ? 'selected' : ''}`;
-        card.addEventListener("click", () => selectDrone(d.id));
+    // 1. Fleet List (Persistent DOM reconciliation - prevents click cancellation)
+    renderFleetList(telemetry.drones);
 
-        const isRtl = d.flight_mode === "RTL" || d.flight_mode === "LANDING";
-        const isLanded = d.flight_mode === "LANDED";
-        const isEmergency = d.flight_mode === "EMERGENCY_LAND";
-        let modeColor = "text-cyan";
-        let modeLabel = d.flight_mode;
-        if (isLanded) {
-            modeColor = "text-neon-green";
-            modeLabel = "LANDED (SAFE)";
-        } else if (isRtl) {
-            modeColor = "text-neon-yellow";
-            modeLabel = d.flight_mode === "RTL" ? "RTL (RETREAT)" : "LANDING";
-        } else if (isEmergency) {
-            modeColor = "text-red";
-            modeLabel = "EMERGENCY LAND";
-        }
-
-        const rtlBtn = (!isLanded && d.flight_mode !== "IDLE") ? `
-            <button class="btn btn-sm btn-outline text-neon-yellow" style="padding: 1px 5px; font-size: 8px; margin-left: 6px; border-color: rgba(255,214,0,0.5);" title="Command Drone to Return-to-Launch" onclick="event.stopPropagation(); triggerDroneRTL('${d.id}')">RTL</button>
-        ` : '';
-
-        card.innerHTML = `
-            <div class="drone-header">
-                <span>${d.id} [${d.role}]</span>
-                <div style="display: flex; align-items: center;">
-                    <span class="${modeColor}">${modeLabel}</span>
-                    ${rtlBtn}
-                </div>
-            </div>
-            <div class="drone-stats">
-                <div>ALT: <span>${d.position[2].toFixed(1)}m</span></div>
-                <div>BAT: <span class="${d.battery_pct < 20 ? 'text-red' : (d.battery_pct < 35 ? 'text-neon-yellow' : '')}">${d.battery_pct.toFixed(0)}%</span></div>
-                <div>SPD: <span>${Math.hypot(d.velocity[0], d.velocity[1]).toFixed(1)} m/s</span></div>
-                <div>POI: <span>${d.assigned_poi_id || 'NONE'}</span></div>
-            </div>
-        `;
-        fleetContainer.appendChild(card);
-    });
-
-    // Routes List
+    // 2. Routes List (diff-checked to avoid unnecessary DOM reflows)
     const routesContainer = document.getElementById("routes-list");
-    routesContainer.innerHTML = "";
-    (telemetry.active_routes || []).forEach(path => {
-        const div = document.createElement("div");
-        div.className = "route-badge";
-        div.innerHTML = `<span>${path.join(" ➔ ")} (${path.length - 1} HOPS)</span>`;
-        routesContainer.appendChild(div);
-    });
+    if (routesContainer) {
+        const routeHtml = (telemetry.active_routes || []).map(path =>
+            `<div class="route-badge"><span>${path.join(" ➔ ")} (${path.length - 1} HOPS)</span></div>`
+        ).join("");
+        if (routesContainer.innerHTML !== routeHtml) {
+            routesContainer.innerHTML = routeHtml;
+        }
+    }
 
-    // Links List
+    // 3. Links List (diff-checked)
     const linksContainer = document.getElementById("links-list");
-    linksContainer.innerHTML = "";
-    (telemetry.links || []).forEach(link => {
-        const div = document.createElement("div");
-        div.className = "link-row";
-        const isLoRa = (link.band && link.band.includes("LORA")) || (link.distance > 80.0 && link.viable);
-        const bandTag = isLoRa ? '<span class="link-lora">[915MHz]</span>' : '<span class="link-payload">[2.4GHz]</span>';
-        div.innerHTML = `
-            <span>${link.source} ↔ ${link.target} ${bandTag}</span>
-            <span class="${link.viable ? 'text-neon-green' : 'text-red'}">${link.snr} dB (${link.distance.toFixed(0)}m)</span>
-        `;
-        linksContainer.appendChild(div);
-    });
+    if (linksContainer) {
+        const linksHtml = (telemetry.links || []).map(link => {
+            const isLoRa = (link.band && link.band.includes("LORA")) || (link.distance > 80.0 && link.viable);
+            const bandTag = isLoRa ? '<span class="link-lora">[915MHz]</span>' : '<span class="link-payload">[2.4GHz]</span>';
+            return `<div class="link-row">
+                <span>${link.source} ↔ ${link.target} ${bandTag}</span>
+                <span class="${link.viable ? 'text-neon-green' : 'text-red'}">${link.snr} dB (${link.distance.toFixed(0)}m)</span>
+            </div>`;
+        }).join("");
+        if (linksContainer.innerHTML !== linksHtml) {
+            linksContainer.innerHTML = linksHtml;
+        }
+    }
 
     // PoIs Grid
     const poiContainer = document.getElementById("poi-list");
@@ -2365,6 +2466,75 @@ function initUIControls() {
             window.location.href = "/api/export_telemetry";
         });
     }
+
+    // Fleet List Delegated Event Handlers
+    const fleetContainer = document.getElementById("fleet-list");
+    if (fleetContainer) {
+        // Fast selection on click
+        fleetContainer.addEventListener("click", (e) => {
+            const rtlBtn = e.target.closest(".drone-card-rtl-btn");
+            if (rtlBtn) {
+                e.stopPropagation();
+                const dId = rtlBtn.getAttribute("data-drone-id");
+                if (dId && typeof triggerDroneRTL === "function") {
+                    triggerDroneRTL(dId);
+                }
+                return;
+            }
+
+            const card = e.target.closest(".drone-card");
+            if (card) {
+                const dId = card.getAttribute("data-drone-id");
+                if (dId) {
+                    selectDrone(dId);
+                }
+            }
+        });
+
+        // Accessible keyboard enter/space on focused card
+        fleetContainer.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                const card = e.target.closest(".drone-card");
+                if (card) {
+                    e.preventDefault();
+                    const dId = card.getAttribute("data-drone-id");
+                    if (dId) selectDrone(dId);
+                }
+            }
+        });
+    }
+
+    // Keyboard Drone Quick-Select Hotkeys (1-8 for UAV_1..8, 9 for RELAY_1, 0 for SCOUT_1, '[' and ']' for cycle)
+    window.addEventListener("keydown", (e) => {
+        if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) return;
+
+        if (e.key >= "1" && e.key <= "8") {
+            const targetId = `UAV_${e.key}`;
+            if (latestTelemetry && (latestTelemetry.drones || []).some(d => d.id === targetId)) {
+                selectDrone(targetId);
+            }
+        } else if (e.key === "9") {
+            if (latestTelemetry && (latestTelemetry.drones || []).some(d => d.id === "RELAY_1")) {
+                selectDrone("RELAY_1");
+            }
+        } else if (e.key === "0") {
+            if (latestTelemetry && (latestTelemetry.drones || []).some(d => d.id === "SCOUT_1")) {
+                selectDrone("SCOUT_1");
+            }
+        } else if (e.key === "[" || e.key === "]") {
+            if (latestTelemetry && latestTelemetry.drones && latestTelemetry.drones.length > 0) {
+                const drones = latestTelemetry.drones;
+                const curIdx = drones.findIndex(d => d.id === selectedDroneId);
+                let nextIdx = 0;
+                if (e.key === "]") {
+                    nextIdx = curIdx >= 0 ? (curIdx + 1) % drones.length : 0;
+                } else {
+                    nextIdx = curIdx >= 0 ? (curIdx - 1 + drones.length) % drones.length : drones.length - 1;
+                }
+                selectDrone(drones[nextIdx].id);
+            }
+        }
+    });
 
     window.addEventListener("resize", onWindowResize);
     animate();
