@@ -229,7 +229,7 @@ def test_telemetry_snapshot_schema(swarm_core: SwarmSimulationCore):
         assert k in d
 
     json_str = swarm_core.to_json()
-    assert len(json_str.encode("utf-8")) < 1500  # Compact frame size < 1.5 KB
+    assert len(json_str.encode("utf-8")) < 2500  # Compact frame size < 2.5 KB
 
 
 def test_poi_registration_and_progress():

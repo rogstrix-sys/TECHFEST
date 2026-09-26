@@ -74,6 +74,9 @@ class Drone:
         self.obstacles: List[Any] = []
         self.home_position: np.ndarray = self._initial_pos.copy()
         self.recovery_pad: Optional[np.ndarray] = None
+        self.is_comms_loss_rtl: bool = False
+        self.comms_loss_duration: float = 0.0
+        self._saved_task: Optional[Dict[str, Any]] = None
 
         # Physical constants
         self.g = 9.80665
@@ -164,6 +167,9 @@ class Drone:
         self.dwell_time = 0.0
         self.recovery_pad = None
         self.home_position = self._initial_pos.copy()
+        self.is_comms_loss_rtl = False
+        self.comms_loss_duration = 0.0
+        self._saved_task = None
         self.battery.reset()
         self.sensor_suite = SensorSuite()
         self.ekf = DroneEKF(initial_position=self.position)
@@ -526,7 +532,15 @@ class Drone:
             self.acceleration[:] = 0.0
             if self.flight_mode == FlightMode.LANDED:
                 self.rotor_speeds[:] = 0.0
-            self.battery.step(dt, speed=0.0, accel=0.0, is_transmitting=False, is_surveying=False)
+            self.battery.step(
+                dt,
+                speed=0.0,
+                accel=0.0,
+                is_transmitting=False,
+                is_surveying=False,
+                altitude=float(self.position[2]),
+                climb_rate=0.0,
+            )
             return
 
         m = self.limits.mass_kg
@@ -639,7 +653,7 @@ class Drone:
         if meas["baro"] is not None:
             self.ekf.update_baro(meas["baro"])
 
-        # 9. Battery State of Charge Depletion
+        # 9. Battery State of Charge Depletion (Physics-based: airspeed, altitude & climb-rate)
         speed = float(np.linalg.norm(self.velocity))
         self.battery.step(
             dt=dt,
@@ -647,6 +661,8 @@ class Drone:
             accel=a_norm,
             is_transmitting=self.is_transmitting,
             is_surveying=(self.flight_mode == FlightMode.SURVEYING),
+            altitude=float(self.position[2]),
+            climb_rate=float(self.velocity[2]),
         )
 
     def _update_attitude(self, dt: float) -> None:

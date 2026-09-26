@@ -112,6 +112,11 @@ class BatteryModel:
     p_rx_w: float = 3.0                   # RF idle receiving/listening power (W)
     rtb_soc_threshold: float = 0.25       # State of Charge threshold to trigger RTL (25%)
     emergency_soc_threshold: float = 0.10 # State of Charge threshold for emergency landing (10%)
+    current_power_w: float = 0.0          # Instantaneous total power draw in Watts
+    last_p_prop: float = 0.0              # Instantaneous propulsion power
+    last_p_climb: float = 0.0             # Gravitational climb power component
+    last_p_parasite: float = 0.0          # Aerodynamic parasite drag power component
+    last_altitude_factor: float = 1.0     # Air density altitude scaling factor
 
     @property
     def total_energy_joules(self) -> float:
@@ -121,25 +126,77 @@ class BatteryModel:
     def step(
         self,
         dt: float,
-        speed: float,
-        accel: float,
+        speed: float = 0.0,
+        accel: float = 0.0,
         is_transmitting: bool = False,
         is_surveying: bool = False,
+        altitude: float = 0.0,
+        climb_rate: float = 0.0,
+        airspeed: Optional[float] = None,
     ) -> float:
+        if airspeed is not None:
+            speed = airspeed
         """
         Integrates power consumption over dt seconds and updates SoC.
-        Returns the instantaneous power drawn in Watts.
+        Accounts for:
+        1. Altitude / air density: Thinner air requires higher rotor RPM to generate lift,
+           increasing induced hover power by ~1 / sqrt(rho_ratio).
+        2. Airspeed: Induced power drops slightly with translational lift, but parasite drag
+           grows cubically with airspeed (0.5 * rho * v^3 * Cd * A).
+        3. Climb rate: Climbing against gravity consumes potential power (m * g * vz / eta),
+           while descent lowers power draw.
         """
-        # Aerodynamic propulsion power scaling with speed and acceleration demand
-        p_prop = self.p_hover_w * (1.0 + 0.04 * speed + 0.08 * abs(accel))
+        # 1. Barometric air density ratio relative to sea-level (rho0 = 1.225 kg/m^3)
+        alt = max(0.0, float(altitude))
+        rho_ratio = float(np.exp(-alt / 8400.0))
+        alt_factor = 1.0 / float(np.sqrt(max(0.4, rho_ratio)))
+        self.last_altitude_factor = alt_factor
+
+        # 2. Aerodynamic propulsion power scaling with airspeed
+        v = max(0.0, float(speed))
+        # Translational lift reduces induced hover power (minimum power cruise speed bucket ~ 6.5 m/s)
+        trans_lift_factor = max(0.72, 1.0 / float(np.sqrt(1.0 + (v / 8.0) ** 2)))
+        # Parasite drag scales cubically with airspeed: 0.5 * rho * CdA * v^3
+        # Frontal drag area CdA ~ 0.075 m^2 for tilted quadcopter body and frame
+        p_parasite = 0.5 * 1.225 * rho_ratio * 0.075 * (v ** 3)
+        self.last_p_parasite = p_parasite
+
+        # 3. Gravitational potential work rate for vertical climb / descent
+        mass_kg = 1.8  # Nominal operational quadcopter mass (kg)
+        vz = float(climb_rate)
+        if vz > 0.05:
+            p_climb = (mass_kg * 9.81 * vz) / 0.75  # 75% powertrain electrical-to-mechanical efficiency
+        elif vz < -0.05:
+            # Gentle descent reduces rotor thrust demand; bounded to prevent negative propulsion
+            p_climb = max(-0.35 * self.p_hover_w, (mass_kg * 9.81 * vz) * 0.45)
+        else:
+            p_climb = 0.0
+        self.last_p_climb = p_climb
+
+        # Total aerodynamic & dynamic propulsion power
+        p_prop = (self.p_hover_w * trans_lift_factor * alt_factor) + p_parasite + p_climb + (self.p_hover_w * 0.08 * abs(accel))
+        p_prop = max(25.0, p_prop)
+        self.last_p_prop = p_prop
+
+        # Sensor and RF power
         p_sensor = self.p_payload_w if is_surveying else 0.0
         p_rf = self.p_tx_w if is_transmitting else self.p_rx_w
         p_total = self.p_base_w + p_prop + p_sensor + p_rf
+        self.current_power_w = p_total
 
         delta_energy = p_total * dt
         delta_soc = delta_energy / self.total_energy_joules
         self.soc = max(0.0, min(1.0, self.soc - delta_soc))
         return p_total
+
+    def reset(self) -> None:
+        """Reset battery state to full charge."""
+        self.soc = 1.0
+        self.current_power_w = 0.0
+        self.last_p_prop = 0.0
+        self.last_p_climb = 0.0
+        self.last_p_parasite = 0.0
+        self.last_altitude_factor = 1.0
 
     def is_low(self) -> bool:
         """Returns True if battery is below Return-to-Base threshold (25%)."""
@@ -149,10 +206,11 @@ class BatteryModel:
         """Returns True if battery is below Emergency Landing threshold (10%)."""
         return self.soc <= self.emergency_soc_threshold
 
-    def remaining_flight_time_s(self, average_power_w: float = 195.0) -> float:
-        """Estimates remaining flight endurance in seconds under nominal power draw."""
+    def remaining_flight_time_s(self, average_power_w: Optional[float] = None) -> float:
+        """Estimates remaining flight endurance in seconds under current or nominal power draw."""
+        p_draw = average_power_w if average_power_w is not None else (self.current_power_w if self.current_power_w > 10.0 else 195.0)
         remaining_joules = self.soc * self.total_energy_joules
-        return remaining_joules / max(1.0, average_power_w)
+        return remaining_joules / max(1.0, p_draw)
 
     def reset(self) -> None:
         """Recharges battery to 100% SoC."""
@@ -248,6 +306,8 @@ class TelemetrySnapshot:
     packets: List[Dict[str, Any]]   # in-flight packet traces
     metrics: Dict[str, float]       # {'pdr': 0.98, 'avg_latency_ms': 14.2, 'completed_pois': 3}
     weather: Optional[Dict[str, Any]] = None
+    priority_queue: Optional[List[Dict[str, Any]]] = None
+    mission_budget: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes snapshot to dictionary with Three.js cockpit compatible aliases."""
@@ -263,5 +323,9 @@ class TelemetrySnapshot:
         }
         if self.weather is not None:
             d["weather"] = self.weather
+        if self.priority_queue is not None:
+            d["priority_queue"] = self.priority_queue
+        if self.mission_budget is not None:
+            d["mission_budget"] = self.mission_budget
         return TelemetryDict(d)
 

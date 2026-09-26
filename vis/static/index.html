@@ -1,10 +1,10 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>UAV-X: Resilient Multi-Hop Aerial Swarm Network & SLAM Autonomy Cockpit</title>
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.2.0">
     <!-- Three.js and OrbitControls -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -56,6 +56,7 @@
             </div>
             <div class="hud-metrics">
                 <div class="metric-card" id="metric-card-time"><span class="metric-label">TIME</span><span class="metric-val" id="metric-time">00:00.0</span></div>
+                <div class="metric-card" id="metric-card-budget" title="Mission Time Budget Remaining"><span class="metric-label">BUDGET</span><span class="metric-val text-neon-yellow" id="metric-budget">05:00.0</span></div>
                 <div class="metric-card" id="metric-card-pdr"><span class="metric-label">PDR</span><span class="metric-val text-neon-green" id="metric-pdr">100.0%</span></div>
                 <div class="metric-card" id="metric-card-latency"><span class="metric-label">LAT</span><span class="metric-val text-cyan" id="metric-latency">8.5 ms</span></div>
                 <div class="metric-card" id="metric-card-ekf"><span class="metric-label">EKF</span><span class="metric-val text-neon-yellow" id="metric-ekf-err">0.08 m</span></div>
@@ -148,6 +149,9 @@
             <div class="inspect-stat"><span class="lbl">EKF ERROR:</span> <span id="inspect-ekf-err" class="val text-neon-green">0.08 m</span></div>
             <div class="inspect-stat"><span class="lbl">AIRSPEED:</span> <span id="inspect-speed" class="val">4.5 m/s</span></div>
             <div class="inspect-stat"><span class="lbl">BATTERY:</span> <span id="inspect-battery" class="val">98%</span></div>
+            <div class="inspect-stat"><span class="lbl">POWER DRAW:</span> <span id="inspect-power" class="val text-neon-yellow">185 W</span></div>
+            <div class="inspect-stat"><span class="lbl">EST ENDURANCE:</span> <span id="inspect-endurance" class="val text-neon-green">14.2 min</span></div>
+            <div class="inspect-stat"><span class="lbl">COMMS STATUS:</span> <span id="inspect-comms" class="val text-cyan">CONNECTED</span></div>
             <div class="inspect-stat"><span class="lbl">ATTITUDE:</span> <span id="inspect-attitude" class="val text-cyan">R:0° P:0° Y:0°</span></div>
             <div class="inspect-stat"><span class="lbl">APF NET FORCE:</span> <span id="inspect-apf-net" class="val text-neon-yellow">0.0 N</span></div>
             <div class="inspect-stat"><span class="lbl">ASSIGNED POI:</span> <span id="inspect-target" class="val">POI_SURVIVORS</span></div>
@@ -243,7 +247,7 @@
     <!-- Bottom Overlay: Disaster Points of Interest (PoIs) Progress -->
     <footer class="hud-bottom glass-panel">
         <div class="panel-header-inline">
-            <h3>DISASTER SURVEY SITES</h3>
+            <h3>DISASTER SURVEY SITES &bull; <span class="text-neon-yellow" style="font-size: 10px; font-weight: normal;">PRIORITY QUEUE</span></h3>
             <div class="cam-buttons">
                 <button class="btn btn-sm btn-cam active" data-cam="orbit">ORBIT</button>
                 <button class="btn btn-sm btn-cam" data-cam="top">TACTICAL TOP</button>
@@ -257,6 +261,6 @@
         </div>
     </footer>
 
-    <script src="/static/js/cockpit.js"></script>
+    <script src="/static/js/cockpit.js?v=2.2.0"></script>
 </body>
 </html>

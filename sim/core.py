@@ -439,6 +439,7 @@ class SwarmSimulationCore:
                 drones=self.drones,
                 pois=self.pois,
                 dt=step_dt,
+                network_engine=self.network_engine,
             )
 
         # Phase 5: Generate and buffer telemetry snapshot
@@ -473,6 +474,9 @@ class SwarmSimulationCore:
                 "flight_mode": mode_str,
                 "assigned_poi_id": st.assigned_poi_id,
                 "target_position": [round(float(c), 3) for c in st.target_position] if st.target_position is not None else None,
+                "power_w": round(float(getattr(d.battery, "current_power_w", 0.0)), 1) if hasattr(d, "battery") else 0.0,
+                "est_endurance_min": round(float(d.battery.remaining_flight_time_s() / 60.0), 1) if hasattr(d, "battery") else 30.0,
+                "comms_loss": bool(getattr(d, "is_comms_loss_rtl", False)),
             }
             if getattr(self.config, "include_estimates", False) and st.estimated_position is not None:
                 drone_entry["estimated_position"] = [round(float(c), 3) for c in st.estimated_position]
@@ -532,6 +536,21 @@ class SwarmSimulationCore:
                 "turbulence_intensity": self.weather.config.turbulence_intensity,
             }
 
+        # Mission Time Budget & Priority Queue telemetry
+        rem_s = round(float(self.mission_manager.get_time_remaining()), 1) if (self.mission_manager and hasattr(self.mission_manager, "get_time_remaining")) else round(max(0.0, 300.0 - float(self.sim_time)), 1)
+        b_status = self.mission_manager.get_budget_status() if (self.mission_manager and hasattr(self.mission_manager, "get_budget_status")) else "ON_SCHEDULE"
+        mission_budget_data = {
+            "total_budget_s": float(getattr(self.mission_manager, "mission_time_budget", 300.0)),
+            "elapsed_s": round(float(self.sim_time), 1),
+            "remaining_s": rem_s,
+            "time_remaining_s": rem_s,
+            "status": b_status,
+            "is_all_completed": b_status == "COMPLETED" or (len(self.pois) > 0 and sum(1 for p in self.pois.values() if p["is_completed"]) == len(self.pois)),
+        }
+        priority_queue_data = []
+        if self.mission_manager is not None and hasattr(self.mission_manager, "get_priority_queue_telemetry"):
+            priority_queue_data = self.mission_manager.get_priority_queue_telemetry()
+
         return TelemetrySnapshot(
             sim_time=round(self.sim_time, 3),
             drones=drones_list,
@@ -542,6 +561,8 @@ class SwarmSimulationCore:
             packets=packets_list,
             metrics=metrics,
             weather=weather_data,
+            priority_queue=priority_queue_data,
+            mission_budget=mission_budget_data,
         )
 
     def to_dict(self) -> Dict[str, Any]:

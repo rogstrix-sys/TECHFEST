@@ -27,14 +27,75 @@ import numpy as np
 from sim.types import DroneRole, FlightMode
 
 
+class DisasterSitePriorityQueue:
+    """
+    Priority Queue for Disaster Sites with deadline urgency scaling.
+    Prioritizes:
+    CRITICAL (Survivor Search, Hospital) > HIGH (Bridge Collapse, Substation) > MEDIUM > LOW
+    and dynamically factors in mission deadline to prevent site starvation.
+    """
+    PRIORITY_WEIGHTS = {
+        "CRITICAL": 1000.0,
+        "HIGH": 500.0,
+        "MEDIUM": 200.0,
+        "LOW": 50.0,
+    }
+
+    def __init__(self) -> None:
+        self.queue: List[Dict[str, Any]] = []
+
+    def update_queue(
+        self,
+        pois: Dict[str, Dict[str, Any]],
+        current_time: float,
+        time_budget: float,
+        drones: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Sorts pending disaster sites by priority weight, deadline urgency, and completion status."""
+        pending = [p for p in pois.values() if not p.get("is_completed", False)]
+        time_remaining = max(0.1, time_budget - current_time)
+        urgency_factor = max(1.0, 1.0 + (current_time / time_remaining))
+
+        def scoring_fn(p: Dict[str, Any]) -> float:
+            base_w = self.PRIORITY_WEIGHTS.get(str(p.get("priority", "MEDIUM")).upper(), 200.0)
+            req_dwell = float(p.get("required_dwell_time", 10.0))
+            score = (base_w * urgency_factor) - (req_dwell * 2.0)
+            if p.get("assigned_drone_id") is not None:
+                score += 50.0  # Continuity bias
+            return -score  # Negative for descending priority
+
+        pending.sort(key=scoring_fn)
+        self.queue = pending
+        return self.queue
+
+    def peek(self) -> Optional[Dict[str, Any]]:
+        return self.queue[0] if self.queue else None
+
+    def get_ordered_queue_telemetry(self) -> List[Dict[str, Any]]:
+        """Returns structured data for HUD priority queue display."""
+        items = []
+        for rank, p in enumerate(self.queue, start=1):
+            items.append({
+                "rank": rank,
+                "id": p["id"],
+                "priority": p.get("priority", "MEDIUM"),
+                "dwell_time": p.get("required_dwell_time", 10.0),
+                "progress": round(float(min(1.0, p.get("current_dwell_time", 0.0) / max(0.1, p.get("required_dwell_time", 10.0))) * 100.0), 1),
+                "assigned_drone": p.get("assigned_drone_id"),
+                "status": "SURVEYING" if p.get("assigned_drone_id") else "PENDING",
+            })
+        return items
+
+
 class DisasterMissionManager:
     """
     High-Level Disaster Survey Mission Orchestrator.
 
     Coordinates the multi-UAV fleet:
     - Allocates roles between Surveyors and Relays.
-    - Dispatches Survey UAVs to pending PoIs in order of priority.
-    - Manages PoI dwell time, data gathering, and state transitions.
+    - Dispatches Survey UAVs to pending PoIs via Priority Queue and CBBA auction.
+    - Enforces strict mission completion time budget with dynamic airspeed scaling.
+    - Network disconnect failsafe: triggers RTB on comms loss, automatically resumes tasks upon reconnection.
     - Coordinates autonomous retreat (RTL) upon survey completion, total area coverage, or low battery.
     - Executes controlled vertical descent, flare, and safe landing at recovery pads.
     """
@@ -48,6 +109,8 @@ class DisasterMissionManager:
         rtl_altitude: float = 55.0,
         approach_arrival_radius: float = 6.0,
         landing_altitude_threshold: float = 0.25,
+        mission_time_budget: float = 300.0,
+        comms_loss_timeout: float = 2.0,
     ) -> None:
         self.gcs_position = np.array(gcs_position, dtype=np.float64)
         self.survey_dwell_radius = float(survey_dwell_radius)
@@ -56,14 +119,42 @@ class DisasterMissionManager:
         self.rtl_altitude = float(rtl_altitude)
         self.approach_arrival_radius = float(approach_arrival_radius)
         self.landing_altitude_threshold = float(landing_altitude_threshold)
+        self.mission_time_budget = float(mission_time_budget)
+        self.comms_loss_timeout = float(comms_loss_timeout)
         self.total_mission_time: float = 0.0
         self.completed_pois_count: int = 0
         self.retreat_all_requested: bool = False
+        self._last_pois: Dict[str, Dict[str, Any]] = {}
+
+        # Priority Queue for disaster survey sites
+        self.priority_queue = DisasterSitePriorityQueue()
 
         # Swarm intelligence modules
         from sim.planning import CBBASolver, RelayReliefManager
         self.cbba_solver = CBBASolver(max_bundle_size=2)
         self.relief_manager = RelayReliefManager(low_battery_threshold=0.35, takeover_min_battery=0.65)
+
+    def get_time_remaining(self) -> float:
+        """Returns remaining mission time in seconds before budget expires."""
+        return max(0.0, self.mission_time_budget - self.total_mission_time)
+
+    def get_budget_status(self) -> str:
+        """Returns mission pace status based on remaining time and pending sites."""
+        rem = self.get_time_remaining()
+        has_pending = any(not p.get("is_completed", False) for p in getattr(self, "_last_pois", {}).values())
+        if not has_pending and self.completed_pois_count > 0:
+            return "COMPLETED"
+        if rem <= 0.0:
+            return "TIME_EXCEEDED"
+        if rem <= 60.0:
+            return "CRITICAL_DEADLINE"
+        if rem <= 150.0:
+            return "EXPEDITED"
+        return "ON_SCHEDULE"
+
+    def get_priority_queue_telemetry(self) -> List[Dict[str, Any]]:
+        """Returns serialized priority queue entries for UI display."""
+        return self.priority_queue.get_ordered_queue_telemetry()
 
     def trigger_fleet_retreat(self) -> None:
         """Command all drones in the swarm to immediately initiate autonomous retreat."""
@@ -145,29 +236,47 @@ class DisasterMissionManager:
         drones: Dict[str, Any],
         pois: Dict[str, Dict[str, Any]],
         dt: float,
+        network_engine: Optional[Any] = None,
     ) -> None:
         """
         Advance mission state by dt seconds.
-        Assigns pending PoIs, updates dwell times, and transitions drone FSM states.
+        Assigns pending PoIs via priority queue, updates dwell times, and transitions drone FSM states.
+        Enforces mission time budget and network disconnect failsafe.
         """
         self.total_mission_time += dt
+        self._last_pois = pois
 
-        # 1. Ensure role allocation for fleet
+        # 1. Update disaster site priority queue and deadline urgency
+        self.priority_queue.update_queue(pois, self.total_mission_time, self.mission_time_budget, drones)
+
+        # 2. Dynamic airspeed pace adjustment to guarantee completion within budget
+        time_rem = self.get_time_remaining()
+        pending_dwell = sum(max(0.0, p.get("required_dwell_time", 10.0) - p.get("current_dwell_time", 0.0)) for p in pois.values() if not p.get("is_completed", False))
+
+        pace_multiplier = 1.0
+        if time_rem < 200.0 and pending_dwell > 0:
+            pace_multiplier = min(1.45, max(1.0, (pending_dwell + 60.0) / max(10.0, time_rem)))
+
+        for d in drones.values():
+            if hasattr(d, "limits") and d.limits is not None:
+                d.limits.max_speed_xy = min(14.5, 10.0 * pace_multiplier)
+
+        # 3. Ensure role allocation for fleet
         self._ensure_role_allocation(drones)
 
-        # 2. Check dynamic relay battery relief rotation
+        # 4. Check dynamic relay battery relief rotation
         handover = self.relief_manager.evaluate_relief_rotation(drones, self.total_mission_time)
         if handover:
             r_id, s_id = handover
             self.relief_manager.execute_handover(drones[r_id], drones[s_id])
 
-        # 3. Assign available survey drones to pending PoIs
+        # 5. Assign available survey drones to pending PoIs in strict priority order
         self._assign_pending_pois(drones, pois)
 
-        # 4. Update drones and their active mission targets
+        # 6. Update drones and their active mission targets
         for idx, (drone_id, drone) in enumerate(drones.items()):
             setattr(drone, "_fleet_index", idx)
-            self._update_drone_fsm(drone, pois, dt)
+            self._update_drone_fsm(drone, pois, dt, network_engine=network_engine)
 
         # Count completed PoIs
         self.completed_pois_count = sum(1 for p in pois.values() if p.get("is_completed", False))
@@ -198,13 +307,11 @@ class DisasterMissionManager:
 
     def _assign_pending_pois(self, drones: Dict[str, Any], pois: Dict[str, Dict[str, Any]]) -> None:
         """Assign unassigned Survey drones to high-priority pending PoIs."""
-        # Find unassigned pending PoIs, sorted by priority (HIGH first)
+        # Find unassigned pending PoIs drawn from Priority Queue
         pending_pois = [
-            p for p in pois.values()
+            p for p in self.priority_queue.queue
             if not p.get("is_completed", False) and p.get("assigned_drone_id") is None
         ]
-        priority_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-        pending_pois.sort(key=lambda p: priority_order.get(p.get("priority", "MEDIUM"), 2))
 
         # Find idle or unassigned survey drones with adequate battery
         available_surveyors = [
@@ -219,6 +326,7 @@ class DisasterMissionManager:
             )
             and not (hasattr(d, "battery") and d.battery.is_low())
             and not self.retreat_all_requested
+            and not getattr(d, "is_comms_loss_rtl", False)
         ]
 
         # 1. Consensus-Based Bundle Algorithm (CBBA) distributed auction
@@ -245,9 +353,63 @@ class DisasterMissionManager:
             selected_drone.assigned_poi_id = poi["id"]
             selected_drone.set_target_waypoint(poi_pos)
 
-    def _update_drone_fsm(self, drone: Any, pois: Dict[str, Dict[str, Any]], dt: float) -> None:
-        """Handle individual UAV FSM updates based on mission progress and retreat logic."""
+    def _update_drone_fsm(
+        self,
+        drone: Any,
+        pois: Dict[str, Dict[str, Any]],
+        dt: float,
+        network_engine: Optional[Any] = None,
+    ) -> None:
+        """Handle individual UAV FSM updates based on mission progress, retreat, and network connectivity."""
         pad = self.get_recovery_pad(drone)
+
+        # ---------------------------------------------------------------------
+        # Network Connectivity Check & Autonomous Failsafe
+        # ---------------------------------------------------------------------
+        is_connected = True
+        if network_engine is not None and hasattr(network_engine, "is_connected_to_gcs"):
+            is_connected = bool(network_engine.is_connected_to_gcs(drone.id))
+
+        if getattr(drone, "is_comms_loss_rtl", False):
+            if is_connected:
+                # Network link recovered! Seamlessly resume interrupted task
+                drone.is_comms_loss_rtl = False
+                drone.comms_loss_duration = 0.0
+                saved = getattr(drone, "_saved_task", None)
+                if saved and saved.get("poi_id") and saved["poi_id"] in pois:
+                    saved_poi = pois[saved["poi_id"]]
+                    if not saved_poi.get("is_completed", False):
+                        drone.assigned_poi_id = saved_poi["id"]
+                        saved_poi["assigned_drone_id"] = drone.id
+                        drone.set_target_waypoint(saved_poi["position"])
+                        drone.set_flight_mode(FlightMode.TRANSIT)
+                        drone._saved_task = None
+                    else:
+                        drone._saved_task = None
+                        drone.set_flight_mode(FlightMode.TRANSIT)
+                else:
+                    drone._saved_task = None
+                    if drone.role == DroneRole.RELAY:
+                        drone.set_flight_mode(FlightMode.RELAY)
+                    else:
+                        drone.set_flight_mode(FlightMode.TRANSIT)
+        elif drone.flight_mode in (FlightMode.TAKEOFF, FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY):
+            if not is_connected:
+                drone.comms_loss_duration = getattr(drone, "comms_loss_duration", 0.0) + dt
+                if drone.comms_loss_duration >= self.comms_loss_timeout and not getattr(drone, "is_comms_loss_rtl", False):
+                    # Trigger Network Loss Failsafe: return to base
+                    drone.is_comms_loss_rtl = True
+                    drone._saved_task = {
+                        "poi_id": drone.assigned_poi_id,
+                        "flight_mode": drone.flight_mode,
+                        "target_position": drone.target_position.copy() if drone.target_position is not None else None,
+                    }
+                    if drone.assigned_poi_id and drone.assigned_poi_id in pois:
+                        pois[drone.assigned_poi_id]["assigned_drone_id"] = None
+                    drone.assigned_poi_id = None
+                    self._initiate_drone_rtl(drone)
+            else:
+                drone.comms_loss_duration = 0.0
 
         # ---------------------------------------------------------------------
         # 1. Terminal / Landing States Handling

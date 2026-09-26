@@ -302,7 +302,7 @@ class FANETNetworkEngine:
         # 5. Process in-flight and DTN buffered packets
         self._advance_packets(dt)
 
-    def update_topology(self, node_positions: Dict[str, np.ndarray], obstacles: Sequence[Any]) -> None:
+    def update_topology(self, node_positions: Dict[str, np.ndarray], obstacles: Sequence[Any] = ()) -> None:
         """Alternative lightweight topology update for test harness compatibility."""
         self.node_positions = {k: np.array(v, dtype=np.float64) for k, v in node_positions.items()}
         self._recompute_links(obstacles)
@@ -537,6 +537,16 @@ class FANETNetworkEngine:
                 dtn.push(pkt)
 
         self.active_packets = remaining_packets
+
+    def is_connected_to_gcs(self, node_id: str) -> bool:
+        """Returns True if node_id currently has an active route to GCS."""
+        if str(node_id) == str(self.gcs_id):
+            return True
+        return str(node_id) in self.active_routes
+
+    def get_disconnected_nodes(self) -> List[str]:
+        """Returns list of active UAV nodes currently lacking a path to GCS."""
+        return [node for node in self.node_positions if node != self.gcs_id and node not in self.active_routes]
 
     def get_active_routes(self) -> List[List[str]]:
         """Return list of current multi-hop routing paths to GCS."""

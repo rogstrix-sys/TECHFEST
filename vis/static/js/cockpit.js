@@ -55,6 +55,7 @@ let maxTrajectoryPoints = 120;
 let audioContext = null;
 let isAudioMuted = true;
 let lastSurveyedCount = 0;
+let lastFleetRenderTime = 0;
 
 // Scientific Charts (Chart.js)
 let chartEKF = null;
@@ -1639,7 +1640,10 @@ function renderFleetList(drones) {
         const isEmergency = d.flight_mode === "EMERGENCY_LAND";
         let modeColor = "text-cyan";
         let modeLabel = d.flight_mode;
-        if (isLanded) {
+        if (d.comms_loss) {
+            modeColor = "text-red";
+            modeLabel = "COMMS RTB";
+        } else if (isLanded) {
             modeColor = "text-neon-green";
             modeLabel = "LANDED (SAFE)";
         } else if (isRtl) {
@@ -1654,6 +1658,9 @@ function renderFleetList(drones) {
         const speed = Math.hypot(d.velocity[0], d.velocity[1]).toFixed(1);
         const batClass = d.battery_pct < 20 ? 'text-red' : (d.battery_pct < 35 ? 'text-neon-yellow' : '');
         const showRtl = (!isLanded && d.flight_mode !== "IDLE");
+        const pwr = d.power_w !== undefined ? `${d.power_w.toFixed(0)}W` : '---';
+        const comText = d.comms_loss ? 'LOST' : 'OK';
+        const comClass = d.comms_loss ? 'text-red' : 'text-cyan';
 
         if (!card) {
             card = document.createElement("div");
@@ -1676,6 +1683,8 @@ function renderFleetList(drones) {
                     <div>BAT: <span class="stat-bat ${batClass}">${d.battery_pct.toFixed(0)}%</span></div>
                     <div>SPD: <span class="stat-spd">${speed} m/s</span></div>
                     <div>POI: <span class="stat-poi">${d.assigned_poi_id || 'NONE'}</span></div>
+                    <div>PWR: <span class="stat-pwr text-neon-yellow">${pwr}</span></div>
+                    <div>COM: <span class="stat-com ${comClass}">${comText}</span></div>
                 </div>
             `;
             fleetContainer.appendChild(card);
@@ -1729,6 +1738,18 @@ function renderFleetList(drones) {
                 const poiText = d.assigned_poi_id || 'NONE';
                 if (poiSpan.textContent !== poiText) poiSpan.textContent = poiText;
             }
+
+            const pwrSpan = card.querySelector(".stat-pwr");
+            if (pwrSpan) {
+                if (pwrSpan.textContent !== pwr) pwrSpan.textContent = pwr;
+            }
+
+            const comSpan = card.querySelector(".stat-com");
+            if (comSpan) {
+                if (comSpan.textContent !== comText) comSpan.textContent = comText;
+                const expComClass = `stat-com ${comClass}`;
+                if (comSpan.className !== expComClass) comSpan.className = expComClass;
+            }
         }
     });
 
@@ -1736,6 +1757,45 @@ function renderFleetList(drones) {
     existingCards.forEach((c, id) => {
         if (!activeIds.has(id)) c.remove();
     });
+}
+
+// Disaster Site Priority Queue & PoI Renderer (diff-checked to eliminate layout thrashing)
+function renderPoiList(poiItems) {
+    const poiContainer = document.getElementById("poi-list");
+    if (!poiContainer) return;
+
+    const list = poiItems || [];
+    const html = list.map((p, idx) => {
+        const priority = (p.priority || 'MEDIUM').toUpperCase();
+        const pClass = priority.toLowerCase();
+        const isDone = p.is_completed || ((p.progress || 0) >= 100);
+        const progressPct = (p.progress !== undefined ? p.progress : 0).toFixed(0);
+        const rank = idx + 1;
+        const urgency = p.urgency_score !== undefined ? `URG: ${p.urgency_score.toFixed(0)}` : '';
+        const drone = p.assigned_drone || 'UNASSIGNED';
+        const deadline = p.deadline_s !== undefined ? `D-LINE: ${p.deadline_s.toFixed(0)}s` : '';
+
+        return `<div class="poi-card ${pClass}" data-poi-id="${p.id}" data-drone-id="${p.assigned_drone || ''}" role="button" tabindex="0" title="Disaster Site ${p.id} - Click to track drone">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div style="display:flex; align-items:center; gap:5px;">
+                    <span class="badge" style="font-size:7.5px; padding:1px 4px; background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.15);">${priority === 'CRITICAL' ? '⚡ P' : 'P'}${rank} ${priority}</span>
+                    <strong style="color:var(--text-primary); font-size:10px;">${p.id}</strong>
+                </div>
+                <span class="${isDone ? 'text-neon-green' : 'text-neon-yellow'}" style="font-weight:bold; font-size:10px;">${isDone ? 'COMPLETED' : progressPct + '%'}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:8px; color:var(--text-muted); margin-top:2px;">
+                <span>ASSIGNED: <strong class="text-cyan">${drone}</strong></span>
+                <span>${urgency} ${deadline}</span>
+            </div>
+            <div class="poi-progress-bar">
+                <div class="poi-progress-fill ${isDone ? 'completed' : ''}" style="width: ${progressPct}%"></div>
+            </div>
+        </div>`;
+    }).join("");
+
+    if (poiContainer.innerHTML !== html) {
+        poiContainer.innerHTML = html;
+    }
 }
 
 function updateHUD(telemetry) {
@@ -1748,6 +1808,28 @@ function updateHUD(telemetry) {
     const mins = Math.floor(t / 60);
     const secs = (t % 60).toFixed(1);
     document.getElementById("metric-time").textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(4, '0')}`;
+
+    // Mission Budget Countdown
+    const elBudget = document.getElementById("metric-budget");
+    if (elBudget && telemetry.mission_budget) {
+        const mb = telemetry.mission_budget;
+        const rem = Math.max(0, mb.remaining_s !== undefined ? mb.remaining_s : (mb.time_remaining_s !== undefined ? mb.time_remaining_s : 0));
+        const bMins = Math.floor(rem / 60);
+        const bSecs = (rem % 60).toFixed(1);
+        if (mb.is_all_completed || mb.status === "COMPLETED") {
+            elBudget.className = "metric-val text-neon-green";
+            elBudget.textContent = "COMPLETED";
+        } else {
+            elBudget.textContent = `${String(bMins).padStart(2, '0')}:${String(bSecs).padStart(4, '0')}`;
+            if (rem < 30.0 || mb.status === "TIME_EXCEEDED") {
+                elBudget.className = "metric-val text-red";
+            } else if (mb.status === "EXPEDITED" || mb.status === "CRITICAL_DEADLINE" || (mb.pacing_ratio !== undefined && mb.pacing_ratio < 0.9)) {
+                elBudget.className = "metric-val text-neon-yellow";
+            } else {
+                elBudget.className = "metric-val text-neon-green";
+            }
+        }
+    }
 
     const metrics = telemetry.metrics || {};
     document.getElementById("metric-pdr").textContent = `${((metrics.pdr || 1.0) * 100).toFixed(1)}%`;
@@ -1816,8 +1898,14 @@ function updateHUD(telemetry) {
         }
     }
 
-    // 1. Fleet List (Persistent DOM reconciliation - prevents click cancellation)
-    renderFleetList(telemetry.drones);
+    // 1. Throttled Fleet & Priority Queue Lists (10 Hz throttling for rock-solid UI stability)
+    const now = performance.now();
+    if (now - lastFleetRenderTime >= 100) {
+        lastFleetRenderTime = now;
+        renderFleetList(telemetry.drones);
+        const poiSource = (telemetry.priority_queue && telemetry.priority_queue.length > 0) ? telemetry.priority_queue : (telemetry.pois || []);
+        renderPoiList(poiSource);
+    }
 
     // 2. Routes List (diff-checked to avoid unnecessary DOM reflows)
     const routesContainer = document.getElementById("routes-list");
@@ -1845,24 +1933,6 @@ function updateHUD(telemetry) {
             linksContainer.innerHTML = linksHtml;
         }
     }
-
-    // PoIs Grid
-    const poiContainer = document.getElementById("poi-list");
-    poiContainer.innerHTML = "";
-    pois.forEach(p => {
-        const card = document.createElement("div");
-        card.className = `poi-card ${(p.priority || 'MEDIUM').toLowerCase()}`;
-        card.innerHTML = `
-            <div style="display:flex; justify-content:space-between;">
-                <strong>${p.id}</strong>
-                <span class="${p.is_completed ? 'text-neon-green' : 'text-purple'}">${p.is_completed ? 'DONE' : p.progress + '%'}</span>
-            </div>
-            <div class="poi-progress-bar">
-                <div class="poi-progress-fill ${p.is_completed ? 'completed' : ''}" style="width: ${p.progress}%"></div>
-            </div>
-        `;
-        poiContainer.appendChild(card);
-    });
 
     // Update Inspect Panel (only if user has opened panel)
     if (isInspectPanelOpen && selectedDroneId) {
@@ -1919,6 +1989,24 @@ function updateInspectPanel(d) {
     if (elSpd) elSpd.textContent = `${spd.toFixed(1)} m/s`;
     const elBat = document.getElementById("inspect-battery");
     if (elBat) elBat.textContent = `${d.battery_pct.toFixed(0)}%`;
+
+    const elPwr = document.getElementById("inspect-power");
+    if (elPwr) elPwr.textContent = d.power_w !== undefined ? `${d.power_w.toFixed(0)} W` : '---';
+
+    const elEndurance = document.getElementById("inspect-endurance");
+    if (elEndurance) elEndurance.textContent = d.est_endurance_min !== undefined ? `${d.est_endurance_min.toFixed(1)} min` : '---';
+
+    const elComms = document.getElementById("inspect-comms");
+    if (elComms) {
+        if (d.comms_loss) {
+            elComms.textContent = "DISCONNECTED (RTL ACTIVE)";
+            elComms.className = "val text-red";
+        } else {
+            elComms.textContent = "CONNECTED (FANET MESH)";
+            elComms.className = "val text-cyan";
+        }
+    }
+
     const elTgt = document.getElementById("inspect-target");
     if (elTgt) elTgt.textContent = d.assigned_poi_id || (d.target_position ? `[${d.target_position[0].toFixed(0)}, ${d.target_position[1].toFixed(0)}, ${d.target_position[2].toFixed(0)}]` : 'NONE');
 
@@ -2467,17 +2555,19 @@ function initUIControls() {
         });
     }
 
-    // Fleet List Delegated Event Handlers
+    // Fleet List Delegated Event Handlers (Immediate pointerdown + debounced click to prevent selection drops)
     const fleetContainer = document.getElementById("fleet-list");
     if (fleetContainer) {
-        // Fast selection on click
-        fleetContainer.addEventListener("click", (e) => {
+        let lastSelectTime = 0;
+        const handleFleetSelect = (e) => {
             const rtlBtn = e.target.closest(".drone-card-rtl-btn");
             if (rtlBtn) {
                 e.stopPropagation();
-                const dId = rtlBtn.getAttribute("data-drone-id");
-                if (dId && typeof triggerDroneRTL === "function") {
-                    triggerDroneRTL(dId);
+                if (e.type === "pointerdown" || e.type === "click") {
+                    const dId = rtlBtn.getAttribute("data-drone-id");
+                    if (dId && typeof triggerDroneRTL === "function") {
+                        triggerDroneRTL(dId);
+                    }
                 }
                 return;
             }
@@ -2485,11 +2575,16 @@ function initUIControls() {
             const card = e.target.closest(".drone-card");
             if (card) {
                 const dId = card.getAttribute("data-drone-id");
-                if (dId) {
+                const now = performance.now();
+                if (dId && (now - lastSelectTime > 80)) {
+                    lastSelectTime = now;
                     selectDrone(dId);
                 }
             }
-        });
+        };
+
+        fleetContainer.addEventListener("pointerdown", handleFleetSelect);
+        fleetContainer.addEventListener("click", handleFleetSelect);
 
         // Accessible keyboard enter/space on focused card
         fleetContainer.addEventListener("keydown", (e) => {
@@ -2502,6 +2597,25 @@ function initUIControls() {
                 }
             }
         });
+    }
+
+    // Disaster Site Priority Queue Interaction (Select assigned drone on click/pointerdown)
+    const poiContainer = document.getElementById("poi-list");
+    if (poiContainer) {
+        let lastPoiSelectTime = 0;
+        const handlePoiSelect = (e) => {
+            const card = e.target.closest(".poi-card");
+            if (card) {
+                const dId = card.getAttribute("data-drone-id");
+                const now = performance.now();
+                if (dId && (now - lastPoiSelectTime > 80) && typeof selectDrone === "function") {
+                    lastPoiSelectTime = now;
+                    selectDrone(dId);
+                }
+            }
+        };
+        poiContainer.addEventListener("pointerdown", handlePoiSelect);
+        poiContainer.addEventListener("click", handlePoiSelect);
     }
 
     // Keyboard Drone Quick-Select Hotkeys (1-8 for UAV_1..8, 9 for RELAY_1, 0 for SCOUT_1, '[' and ']' for cycle)
