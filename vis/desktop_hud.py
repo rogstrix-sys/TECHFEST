@@ -191,6 +191,7 @@ class TacticalDesktopHUD:
         self.camera_mode = "FPV_CHASE"    # FPV_CHASE, FPV_NOSE, TACTICAL_TOP, GCS_MAST, ORBIT
         self.sensor_mode = "TACTICAL"     # TACTICAL, FLIR_THERMAL, NVG_NIGHT
         self.show_mesh_links = True
+        self.show_hud = False
         self.show_help = False
         self.is_paused = False
 
@@ -386,14 +387,23 @@ class TacticalDesktopHUD:
             self._apply_nvg_filter(frame)
 
         # 4. Render Military HUD Symbology Overlay
-        hud_color = COLOR_HUD_GREEN if self.sensor_mode != "TACTICAL" else COLOR_HUD_CYAN
-        self._render_hud_symbology(frame, hud_color)
-
-        # 5. Render Tactical PPI Radar Scope (Bottom-Left)
-        self._render_tactical_radar(frame, hud_color)
-
-        # 6. Render Data Banners & Telemetry
-        self._render_hud_banners(frame, hud_color)
+        if self.show_hud:
+            hud_color = COLOR_HUD_GREEN if self.sensor_mode != "TACTICAL" else COLOR_HUD_CYAN
+            self._render_hud_symbology(frame, hud_color)
+            self._render_tactical_radar(frame, hud_color)
+            self._render_hud_banners(frame, hud_color)
+        else:
+            # Minimal subtle status badge when HUD is OFF
+            cv2.putText(
+                frame,
+                "[H] HUD: OFF (PRESS H TO ACTIVATE MIL-STD HUD)",
+                (24, 32),
+                cv2.FONT_HERSHEY_PLAIN,
+                0.9,
+                (120, 140, 160),
+                1,
+                cv2.LINE_AA,
+            )
 
         # 7. Render Dual-Viewport Split-Screen Overlay (matching Web Cockpit)
         if self.camera_mode == "SPLIT_SLAM":
@@ -976,6 +986,20 @@ class TacticalDesktopHUD:
             cv2.LINE_AA
         )
 
+        # Autonomous Retreat / Landing Flight Mode Banner Callout
+        if drone.flight_mode == FlightMode.RTL:
+            cv2.rectangle(frame, (cx - 165, 14), (cx + 165, 42), (0, 140, 255), -1)
+            cv2.putText(frame, "AUTONOMOUS RETREAT // RTL ACTIVE", (cx - 152, 33), cv2.FONT_HERSHEY_PLAIN, 1.05, (0, 0, 0), 2, cv2.LINE_AA)
+        elif drone.flight_mode == FlightMode.LANDING:
+            cv2.rectangle(frame, (cx - 165, 14), (cx + 165, 42), (255, 230, 0), -1)
+            cv2.putText(frame, "CONTROLLED DESCENT // LANDING", (cx - 148, 33), cv2.FONT_HERSHEY_PLAIN, 1.05, (0, 0, 0), 2, cv2.LINE_AA)
+        elif drone.flight_mode == FlightMode.LANDED:
+            cv2.rectangle(frame, (cx - 165, 14), (cx + 165, 42), (100, 255, 0), -1)
+            cv2.putText(frame, "RECOVERY COMPLETE // LANDED", (cx - 142, 33), cv2.FONT_HERSHEY_PLAIN, 1.05, (0, 0, 0), 2, cv2.LINE_AA)
+        elif drone.flight_mode == FlightMode.EMERGENCY_LAND:
+            cv2.rectangle(frame, (cx - 165, 14), (cx + 165, 42), (50, 20, 255), -1)
+            cv2.putText(frame, "EMERGENCY DESCENT // CRITICAL BAT", (cx - 155, 33), cv2.FONT_HERSHEY_PLAIN, 1.05, (255, 255, 255), 2, cv2.LINE_AA)
+
         # NVIDIA GPU Hardware Acceleration & Telemetry Badge
         gpu = self.gpu_engine.get_telemetry()
         gpu_name = gpu["name"].replace("NVIDIA GeForce ", "").replace(" Laptop GPU", "")
@@ -1078,7 +1102,7 @@ class TacticalDesktopHUD:
         # Bottom Keybinds Hint Strip
         cv2.putText(
             frame,
-            "[1-9/TAB] SELECT UAV  [C] CAMERA  [T] FLIR/NVG  [M] MESH  [SPACE] PAUSE  [R] RESET  [S] SNAP  [H] HELP  [Q] QUIT",
+            "[1-9/TAB] SELECT UAV  [C] CAM  [T] SENSOR  [M] MESH  [H] TOGGLE HUD  [SPACE] PAUSE  [R] RESET  [?] HELP  [Q] QUIT",
             (cx - 430, self.height - 8),
             cv2.FONT_HERSHEY_PLAIN,
             0.75,
@@ -1106,15 +1130,16 @@ class TacticalDesktopHUD:
             "   [C]           : Switch Camera (FPV Chase, FPV Nose, Tactical Top, GCS Mast, Orbit)",
             "   [T]           : Cycle Sensor (Tactical Cyan, FLIR Thermal White-Hot, NVG Night Vision)",
             "   [M]           : Toggle 3D Multi-Hop RF Link Vectors",
+            "   [H]           : Toggle Military HUD Overlay On / Off",
             "",
             "3. SIMULATION CONTROLS:",
             "   [SPACE] / [P] : Pause / Resume Swarm Simulation",
             "   [R]           : Reset Simulation State",
             "   [S]           : Save High-Resolution HUD PNG Snapshot",
-            "   [H]           : Toggle this Operator Manual",
+            "   [?] / [/]     : Toggle this Operator Manual",
             "   [Q] / [ESC]   : Exit Desktop HUD",
             "",
-            "Press [H] to close this manual and resume tactical HUD view.",
+            "Press [?] to close this manual and resume 3D view.",
         ]
         y = 135
         for line in lines:
@@ -1240,7 +1265,7 @@ class TacticalDesktopHUD:
         print(f"[+] Hardware Acceleration: ACTIVE ({gpu_stat['name']} - {gpu_stat['accel']})")
         print(f"[+] GPU Metrics: {gpu_stat['temp_c']}C | {gpu_stat['power_w']}W | VRAM {gpu_stat['vram_used_mb']}/{gpu_stat['vram_total_mb']} MB")
         print("[+] Native Desktop Window is Live (No Browser Needed).")
-        print("[*] Hotkeys: [1-9] Select UAV | [C] Cam | [T] Sensor | [M] Mesh | [SPACE] Pause | [Q] Quit")
+        print("[*] Hotkeys: [1-9] Select UAV | [C] Cam | [T] Sensor | [M] Mesh | [H] Toggle HUD | [?] Help | [Q] Quit")
         print("=" * 72)
 
         dt = self.sim.config.dt
@@ -1285,6 +1310,8 @@ class TacticalDesktopHUD:
                 self.sim = create_default_simulation()
                 self.sim_time = 0.0
             elif key in [ord('h'), ord('H')]:
+                self.show_hud = not self.show_hud
+            elif key in [ord('?'), ord('/')]:
                 self.show_help = not self.show_help
             elif key in [ord('s'), ord('S')]:
                 timestamp = int(time.time())

@@ -17,12 +17,12 @@ let isPaused = false;
 let selectedDroneId = "UAV_1";
 let latestTelemetry = null;
 let activeCamMode = "orbit";
-let activeViewportMode = "split";
+let activeViewportMode = "theater";
 let isInvestorMode = false;
 let investorStartTime = 0;
 let lastChartUpdate = 0;
 let isInspectPanelOpen = false;
-let isHudEnabled = true;
+let isHudEnabled = false;
 
 // Viewport 1: Theater Reality
 let sceneTheater, cameraTheater, rendererTheater, controlsTheater;
@@ -73,6 +73,7 @@ document.addEventListener("DOMContentLoaded", () => {
     try { connectWebSocket(); } catch (e) { console.error("connectWebSocket error:", e); }
     try { initUIControls(); } catch (e) { console.error("initUIControls error:", e); }
     try { initScientificCharts(); } catch (e) { console.error("initScientificCharts error:", e); }
+    try { setViewportMode("theater"); } catch (e) { console.error("setViewportMode error:", e); }
 });
 
 // ============================================================================
@@ -1629,6 +1630,32 @@ function updateHUD(telemetry) {
         elFleetCount.textContent = `${drones.length} UNITS`;
     }
 
+    // Recovery & Retreat Status Badge
+    const badgeRecovery = document.getElementById("badge-recovery");
+    if (badgeRecovery) {
+        const retreatingCount = drones.filter(d => d.flight_mode === "RTL" || d.flight_mode === "LANDING").length;
+        const landedCount = drones.filter(d => d.flight_mode === "LANDED").length;
+        if (landedCount > 0 && retreatingCount === 0) {
+            badgeRecovery.textContent = `${landedCount} LANDED (SAFE)`;
+            badgeRecovery.className = "badge badge-active";
+            badgeRecovery.style.color = "#00ff66";
+            badgeRecovery.style.borderColor = "#00ff66";
+            badgeRecovery.style.background = "rgba(0, 255, 102, 0.12)";
+        } else if (retreatingCount > 0) {
+            badgeRecovery.textContent = `${retreatingCount} RETREATING (RTL)`;
+            badgeRecovery.className = "badge badge-active";
+            badgeRecovery.style.color = "#ffd600";
+            badgeRecovery.style.borderColor = "#ffd600";
+            badgeRecovery.style.background = "rgba(255, 214, 0, 0.12)";
+        } else {
+            badgeRecovery.textContent = "FLEET ACTIVE";
+            badgeRecovery.className = "badge badge-active";
+            badgeRecovery.style.color = "#00e5ff";
+            badgeRecovery.style.borderColor = "#00e5ff";
+            badgeRecovery.style.background = "rgba(0, 229, 255, 0.12)";
+        }
+    }
+
     const badgeGpu = document.getElementById("badge-gpu-hw");
     if (badgeGpu) {
         const activeGpu = typeof getActiveGPUInfo === "function" ? getActiveGPUInfo() : { isNvidia: true, cleanName: "NVIDIA RTX 4050" };
@@ -1654,14 +1681,38 @@ function updateHUD(telemetry) {
         const card = document.createElement("div");
         card.className = `drone-card ${d.role.toLowerCase()} ${selectedDroneId === d.id ? 'selected' : ''}`;
         card.addEventListener("click", () => selectDrone(d.id));
+
+        const isRtl = d.flight_mode === "RTL" || d.flight_mode === "LANDING";
+        const isLanded = d.flight_mode === "LANDED";
+        const isEmergency = d.flight_mode === "EMERGENCY_LAND";
+        let modeColor = "text-cyan";
+        let modeLabel = d.flight_mode;
+        if (isLanded) {
+            modeColor = "text-neon-green";
+            modeLabel = "LANDED (SAFE)";
+        } else if (isRtl) {
+            modeColor = "text-neon-yellow";
+            modeLabel = d.flight_mode === "RTL" ? "RTL (RETREAT)" : "LANDING";
+        } else if (isEmergency) {
+            modeColor = "text-red";
+            modeLabel = "EMERGENCY LAND";
+        }
+
+        const rtlBtn = (!isLanded && d.flight_mode !== "IDLE") ? `
+            <button class="btn btn-sm btn-outline text-neon-yellow" style="padding: 1px 5px; font-size: 8px; margin-left: 6px; border-color: rgba(255,214,0,0.5);" title="Command Drone to Return-to-Launch" onclick="event.stopPropagation(); triggerDroneRTL('${d.id}')">RTL</button>
+        ` : '';
+
         card.innerHTML = `
             <div class="drone-header">
                 <span>${d.id} [${d.role}]</span>
-                <span class="text-cyan">${d.flight_mode}</span>
+                <div style="display: flex; align-items: center;">
+                    <span class="${modeColor}">${modeLabel}</span>
+                    ${rtlBtn}
+                </div>
             </div>
             <div class="drone-stats">
                 <div>ALT: <span>${d.position[2].toFixed(1)}m</span></div>
-                <div>BAT: <span>${d.battery_pct.toFixed(0)}%</span></div>
+                <div>BAT: <span class="${d.battery_pct < 20 ? 'text-red' : (d.battery_pct < 35 ? 'text-neon-yellow' : '')}">${d.battery_pct.toFixed(0)}%</span></div>
                 <div>SPD: <span>${Math.hypot(d.velocity[0], d.velocity[1]).toFixed(1)} m/s</span></div>
                 <div>POI: <span>${d.assigned_poi_id || 'NONE'}</span></div>
             </div>
@@ -2083,6 +2134,45 @@ function connectWebSocket() {
 }
 
 // ============================================================================
+// Autonomous Retreat (RTL) Command Senders
+// ============================================================================
+
+function triggerFleetRetreat() {
+    playTacticalSound("alarm");
+    const payload = { command: "retreat", cmd: "retreat" };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+    fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    }).catch(() => {});
+
+    const badgeRecovery = document.getElementById("badge-recovery");
+    if (badgeRecovery) {
+        badgeRecovery.textContent = "RETREAT ORDERED";
+        badgeRecovery.style.color = "#ffd600";
+        badgeRecovery.style.borderColor = "#ffd600";
+    }
+}
+
+function triggerDroneRTL(droneId) {
+    playTacticalSound("alarm");
+    const payload = { command: "retreat", cmd: "retreat", drone_id: droneId };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+    fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    }).catch(() => {});
+}
+window.triggerFleetRetreat = triggerFleetRetreat;
+window.triggerDroneRTL = triggerDroneRTL;
+
+// ============================================================================
 // UI Event Handlers & View Modes
 // ============================================================================
 
@@ -2114,6 +2204,14 @@ function initUIControls() {
             socket.send(JSON.stringify({ command: "reset" }));
         }
     });
+
+    // Fleet-Wide Autonomous Retreat (RTL)
+    const btnRetreat = document.getElementById("btn-retreat");
+    if (btnRetreat) {
+        btnRetreat.addEventListener("click", () => {
+            triggerFleetRetreat();
+        });
+    }
 
     // Speed Control
     const selectSpeed = document.getElementById("select-speed");
@@ -2463,9 +2561,9 @@ function handleInvestorChoreography() {
             controlsTheater.target.lerp(uavMesh.position, 0.08);
         }
     } else if (elapsedSec < 60) {
-        // Phase 4: Mission Accomplished & Survivor Localization
-        if (titleEl) titleEl.textContent = "PHASE 4: DISASTER SITES LOCALIZED & CONTINUOUS TELEMETRY SECURED";
-        if (descEl) descEl.textContent = "Multi-hop FANET delivers critical sensor payloads to GCS with 0% packet loss and 8.5ms latency across 700m theater.";
+        // Phase 4: Autonomous Swarm Recovery & Precision RTL Landing
+        if (titleEl) titleEl.textContent = "PHASE 4: AUTONOMOUS RECOVERY & RETURN-TO-LAUNCH (RTL)";
+        if (descEl) descEl.textContent = "Upon completing disaster surveillance or reaching low-battery thresholds, drones execute deconflicted corridor retreat and controlled touchdown on recovery pads.";
 
         cameraTheater.position.lerp(new THREE.Vector3(0, -340, 210), 0.04);
         controlsTheater.target.lerp(new THREE.Vector3(0, 0, 20), 0.04);
@@ -2579,6 +2677,49 @@ function renderMilitaryHUD() {
     const gpuColor = activeGpu.isNvidia ? COLOR_NVIDIA : (activeGpu.isAmd ? COLOR_YELLOW : COLOR_CYAN);
     ctx.fillStyle = gpuColor;
     ctx.fillText(`${activeGpu.cleanName} [${activeGpu.isNvidia ? "NVIDIA DISCRETE" : "INT"}] | ${gpu.temp_c || 50}°C | ${gpuPwr} | VRAM ${gpu.vram_used_mb || 291}MB | CUDA [ACTIVE]`, hudInfoX, hudInfoY + 32);
+
+    // Autonomous Retreat / Recovery Status Banner Callout
+    if (drone.flight_mode === "RTL") {
+        ctx.fillStyle = "rgba(255, 170, 0, 0.28)";
+        ctx.fillRect(cx - 180, 72, 360, 24);
+        ctx.strokeStyle = COLOR_YELLOW;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 180, 72, 360, 24);
+        ctx.font = "bold 11px 'Consolas', monospace";
+        ctx.fillStyle = COLOR_YELLOW;
+        ctx.textAlign = "center";
+        ctx.fillText("AUTONOMOUS RETREAT // RTL CORRIDOR ACTIVE", cx, 88);
+    } else if (drone.flight_mode === "LANDING") {
+        ctx.fillStyle = "rgba(0, 229, 255, 0.28)";
+        ctx.fillRect(cx - 180, 72, 360, 24);
+        ctx.strokeStyle = COLOR_CYAN;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 180, 72, 360, 24);
+        ctx.font = "bold 11px 'Consolas', monospace";
+        ctx.fillStyle = COLOR_CYAN;
+        ctx.textAlign = "center";
+        ctx.fillText("CONTROLLED DESCENT // APPROACHING RECOVERY PAD", cx, 88);
+    } else if (drone.flight_mode === "LANDED") {
+        ctx.fillStyle = "rgba(0, 255, 102, 0.28)";
+        ctx.fillRect(cx - 180, 72, 360, 24);
+        ctx.strokeStyle = COLOR_GREEN;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 180, 72, 360, 24);
+        ctx.font = "bold 11px 'Consolas', monospace";
+        ctx.fillStyle = COLOR_GREEN;
+        ctx.textAlign = "center";
+        ctx.fillText("RECOVERY COMPLETE // ENGINES SAFE & SHUTDOWN", cx, 88);
+    } else if (drone.flight_mode === "EMERGENCY_LAND") {
+        ctx.fillStyle = "rgba(255, 23, 68, 0.38)";
+        ctx.fillRect(cx - 180, 72, 360, 24);
+        ctx.strokeStyle = COLOR_RED;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 180, 72, 360, 24);
+        ctx.font = "bold 11px 'Consolas', monospace";
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.fillText("FAILSAFE DESCENT // CRITICAL BATTERY", cx, 88);
+    }
 
     // 2. Boresight Reference Waterline Crosshair (_o_)
     ctx.strokeStyle = COLOR_CYAN;

@@ -72,6 +72,8 @@ class Drone:
         self.is_transmitting: bool = False
         self.dwell_time: float = 0.0
         self.obstacles: List[Any] = []
+        self.home_position: np.ndarray = self._initial_pos.copy()
+        self.recovery_pad: Optional[np.ndarray] = None
 
         # Physical constants
         self.g = 9.80665
@@ -107,6 +109,38 @@ class Drone:
         """Returns current target waypoint or None."""
         return self.target_position.copy() if self.target_position is not None else None
 
+    def set_home_position(self, pos: Union[np.ndarray, Sequence[float]]) -> None:
+        """Sets designated Return-to-Launch (RTL) home position."""
+        self.home_position = np.array(pos, dtype=np.float64)
+
+    def set_recovery_pad(self, pos: Union[np.ndarray, Sequence[float]]) -> None:
+        """Sets assigned recovery / landing pad setpoint."""
+        self.recovery_pad = np.array(pos, dtype=np.float64)
+
+    def get_home_position(self) -> np.ndarray:
+        """Returns active recovery pad or home position."""
+        if self.recovery_pad is not None:
+            return self.recovery_pad.copy()
+        return self.home_position.copy()
+
+    def trigger_retreat(
+        self,
+        recovery_pad: Optional[Union[np.ndarray, Sequence[float]]] = None,
+        cruise_altitude: float = 55.0,
+    ) -> None:
+        """
+        Commands autonomous retreat (RTH/RTL) towards recovery pad.
+        Transitions mode to RTL and establishes safe Tier 3 obstacle clearance altitude.
+        """
+        if recovery_pad is not None:
+            self.set_recovery_pad(recovery_pad)
+        pad = self.get_home_position()
+        self.set_flight_mode(FlightMode.RTL)
+        self.set_target_waypoint(np.array([pad[0], pad[1], float(cruise_altitude)], dtype=np.float64))
+        self.assigned_poi_id = None
+        self.is_transmitting = False
+        self.dwell_time = 0.0
+
     def set_flight_mode(self, mode: Union[FlightMode, str]) -> None:
         """Updates autonomous flight mode."""
         if isinstance(mode, FlightMode):
@@ -128,6 +162,8 @@ class Drone:
         self.assigned_poi_id = None
         self.is_transmitting = False
         self.dwell_time = 0.0
+        self.recovery_pad = None
+        self.home_position = self._initial_pos.copy()
         self.battery.reset()
         self.sensor_suite = SensorSuite()
         self.ekf = DroneEKF(initial_position=self.position)
@@ -386,6 +422,17 @@ class Drone:
         obs_list = obstacles if obstacles is not None else getattr(self, "obstacles", [])
         peer_list = peers if peers is not None else []
 
+        if self.flight_mode in (FlightMode.LANDING, FlightMode.EMERGENCY_LAND):
+            target = self.target_position if self.target_position is not None else np.array([self.position[0], self.position[1], 0.0], dtype=np.float64)
+            err_xy = target[:2] - self.position[:2]
+            f_xy = err_xy * 1.5 - self.velocity[:2] * 1.2 * self.limits.mass_kg
+            v_z_des = -min(1.5, max(0.4, 0.4 * self.position[2]))
+            f_z = 8.0 * (v_z_des - self.velocity[2]) * self.limits.mass_kg
+            f_att = np.array([f_xy[0], f_xy[1], f_z], dtype=np.float64)
+            f_obs = self.compute_obstacle_repulsion(obs_list)
+            f_sep, f_align, f_coh = self.compute_flocking_forces(peer_list)
+            return f_att + f_obs + f_sep
+
         f_att = self.compute_attractive_force()
 
         # Prioritized Safety Attenuation: Attenuate attractive force along blocked paths
@@ -477,6 +524,8 @@ class Drone:
         if self.flight_mode in (FlightMode.IDLE, FlightMode.LANDED):
             self.velocity[:] = 0.0
             self.acceleration[:] = 0.0
+            if self.flight_mode == FlightMode.LANDED:
+                self.rotor_speeds[:] = 0.0
             self.battery.step(dt, speed=0.0, accel=0.0, is_transmitting=False, is_surveying=False)
             return
 
@@ -517,6 +566,19 @@ class Drone:
             self.position[2] = 0.0
             self.velocity[2] = max(0.0, float(self.velocity[2]))
             self.acceleration[2] = max(0.0, float(self.acceleration[2]))
+
+        # Touchdown detection for landing flight modes
+        if self.flight_mode in (FlightMode.LANDING, FlightMode.EMERGENCY_LAND):
+            if self.position[2] <= 0.25 and abs(float(self.velocity[2])) <= 1.0:
+                self.position[2] = 0.0
+                self.velocity[:] = 0.0
+                self.acceleration[:] = 0.0
+                self.rotor_speeds[:] = 0.0
+                self.set_flight_mode(FlightMode.LANDED)
+                self.target_position = None
+                self.assigned_poi_id = None
+                self.is_transmitting = False
+                return
 
         # 5. Hard Obstacle Surface Collision Clamping
         for obs in obs_list:

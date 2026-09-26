@@ -275,6 +275,8 @@ class SimulationServer:
                         "total_pois": total_pois_count,
                         "mapped_pct": mapping_metrics.get("coverage_pct", 0.0),
                         "active_relays": sum(1 for d in drones_list if d.get("role") == "RELAY"),
+                        "retreating_drones": sum(1 for d in drones_list if d.get("flight_mode") in ("RTL", "LANDING")),
+                        "landed_drones": sum(1 for d in drones_list if d.get("flight_mode") == "LANDED"),
                         "throughput_kbps": round(float(len(snapshot.packets) * 14.5 + 28.0), 1),
                     }
 
@@ -399,8 +401,8 @@ async def export_telemetry():
 
 @app.post("/api/control")
 async def post_control(payload: Dict[str, Any]):
-    """Handle HUD commands: pause, resume, reset, speed, focus drone."""
-    cmd = payload.get("command")
+    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat."""
+    cmd = payload.get("command") or payload.get("cmd")
     if cmd == "pause":
         server_manager.is_running = False
     elif cmd == "resume":
@@ -413,6 +415,12 @@ async def post_control(payload: Dict[str, Any]):
         drone_id = str(payload.get("drone_id", "UAV_1"))
         if drone_id in server_manager.sim.drones:
             server_manager.focus_drone_id = drone_id
+    elif cmd in ("retreat", "rtl"):
+        drone_id = payload.get("drone_id")
+        if drone_id and drone_id in server_manager.sim.drones:
+            server_manager.sim.trigger_drone_retreat(drone_id)
+        else:
+            server_manager.sim.trigger_fleet_retreat()
     return JSONResponse({
         "status": "ok",
         "running": server_manager.is_running,
@@ -430,7 +438,7 @@ async def websocket_endpoint(websocket: WebSocket):
             msg = await websocket.receive_text()
             try:
                 data = json.loads(msg)
-                cmd = data.get("command")
+                cmd = data.get("command") or data.get("cmd")
                 if cmd == "pause":
                     server_manager.is_running = False
                 elif cmd == "resume":
@@ -443,6 +451,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     drone_id = str(data.get("drone_id", "UAV_1"))
                     if drone_id in server_manager.sim.drones:
                         server_manager.focus_drone_id = drone_id
+                elif cmd in ("retreat", "rtl"):
+                    drone_id = data.get("drone_id")
+                    if drone_id and drone_id in server_manager.sim.drones:
+                        server_manager.sim.trigger_drone_retreat(drone_id)
+                    else:
+                        server_manager.sim.trigger_fleet_retreat()
             except Exception:
                 pass
     except WebSocketDisconnect:

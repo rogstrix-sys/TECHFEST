@@ -13,7 +13,7 @@
 </head>
 <body>
     <!-- Dual-Viewport Split-Screen Canvas Container -->
-    <div id="viewports-wrapper" class="mode-split">
+    <div id="viewports-wrapper" class="mode-theater">
         <!-- Viewport 1: External Theater Reality -->
         <div id="viewport-theater" class="viewport-pane">
             <div class="viewport-header-badge">
@@ -79,6 +79,10 @@
                 <span class="metric-val text-neon-green" id="metric-survey-rate">14,200 m²/m</span>
             </div>
             <div class="metric-card">
+                <span class="metric-label">RECOVERY STATUS</span>
+                <span class="badge badge-active" id="badge-recovery">0 RETREATING</span>
+            </div>
+            <div class="metric-card">
                 <span class="metric-label">MESH STATUS</span>
                 <span class="badge badge-active" id="badge-network">16 NODES MESH</span>
             </div>
@@ -92,7 +96,7 @@
             <!-- Investor Demo Button -->
             <button id="btn-investor" class="btn btn-investor">★ INVESTOR DEMO</button>
             <!-- Military HUD Overlay Toggle -->
-            <button id="btn-toggle-hud" class="btn btn-outline text-neon-green">HUD: ON</button>
+            <button id="btn-toggle-hud" class="btn btn-outline text-dim">HUD: OFF</button>
             <!-- Telemetry Inspector Panel Toggle -->
             <button id="btn-toggle-telemetry" class="btn btn-outline text-cyan">TELEMETRY</button>
             <!-- Audio Synthesis Toggle -->
@@ -103,14 +107,15 @@
             <button id="btn-toggle-analytics" class="btn btn-outline text-purple">ANALYTICS</button>
             <!-- Viewport Mode Switcher -->
             <div class="view-mode-group">
-                <button class="btn btn-sm btn-mode active" data-mode="split">SPLIT 50/50</button>
-                <button class="btn btn-sm btn-mode" data-mode="theater">THEATER</button>
+                <button class="btn btn-sm btn-mode" data-mode="split">SPLIT 50/50</button>
+                <button class="btn btn-sm btn-mode active" data-mode="theater">THEATER</button>
                 <button class="btn btn-sm btn-mode" data-mode="slam">SLAM</button>
                 <button class="btn btn-sm btn-mode" data-mode="pip">PiP</button>
             </div>
             <!-- Simulation Controls -->
             <button id="btn-pause" class="btn btn-outline">PAUSE</button>
             <button id="btn-reset" class="btn btn-outline">RESET</button>
+            <button id="btn-retreat" class="btn btn-outline text-neon-yellow" title="Command Autonomous Fleet Return-to-Launch (RTL)">RETREAT ALL (RTL)</button>
             <button id="btn-export-csv" class="btn btn-outline text-neon-yellow">EXPORT CSV</button>
             <select id="select-speed" class="select-control">
                 <option value="1.0">1.0x Real-Time</option>

@@ -122,3 +122,16 @@ class TestTacticalDesktopHUD:
 
         hud.on_mouse(10, 150, 80, -120, None)
         assert hud.orbit_dist > 4.0
+
+    def test_hud_toggle_state(self):
+        hud = TacticalDesktopHUD(width=1280, height=720)
+        # Default state must be HUD OFF
+        assert hud.show_hud is False
+        frame_hud_off = hud.render_frame()
+        assert frame_hud_off.shape == (720, 1280, 3)
+
+        # Toggle HUD ON
+        hud.show_hud = True
+        frame_hud_on = hud.render_frame()
+        assert frame_hud_on.shape == (720, 1280, 3)
+
