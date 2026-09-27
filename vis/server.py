@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional, Set
 import numpy as np
 
@@ -80,7 +81,7 @@ def create_default_simulation() -> SwarmSimulationCore:
         enable_downwash=True,
         enable_vsm_relays=True,
         enable_weather=True,
-        wind_config=WindConfig(mean_speed_mps=4.0, direction_deg=45.0, turbulence_intensity="MODERATE"),
+        wind_config=WindConfig(mean_speed_mps=5.5, direction_deg=45.0, turbulence_intensity="MODERATE", gust_probability=0.03, gust_magnitude_mps=6.0),
     )
     sim = SwarmSimulationCore(config=config)
 
@@ -148,10 +149,10 @@ def create_default_simulation() -> SwarmSimulationCore:
         ("UAV_7", DroneRole.SURVEY, [65.0, -240.0, 0.0]),
         ("UAV_8", DroneRole.SURVEY, [90.0, -240.0, 0.0]),
         # Elevated High-Altitude Multi-Hop Relays (70-90m altitude corridor)
-        ("RELAY_1", DroneRole.RELAY, [-40.0, -180.0, 0.0]),
-        ("RELAY_2", DroneRole.RELAY, [40.0, -180.0, 0.0]),
-        ("RELAY_3", DroneRole.RELAY, [-100.0, -80.0, 0.0]),
-        ("RELAY_4", DroneRole.RELAY, [100.0, -80.0, 0.0]),
+        ("RELAY_1", DroneRole.RELAY, [-60.0, -200.0, 0.0]),
+        ("RELAY_2", DroneRole.RELAY, [-20.0, -200.0, 0.0]),
+        ("RELAY_3", DroneRole.RELAY, [20.0, -200.0, 0.0]),
+        ("RELAY_4", DroneRole.RELAY, [60.0, -200.0, 0.0]),
         # Rapid Reconnaissance Scouts
         ("SCOUT_1", DroneRole.SURVEY, [-130.0, -220.0, 0.0]),
         ("SCOUT_2", DroneRole.SURVEY, [130.0, -220.0, 0.0]),
@@ -183,10 +184,11 @@ class SimulationServer:
 
         # Autonomous SLAM & LiDAR Perception Engine
         self.lidar = LiDARScanner(
-            max_range_m=55.0,
+            max_range_m=75.0,
             horizontal_fov_deg=360.0,
-            horizontal_resolution_deg=18.0,  # 20 azimuth rays
-            vertical_channels=6,             # 6 elevation rings
+            horizontal_resolution_deg=6.0,   # 60 azimuth beams per ring
+            vertical_fov_deg=(-50.0, 15.0),  # -50 deg downward ground look to +15 deg upward
+            vertical_channels=16,            # 16 elevation rings (960 rays total)
             range_noise_std_m=0.03
         )
         self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
@@ -223,10 +225,10 @@ class SimulationServer:
                             d_dict["pitch_deg"] = round(float(np.degrees(att[1])), 1)
                             d_dict["yaw_deg"] = round(float(np.degrees(att[2])) % 360.0, 1)
 
-                    # 2. Real-time LiDAR Sweep and Occupancy Grid Integration
+                    # 2. Collaborative Multi-UAV Swarm LiDAR Sweep and SLAM Integration
                     focus_drone = self.sim.drones.get(self.focus_drone_id) or next(iter(self.sim.drones.values()), None)
                     if focus_drone is not None:
-                        # Execute LiDAR scan for focus drone
+                        # Execute high-resolution LiDAR scan for focus drone
                         scan = self.lidar.scan(
                             drone_id=focus_drone.id,
                             position=focus_drone.position,
@@ -234,10 +236,7 @@ class SimulationServer:
                             obstacles=self.sim.obstacles,
                             sim_time=snapshot.sim_time,
                         )
-                        # Insert into 3D occupancy voxel grid every 2 ticks
-                        if self.step_count % 2 == 0:
-                            self.voxel_map.insert_scan(scan)
-
+                        self.voxel_map.insert_scan(scan)
                         data["lidar_scan"] = scan.to_dict()
 
                         # Compute Khatib APF Guidance Vectors for Autonomous Viewport
@@ -254,6 +253,27 @@ class SimulationServer:
                             "mag_net": round(float(np.linalg.norm(f_net)), 1),
                             "target": [round(float(c), 2) for c in focus_drone.target_position] if focus_drone.target_position is not None else None,
                         }
+
+                    # Swarm Collaborative SLAM: Scan 3 active peer drones each tick in round-robin
+                    active_peers = [
+                        d for d in self.sim.drones.values()
+                        if d.id != (focus_drone.id if focus_drone else "")
+                        and d.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.RTL)
+                        and float(d.position[2]) > 2.0
+                    ]
+                    if active_peers:
+                        batch_k = min(3, len(active_peers))
+                        offset = (self.step_count * batch_k) % len(active_peers)
+                        sweep_batch = (active_peers + active_peers)[offset : offset + batch_k]
+                        for peer in sweep_batch:
+                            p_scan = self.lidar.scan(
+                                drone_id=peer.id,
+                                position=peer.position,
+                                attitude=peer.attitude,
+                                obstacles=self.sim.obstacles,
+                                sim_time=snapshot.sim_time,
+                            )
+                            self.voxel_map.insert_scan(p_scan)
 
                     # 3. Stream 3D Occupied Voxels & SLAM Metrics
                     data["occupied_voxels"] = self.voxel_map.get_occupied_voxels(max_count=250)
@@ -411,6 +431,120 @@ async def export_telemetry():
     )
 
 
+@app.get("/api/export_debrief")
+async def export_debrief():
+    """Compiles and exports the complete executive mission debrief report."""
+    sim = server_manager.sim
+    data = sim.to_dict()
+
+    pois = data.get("pois", [])
+    total_pois = len(pois)
+    cleared_pois = sum(1 for p in pois if p.get("is_completed", False))
+
+    survivors_data = data.get("survivors") or {}
+    located_survivors = survivors_data.get("located_count", 0) if isinstance(survivors_data, dict) else 0
+    total_survivors = survivors_data.get("total_count", 0) if isinstance(survivors_data, dict) else 0
+
+    drones = data.get("drones", [])
+    sim_t = float(data.get("sim_time", 0.0))
+    total_energy_wh = sum(
+        float(d.get("power_w", 195.0)) * (sim_t / 3600.0)
+        for d in drones
+    )
+
+    metrics = data.get("metrics", {})
+    pdr = metrics.get("pdr", 0.98)
+    avg_latency = metrics.get("avg_latency_ms", 15.0)
+
+    debrief = {
+        "mission_title": "UAV-X 16-Drone Swarm Disaster Reconnaissance & FANET Relay",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        "mission_duration_s": round(sim_t, 1),
+        "mission_time_budget_s": 300.0,
+        "budget_compliance": "WITHIN_BUDGET" if sim_t <= 300.0 else "TIME_EXCEEDED",
+        "disaster_sites_summary": {
+            "total_sites": total_pois,
+            "cleared_sites": cleared_pois,
+            "completion_pct": round(cleared_pois / max(1, total_pois) * 100.0, 1),
+            "priority_breakdown": {
+                "critical": sum(1 for p in pois if str(p.get("priority")).upper() == "CRITICAL" and p.get("is_completed")),
+                "high": sum(1 for p in pois if str(p.get("priority")).upper() == "HIGH" and p.get("is_completed")),
+                "medium": sum(1 for p in pois if str(p.get("priority")).upper() == "MEDIUM" and p.get("is_completed")),
+                "low": sum(1 for p in pois if str(p.get("priority")).upper() == "LOW" and p.get("is_completed")),
+            },
+        },
+        "search_and_rescue_summary": {
+            "total_survivors_estimated": total_survivors,
+            "survivors_located": located_survivors,
+            "recovery_rate_pct": round(located_survivors / max(1, total_survivors) * 100.0, 1) if total_survivors > 0 else 100.0,
+            "discovered_survivors": survivors_data.get("discovered_survivors", []) if isinstance(survivors_data, dict) else [],
+        },
+        "fleet_and_energy_summary": {
+            "fleet_size": len(drones),
+            "total_energy_consumed_wh": round(total_energy_wh, 2),
+            "avg_drone_power_w": round(total_energy_wh / max(0.001, sim_t / 3600.0) / max(1, len(drones)), 1) if sim_t > 0 else 195.0,
+            "charging_pad_turnarounds": sum(1 for pad in (data.get("charging_pads") or []) if pad.get("status") == "OCCUPIED"),
+        },
+        "network_and_telemetry_summary": {
+            "packet_delivery_ratio": pdr,
+            "avg_latency_ms": avg_latency,
+            "active_routes_count": len(data.get("active_routes", [])),
+            "mesh_health": "EXCELLENT" if pdr >= 0.95 else "DEGRADED",
+        },
+        "tactical_comms_log": data.get("tactical_comms") or [],
+    }
+    return JSONResponse(debrief)
+
+
+@app.get("/api/export_point_cloud")
+async def export_point_cloud(format: str = "ply"):
+    """
+    Export reconstructed 3D LiDAR point cloud.
+    Formats:
+    - 'ply': Stanford ASCII PLY format for CloudCompare, Blender, MeshLab.
+    - 'las': ASPRS LAS 1.2 Binary format for CloudCompare, QGIS, ArcGIS, PDAL.
+    """
+    fmt = format.lower()
+    if fmt == "las":
+        las_bytes = server_manager.voxel_map.export_point_cloud_las()
+        return Response(
+            content=las_bytes,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": "attachment; filename=UAVX_Disaster_PointCloud.las"}
+        )
+    ply_content = server_manager.voxel_map.export_point_cloud_ply()
+    return Response(
+        content=ply_content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": "attachment; filename=UAVX_Disaster_PointCloud.ply"}
+    )
+
+
+@app.post("/api/chaos_fault")
+async def post_chaos_fault(payload: Optional[Dict[str, Any]] = None):
+    """Inject dynamic hardware failure / flameout to test Swarm Self-Healing."""
+    target_id = payload.get("drone_id") if payload else None
+    victim_id = server_manager.sim.trigger_chaos_fault(target_drone_id=target_id)
+    return JSONResponse({
+        "status": "ok",
+        "victim_id": victim_id,
+        "message": f"Catastrophic fault injected on {victim_id}. Swarm self-healing engaged." if victim_id else "No eligible airborne drone available for fault injection."
+    })
+
+
+@app.post("/api/manual_control")
+async def post_manual_control(payload: Dict[str, Any]):
+    """Direct manual velocity override (WASD/Gamepad) for focus drone or specified drone."""
+    drone_id = payload.get("drone_id") or server_manager.focus_drone_id
+    vx = float(payload.get("vx", 0.0))
+    vy = float(payload.get("vy", 0.0))
+    vz = float(payload.get("vz", 0.0))
+    yaw_rate = float(payload.get("yaw_rate", 0.0))
+    enabled = bool(payload.get("enabled", True))
+    success = server_manager.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
+    return JSONResponse({"status": "ok" if success else "error", "drone_id": drone_id, "enabled": enabled})
+
+
 @app.post("/api/control")
 async def post_control(payload: Dict[str, Any]):
     """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat."""
@@ -433,6 +567,18 @@ async def post_control(payload: Dict[str, Any]):
             server_manager.sim.trigger_drone_retreat(drone_id)
         else:
             server_manager.sim.trigger_fleet_retreat()
+    elif cmd == "chaos_fault":
+        drone_id = payload.get("drone_id")
+        victim = server_manager.sim.trigger_chaos_fault(drone_id)
+        return JSONResponse({"status": "ok", "victim_id": victim})
+    elif cmd == "manual_control":
+        drone_id = payload.get("drone_id") or server_manager.focus_drone_id
+        vx = float(payload.get("vx", 0.0))
+        vy = float(payload.get("vy", 0.0))
+        vz = float(payload.get("vz", 0.0))
+        yaw_rate = float(payload.get("yaw_rate", 0.0))
+        enabled = bool(payload.get("enabled", True))
+        server_manager.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
     return JSONResponse({
         "status": "ok",
         "running": server_manager.is_running,
@@ -469,6 +615,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         server_manager.sim.trigger_drone_retreat(drone_id)
                     else:
                         server_manager.sim.trigger_fleet_retreat()
+                elif cmd == "chaos_fault":
+                    server_manager.sim.trigger_chaos_fault(data.get("drone_id"))
+                elif cmd == "manual_control":
+                    drone_id = data.get("drone_id") or server_manager.focus_drone_id
+                    vx = float(data.get("vx", 0.0))
+                    vy = float(data.get("vy", 0.0))
+                    vz = float(data.get("vz", 0.0))
+                    yaw_rate = float(data.get("yaw_rate", 0.0))
+                    enabled = bool(data.get("enabled", True))
+                    server_manager.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
             except Exception:
                 pass
     except WebSocketDisconnect:

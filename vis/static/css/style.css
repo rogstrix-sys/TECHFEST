@@ -1172,3 +1172,330 @@ body {
     }
 }
 
+/* ==========================================================================
+   Tactical Comms Chatter Banner, Feed Drawer & Executive Debrief Modal
+   ========================================================================== */
+
+/* Floating Subtitle Banner on Viewport */
+.hud-comms-ticker {
+    position: absolute;
+    bottom: 95px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(10, 16, 26, 0.88);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--neon-cyan);
+    border-radius: 6px;
+    padding: 8px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    z-index: 45;
+    box-shadow: 0 4px 20px rgba(0, 229, 255, 0.25);
+    font-family: var(--font-mono);
+    pointer-events: none;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.hud-comms-ticker.hidden {
+    opacity: 0;
+    transform: translateX(-50%) translateY(12px);
+    pointer-events: none;
+}
+
+.ticker-badge {
+    font-size: 10px;
+    font-weight: 800;
+    padding: 3px 7px;
+    border-radius: 4px;
+    background: rgba(0, 229, 255, 0.2);
+    color: var(--neon-cyan);
+    border: 1px solid var(--neon-cyan);
+    letter-spacing: 0.8px;
+}
+
+.ticker-text {
+    font-size: 13px;
+    font-weight: 600;
+    color: #ffffff;
+    letter-spacing: 0.5px;
+}
+
+/* Tactical Radio Comms Feed Drawer */
+.tactical-comms-panel {
+    position: absolute;
+    bottom: 85px;
+    right: 20px;
+    width: 390px;
+    max-height: 380px;
+    display: flex;
+    flex-direction: column;
+    z-index: 50;
+    border-color: rgba(0, 229, 255, 0.4);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    animation: fadeIn 0.2s ease-in-out;
+}
+
+.comms-log-list {
+    flex: 1;
+    overflow-y: auto;
+    max-height: 300px;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-family: var(--font-mono);
+}
+
+.comms-entry {
+    background: rgba(20, 32, 54, 0.7);
+    border-left: 3px solid var(--neon-cyan);
+    border-radius: 0 4px 4px 0;
+    padding: 6px 10px;
+    font-size: 11px;
+    line-height: 1.35;
+}
+
+.comms-entry.WARN {
+    border-left-color: var(--neon-yellow);
+}
+
+.comms-entry.CRITICAL {
+    border-left-color: var(--danger-red);
+}
+
+.comms-entry.SUCCESS {
+    border-left-color: var(--neon-green);
+}
+
+.comms-entry-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 2px;
+}
+
+.comms-entry-callsign {
+    font-weight: 800;
+    color: var(--neon-cyan);
+}
+
+.comms-entry.WARN .comms-entry-callsign {
+    color: var(--neon-yellow);
+}
+
+.comms-entry.CRITICAL .comms-entry-callsign {
+    color: var(--danger-red);
+}
+
+.comms-entry.SUCCESS .comms-entry-callsign {
+    color: var(--neon-green);
+}
+
+.comms-entry-time {
+    color: var(--text-muted);
+    font-size: 9px;
+}
+
+.comms-entry-body {
+    color: var(--text-primary);
+}
+
+/* Executive Mission Debrief Modal */
+@keyframes modalPopIn {
+    from {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1.0);
+    }
+}
+
+.debrief-modal,
+.debrief-modal.glass-panel {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 680px;
+    max-width: 95vw;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    z-index: 1000;
+    background: #070d18 !important;
+    backdrop-filter: blur(24px);
+    border: 1.5px solid var(--neon-green);
+    box-shadow: 0 16px 64px rgba(0, 0, 0, 0.98), 0 0 35px rgba(0, 255, 102, 0.35);
+    animation: modalPopIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    color: var(--neon-green);
+}
+
+.modal-body {
+    padding: 16px 20px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.debrief-section-title {
+    font-size: 12px;
+    font-weight: 800;
+    color: var(--neon-cyan);
+    margin: 12px 0 6px 0;
+    border-bottom: 1px dashed rgba(0, 229, 255, 0.3);
+    padding-bottom: 3px;
+}
+
+.debrief-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.debrief-kpi {
+    background: rgba(20, 32, 54, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 5px;
+    padding: 8px 10px;
+}
+
+.debrief-kpi .lbl {
+    font-size: 9px;
+    color: var(--text-muted);
+    display: block;
+    margin-bottom: 3px;
+}
+
+.debrief-kpi .val {
+    font-size: 14px;
+    font-weight: 800;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 12px 18px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* ==========================================================================
+   5 New Tactical Upgrades: Chaos, Night Ops, PLY Export, FPV, Drafting
+   ========================================================================== */
+
+.btn-chaos {
+    color: #ff3366 !important;
+    border-color: rgba(255, 51, 102, 0.4) !important;
+    background: rgba(255, 51, 102, 0.08) !important;
+}
+
+.btn-chaos:hover {
+    background: rgba(255, 51, 102, 0.25) !important;
+    border-color: #ff3366 !important;
+    box-shadow: 0 0 10px rgba(255, 51, 102, 0.5);
+}
+
+.btn-night.active {
+    background: rgba(255, 230, 0, 0.25) !important;
+    border-color: var(--neon-yellow) !important;
+    box-shadow: 0 0 10px rgba(255, 230, 0, 0.4);
+}
+
+.btn-manual-active {
+    background: rgba(0, 229, 255, 0.25) !important;
+    border-color: var(--neon-cyan) !important;
+    color: #fff !important;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+    animation: pulseCyan 1.5s infinite;
+}
+
+@keyframes pulseCyan {
+    0% { box-shadow: 0 0 4px rgba(0, 229, 255, 0.4); }
+    50% { box-shadow: 0 0 12px rgba(0, 229, 255, 0.8); }
+    100% { box-shadow: 0 0 4px rgba(0, 229, 255, 0.4); }
+}
+
+.flir-palette-selector {
+    display: inline-flex;
+    gap: 4px;
+    margin-left: 10px;
+    vertical-align: middle;
+}
+
+.btn-palette {
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #aaa;
+    font-family: var(--font-mono);
+    font-size: 8px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-palette:hover {
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.5);
+}
+
+.btn-palette.active {
+    background: rgba(255, 102, 0, 0.35);
+    border-color: #ff6600;
+    color: #fff;
+    box-shadow: 0 0 6px rgba(255, 102, 0, 0.6);
+}
+
+.drafting-badge {
+    background: rgba(0, 255, 157, 0.15);
+    border: 1px solid var(--neon-green);
+    color: var(--neon-green);
+    font-size: 8px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    letter-spacing: 0.5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.fault-badge {
+    background: rgba(255, 51, 102, 0.2);
+    border: 1px solid #ff3366;
+    color: #ff3366;
+    font-size: 8px;
+    font-weight: 800;
+    padding: 1px 4px;
+    border-radius: 3px;
+    animation: blinkFault 0.8s infinite alternate;
+}
+
+@keyframes blinkFault {
+    from { opacity: 0.6; }
+    to { opacity: 1.0; box-shadow: 0 0 8px #ff3366; }
+}
+
+
+

@@ -78,6 +78,14 @@ class Drone:
         self.comms_loss_duration: float = 0.0
         self._saved_task: Optional[Dict[str, Any]] = None
 
+        # Manual override, chaos fault, and aerodynamic formation drafting states
+        self.is_manual_override: bool = False
+        self.manual_vel_cmd: Optional[np.ndarray] = None
+        self.is_fault_injected: bool = False
+        self.is_drafting: bool = False
+        self.drafting_leader_id: Optional[str] = None
+        self.drafting_saving_pct: float = 0.0
+
         # Physical constants
         self.g = 9.80665
 
@@ -151,6 +159,29 @@ class Drone:
         else:
             self.flight_mode = FlightMode(str(mode).upper())
 
+    def set_manual_control(
+        self,
+        vx: float = 0.0,
+        vy: float = 0.0,
+        vz: float = 0.0,
+        yaw_rate: float = 0.0,
+        enabled: bool = True,
+    ) -> None:
+        """Enables or disables manual velocity override mode."""
+        self.is_manual_override = enabled
+        if enabled:
+            self.flight_mode = FlightMode.MANUAL
+            self.manual_vel_cmd = np.array([vx, vy, vz], dtype=np.float64)
+        else:
+            self.manual_vel_cmd = None
+            if self.flight_mode == FlightMode.MANUAL:
+                self.flight_mode = FlightMode.TRANSIT
+
+    def inject_fault(self) -> None:
+        """Injects catastrophic motor flameout fault into drone."""
+        self.is_fault_injected = True
+        self.flight_mode = FlightMode.EMERGENCY_LAND
+
     def reset(self) -> None:
         """Resets drone kinematic state and recharges battery."""
         self.position = self._initial_pos.copy()
@@ -170,6 +201,12 @@ class Drone:
         self.is_comms_loss_rtl = False
         self.comms_loss_duration = 0.0
         self._saved_task = None
+        self.is_manual_override = False
+        self.manual_vel_cmd = None
+        self.is_fault_injected = False
+        self.is_drafting = False
+        self.drafting_leader_id = None
+        self.drafting_saving_pct = 0.0
         self.battery.reset()
         self.sensor_suite = SensorSuite()
         self.ekf = DroneEKF(initial_position=self.position)
@@ -283,11 +320,24 @@ class Drone:
                 mag = min(mag_apf + mag_damp + mag_barrier, 300.0)
                 f_obs += mag * n_hat
 
-                # Lateral vortex circulatory force when approaching obstacle at speed to avoid head-on stagnation
-                if v_approach > 1.0:
-                    vortex = np.cross(n_hat, np.array([0.0, 0.0, 1.0]))
-                    if np.linalg.norm(vortex) > 1e-4:
-                        f_obs += (vortex / np.linalg.norm(vortex)) * 20.0
+                # Lateral tangential circulatory force to bypass obstacles without head-on stagnation
+                t_vec = np.array([-n_hat[1], n_hat[0], 0.0], dtype=np.float64)
+                t_norm = float(np.linalg.norm(t_vec))
+                if t_norm > 1e-4:
+                    t_hat = t_vec / t_norm
+                    if self.target_position is not None:
+                        to_target = self.target_position[:2] - self.position[:2]
+                        if float(np.dot(to_target, t_hat[:2])) < 0.0:
+                            t_hat = -t_hat
+                    mag_circ = 22.0 if v_approach <= 1.0 else 25.0
+                    f_obs += t_hat * mag_circ
+
+                # Vertical clearance lift when approaching obstacle with accessible rooftop
+                obs_top = getattr(obs, 'max_pt', getattr(obs, 'max_bound', None))
+                if obs_top is not None:
+                    dz_top = float(obs_top[2]) - float(self.position[2])
+                    if 0.0 < dz_top < 20.0:
+                        f_obs[2] += min(30.0, (20.0 - dz_top) * 2.0)
 
         return f_obs
 
@@ -407,7 +457,7 @@ class Drone:
         elif self.flight_mode == FlightMode.SURVEYING:
             return 25.0, 45.0  # Tier 2: PoI Inspection
         elif self.flight_mode in (FlightMode.TRANSIT, FlightMode.RTL):
-            return 50.0, 65.0  # Tier 3: High-speed Transit
+            return 50.0, 72.0  # Tier 3: High-speed Transit (safely clears 65m obstacles)
         elif self.flight_mode == FlightMode.RELAY:
             return 70.0, 90.0  # Tier 4: Elevated Relay Mesh
         return 0.0, 120.0
@@ -506,7 +556,15 @@ class Drone:
         Otherwise, commanded force is synthesized from active fields.
         """
         obs_list = obstacles if obstacles is not None else getattr(self, "obstacles", [])
-        if desired_accel is not None:
+        if self.is_fault_injected:
+            # Catastrophic motor failure / flameout: zero motor thrust, gravitational free-fall
+            cmd_force = np.array([0.0, 0.0, -self.limits.mass_kg * self.g], dtype=np.float64)
+        elif self.is_manual_override and self.manual_vel_cmd is not None:
+            # Human pilot direct velocity tracking mode
+            v_err = np.asarray(self.manual_vel_cmd, dtype=np.float64) - self.velocity
+            desired_a = np.clip(v_err * 6.0, -self.limits.max_accel, self.limits.max_accel)
+            cmd_force = desired_a * self.limits.mass_kg
+        elif desired_accel is not None:
             cmd_force = np.asarray(desired_accel, dtype=np.float64) * self.limits.mass_kg
         else:
             cmd_force = self.compute_total_force(obstacles=obs_list)
@@ -653,8 +711,9 @@ class Drone:
         if meas["baro"] is not None:
             self.ekf.update_baro(meas["baro"])
 
-        # 9. Battery State of Charge Depletion (Physics-based: airspeed, altitude & climb-rate)
+        # 9. Battery State of Charge Depletion (Physics-based: airspeed, altitude, climb-rate & formation drafting)
         speed = float(np.linalg.norm(self.velocity))
+        draft_frac = (self.drafting_saving_pct / 100.0) if self.is_drafting else 0.0
         self.battery.step(
             dt=dt,
             speed=speed,
@@ -663,6 +722,7 @@ class Drone:
             is_surveying=(self.flight_mode == FlightMode.SURVEYING),
             altitude=float(self.position[2]),
             climb_rate=float(self.velocity[2]),
+            drafting_factor=draft_frac,
         )
 
     def _update_attitude(self, dt: float) -> None:
@@ -721,4 +781,9 @@ class Drone:
             acceleration=self.acceleration.copy(),
             estimated_position=self.ekf.estimated_position,
             estimated_velocity=self.ekf.estimated_velocity,
+            is_manual_override=bool(self.is_manual_override),
+            is_fault_injected=bool(self.is_fault_injected),
+            is_drafting=bool(self.is_drafting),
+            drafting_leader_id=self.drafting_leader_id,
+            drafting_saving_pct=float(self.drafting_saving_pct),
         )

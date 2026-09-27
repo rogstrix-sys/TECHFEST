@@ -38,6 +38,20 @@ let washParticles = null;
 let raycasterTheater = new THREE.Raycaster();
 let mouseTheater = new THREE.Vector2();
 
+// Tactical Night Operations & Dynamic Lighting
+let isNightOps = false;
+let ambientLightTheater = null;
+let dirLightTheater = null;
+const droneSearchlights = [];
+
+// Multi-Palette Thermal FLIR
+let activeFlirPalette = "ironbow"; // "ironbow", "whitehot", "blackhot"
+
+// Manual FPV Controller Mode
+let isManualControlActive = false;
+const activeKeys = {};
+let lastManualSendTime = 0;
+
 // Viewport 2: Autonomous SLAM Perception
 let sceneSLAM, cameraSLAM, rendererSLAM, controlsSLAM;
 let slamDroneMesh = null;
@@ -115,9 +129,11 @@ function initTheaterViewport() {
 
     // 5. Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+    ambientLightTheater = ambientLight;
     sceneTheater.add(ambientLight);
 
     const dirLight = new THREE.DirectionalLight(0x00e5ff, 0.85);
+    dirLightTheater = dirLight;
     dirLight.position.set(180, -220, 280);
     dirLight.castShadow = true;
     dirLight.shadow.mapSize.width = 2048;
@@ -774,6 +790,17 @@ function createQuadcopterMesh(role) {
     laserCone.position.set(0, 0, -6.0);
     droneGroup.add(laserCone);
 
+    // 7. Tactical Night Operations Searchlight
+    const searchLight = new THREE.SpotLight(0xfff3e0, isNightOps ? 3.5 : 0.0, 110, Math.PI / 5.5, 0.45, 1.2);
+    searchLight.position.set(0, 0, -0.3);
+    const searchTarget = new THREE.Object3D();
+    searchTarget.position.set(0, 0, -35);
+    droneGroup.add(searchTarget);
+    searchLight.target = searchTarget;
+    droneGroup.add(searchLight);
+    droneGroup.searchLight = searchLight;
+    droneSearchlights.push(searchLight);
+
     return droneGroup;
 }
 
@@ -1133,7 +1160,8 @@ function updateLinks(linksData, routesData, dronesData) {
     dronesData.forEach(d => {
         nodeCoords.set(d.id, new THREE.Vector3(...d.position));
     });
-    nodeCoords.set("GCS", new THREE.Vector3(0, -150, 20));
+    // GCS Base Station Radar Mast Receiver at (0, -250, 24)
+    nodeCoords.set("GCS", new THREE.Vector3(0, -250, 24));
 
     const activeRoutePairs = new Set();
     if (routesData) {
@@ -1661,6 +1689,8 @@ function renderFleetList(drones) {
         const pwr = d.power_w !== undefined ? `${d.power_w.toFixed(0)}W` : '---';
         const comText = d.comms_loss ? 'LOST' : 'OK';
         const comClass = d.comms_loss ? 'text-red' : 'text-cyan';
+        const faultBadgeHtml = d.is_fault_injected ? '<span class="fault-badge">⚡ FLAMEOUT</span>' : '';
+        const draftBadgeHtml = d.is_drafting ? `<span class="drafting-badge" title="Drafting wake of ${d.drafting_leader_id}">⚡ +${d.drafting_saving_pct}%</span>` : '';
 
         if (!card) {
             card = document.createElement("div");
@@ -1673,7 +1703,8 @@ function renderFleetList(drones) {
             card.innerHTML = `
                 <div class="drone-header">
                     <span class="drone-id-tag">${d.id} [${d.role}]</span>
-                    <div style="display: flex; align-items: center;">
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <span class="drone-badges-container">${faultBadgeHtml}${draftBadgeHtml}</span>
                         <span class="drone-mode-badge ${modeColor}">${modeLabel}</span>
                         <button class="btn btn-sm btn-outline text-neon-yellow drone-card-rtl-btn" data-drone-id="${d.id}" style="padding: 1px 5px; font-size: 8px; margin-left: 6px; border-color: rgba(255,214,0,0.5); display: ${showRtl ? 'inline-block' : 'none'};" title="Command Drone to Return-to-Launch">RTL</button>
                     </div>
@@ -1698,6 +1729,12 @@ function renderFleetList(drones) {
             const idSpan = card.querySelector(".drone-id-tag");
             if (idSpan && idSpan.textContent !== `${d.id} [${d.role}]`) {
                 idSpan.textContent = `${d.id} [${d.role}]`;
+            }
+
+            const badgesContainer = card.querySelector(".drone-badges-container");
+            const newBadges = `${faultBadgeHtml}${draftBadgeHtml}`;
+            if (badgesContainer && badgesContainer.innerHTML !== newBadges) {
+                badgesContainer.innerHTML = newBadges;
             }
 
             const modeSpan = card.querySelector(".drone-mode-badge");
@@ -1798,6 +1835,88 @@ function renderPoiList(poiItems) {
     }
 }
 
+let latestDebriefData = null;
+let lastSeenCommsTimestamp = -1;
+let commsTickerTimeout = null;
+
+function updateTacticalComms(events) {
+    if (!events || events.length === 0) return;
+    const newest = events[events.length - 1];
+    if (newest.timestamp > lastSeenCommsTimestamp) {
+        lastSeenCommsTimestamp = newest.timestamp;
+        const ticker = document.getElementById("hud-comms-ticker");
+        const tickerBadge = document.getElementById("ticker-badge");
+        const tickerMsg = document.getElementById("ticker-msg");
+        if (ticker && tickerBadge && tickerMsg) {
+            tickerBadge.textContent = `[${newest.callsign} ${newest.category}]`;
+            tickerBadge.className = `ticker-badge comms-badge-${newest.level}`;
+            tickerMsg.textContent = newest.message;
+            ticker.classList.remove("hidden");
+            if (commsTickerTimeout) clearTimeout(commsTickerTimeout);
+            commsTickerTimeout = setTimeout(() => {
+                ticker.classList.add("hidden");
+            }, 4500);
+        }
+    }
+    const logList = document.getElementById("comms-log-list");
+    if (logList) {
+        let html = "";
+        for (let i = events.length - 1; i >= 0; i--) {
+            const e = events[i];
+            const mins = Math.floor(e.timestamp / 60);
+            const secs = (e.timestamp % 60).toFixed(1);
+            const tStr = `${String(mins).padStart(2, '0')}:${String(secs).padStart(4, '0')}`;
+            html += `
+                <div class="comms-entry ${e.level}">
+                    <div class="comms-entry-header">
+                        <span class="comms-entry-callsign">[${e.callsign}] (${e.category})</span>
+                        <span class="comms-entry-time">${tStr}</span>
+                    </div>
+                    <div class="comms-entry-body">${e.message}</div>
+                </div>
+            `;
+        }
+        logList.innerHTML = html;
+    }
+}
+
+async function exportMissionDebrief() {
+    try {
+        const res = await fetch("/api/export_debrief");
+        if (!res.ok) throw new Error("Failed to fetch debrief");
+        const debrief = await res.json();
+        latestDebriefData = debrief;
+        const modal = document.getElementById("debrief-modal");
+        const body = document.getElementById("debrief-modal-body");
+        if (modal && body) {
+            const survList = (debrief.search_and_rescue_summary.discovered_survivors || []);
+            const survHtml = survList.length > 0
+                ? survList.map(s => `&bull; <strong>${s.id}</strong> at ${s.poi_id} (IR Body Heat: ${s.heat_c}&deg;C, Confidence: ${Math.round(s.confidence * 100)}%)`).join("<br>")
+                : "Scanning disaster sites for thermal signatures...";
+
+            body.innerHTML = `
+                <div class="debrief-kpi-grid">
+                    <div class="debrief-kpi"><span class="lbl">MISSION DURATION</span><span class="val text-neon-green">${debrief.mission_duration_s}s / ${debrief.mission_time_budget_s}s</span></div>
+                    <div class="debrief-kpi"><span class="lbl">SITES CLEARED</span><span class="val text-purple">${debrief.disaster_sites_summary.cleared_sites} / ${debrief.disaster_sites_summary.total_sites} (${debrief.disaster_sites_summary.completion_pct}%)</span></div>
+                    <div class="debrief-kpi"><span class="lbl">SURVIVORS LOCATED</span><span class="val text-neon-green">${debrief.search_and_rescue_summary.survivors_located} / ${debrief.search_and_rescue_summary.total_survivors_estimated}</span></div>
+                    <div class="debrief-kpi"><span class="lbl">TOTAL ENERGY</span><span class="val text-neon-yellow">${debrief.fleet_and_energy_summary.total_energy_consumed_wh} Wh</span></div>
+                    <div class="debrief-kpi"><span class="lbl">NETWORK PDR</span><span class="val text-cyan">${(debrief.network_and_telemetry_summary.packet_delivery_ratio * 100).toFixed(1)}%</span></div>
+                    <div class="debrief-kpi"><span class="lbl">BUDGET STATUS</span><span class="val text-neon-green">${debrief.budget_compliance}</span></div>
+                </div>
+                <div class="debrief-section-title">PRIORITY SURVEY SITES CLEARED</div>
+                <p>CRITICAL: <strong>${debrief.disaster_sites_summary.priority_breakdown.critical}</strong> | HIGH: <strong>${debrief.disaster_sites_summary.priority_breakdown.high}</strong> | MEDIUM: <strong>${debrief.disaster_sites_summary.priority_breakdown.medium}</strong> | LOW: <strong>${debrief.disaster_sites_summary.priority_breakdown.low}</strong></p>
+                <div class="debrief-section-title">SEARCH & RESCUE (SAR) THERMAL LOCATIONS</div>
+                <p style="line-height:1.6;">${survHtml}</p>
+                <div class="debrief-section-title">RADIO COMMS RECORD</div>
+                <p>Total recorded radio events: <strong>${debrief.tactical_comms_log.length}</strong> transmissions captured in audit log.</p>
+            `;
+            modal.classList.remove("hidden");
+        }
+    } catch (err) {
+        console.error("Debrief error:", err);
+    }
+}
+
 function updateHUD(telemetry) {
     if (!telemetry) return;
     latestTelemetry = telemetry;
@@ -1842,6 +1961,36 @@ function updateHUD(telemetry) {
     const pois = telemetry.pois || [];
     const completedCount = pois.filter(p => p.is_completed).length;
     document.getElementById("metric-pois").textContent = `${completedCount} / ${pois.length}`;
+
+    // Survivors Located (Thermal SAR)
+    const elSurvivors = document.getElementById("metric-survivors");
+    if (elSurvivors && telemetry.survivors) {
+        const s = telemetry.survivors;
+        elSurvivors.textContent = `${s.located_count || 0} / ${s.total_count || 0}`;
+        if ((s.located_count || 0) > 0) {
+            elSurvivors.className = "metric-val text-neon-green";
+        }
+    }
+
+    // Atmospheric Wind & Turbulence
+    const elWind = document.getElementById("metric-wind");
+    if (elWind && telemetry.weather) {
+        const w = telemetry.weather;
+        const spd = w.current_speed_mps !== undefined ? w.current_speed_mps : (w.mean_speed_mps || 0);
+        const dir = Math.round(w.direction_deg || 0);
+        const gustTxt = w.gust_active ? " [GUST]" : "";
+        elWind.textContent = `${spd.toFixed(1)}m/s ${dir}°${gustTxt}`;
+        if (w.gust_active) {
+            elWind.className = "metric-val text-neon-yellow";
+        } else {
+            elWind.className = "metric-val text-cyan";
+        }
+    }
+
+    // Tactical Visual Comms Chatter Feed
+    if (telemetry.tactical_comms && Array.isArray(telemetry.tactical_comms)) {
+        updateTacticalComms(telemetry.tactical_comms);
+    }
 
     const drones = telemetry.drones || [];
     const badgeNet = document.getElementById("badge-network");
@@ -2362,6 +2511,212 @@ window.triggerFleetRetreat = triggerFleetRetreat;
 window.triggerDroneRTL = triggerDroneRTL;
 
 // ============================================================================
+// 5 New Tactical Upgrades: Chaos, Night Ops, PLY Export, FPV, Drafting
+// ============================================================================
+
+function toggleNightOps() {
+    isNightOps = !isNightOps;
+    const btnNight = document.getElementById("btn-night");
+    if (btnNight) {
+        btnNight.classList.toggle("active", isNightOps);
+        btnNight.textContent = isNightOps ? "NIGHT: ON" : "NIGHT";
+    }
+
+    if (ambientLightTheater && dirLightTheater && sceneTheater) {
+        if (isNightOps) {
+            ambientLightTheater.intensity = 0.12;
+            ambientLightTheater.color.setHex(0x1a2638);
+            dirLightTheater.intensity = 0.20;
+            dirLightTheater.color.setHex(0x336699);
+            if (activeCamMode !== "flir") {
+                sceneTheater.background.setHex(0x020408);
+                sceneTheater.fog.color.setHex(0x020408);
+            }
+            droneSearchlights.forEach(sl => { sl.intensity = 3.5; });
+        } else {
+            ambientLightTheater.intensity = 0.65;
+            ambientLightTheater.color.setHex(0xffffff);
+            dirLightTheater.intensity = 0.85;
+            dirLightTheater.color.setHex(0x00e5ff);
+            if (activeCamMode !== "flir") {
+                sceneTheater.background.setHex(0x060a12);
+                sceneTheater.fog.color.setHex(0x060a12);
+            }
+            droneSearchlights.forEach(sl => { sl.intensity = 0.0; });
+        }
+    }
+}
+window.toggleNightOps = toggleNightOps;
+
+function triggerChaosFault() {
+    playTacticalSound("alarm");
+    const payload = { command: "chaos_fault", cmd: "chaos_fault", drone_id: selectedDroneId };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+    fetch("/api/chaos_fault", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drone_id: selectedDroneId })
+    })
+    .then(r => r.json())
+    .then(data => {
+        const victim = data.victim_id || selectedDroneId;
+        const btnChaos = document.getElementById("btn-chaos");
+        if (btnChaos) {
+            const orig = btnChaos.textContent;
+            btnChaos.textContent = `⚡ FAULT: ${victim}`;
+            setTimeout(() => { btnChaos.textContent = orig; }, 3500);
+        }
+    })
+    .catch(() => {});
+}
+window.triggerChaosFault = triggerChaosFault;
+
+function exportPointCloudPLY() {
+    playTacticalSound("radar_ping");
+    const btn = document.getElementById("btn-export-ply");
+    if (btn) btn.textContent = "SAVING...";
+
+    fetch("/api/export_point_cloud")
+        .then(res => res.blob())
+        .then(blob => {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.style.display = "none";
+            a.href = url;
+            a.download = "UAVX_Disaster_PointCloud.ply";
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            a.remove();
+            if (btn) btn.textContent = "PLY SAVED!";
+            setTimeout(() => { if (btn) btn.textContent = "PLY"; }, 2500);
+        })
+        .catch(err => {
+            console.error("PLY export error", err);
+            if (btn) btn.textContent = "PLY ERR";
+            setTimeout(() => { if (btn) btn.textContent = "PLY"; }, 2000);
+        });
+}
+window.exportPointCloudPLY = exportPointCloudPLY;
+
+function toggleManualControl() {
+    isManualControlActive = !isManualControlActive;
+    const btnManual = document.getElementById("btn-manual");
+    if (btnManual) {
+        btnManual.classList.toggle("btn-manual-active", isManualControlActive);
+        btnManual.textContent = isManualControlActive ? "FPV: MANUAL" : "FPV: AUTO";
+    }
+
+    if (!isManualControlActive) {
+        sendManualVelocity(0, 0, 0, 0, false);
+    }
+}
+window.toggleManualControl = toggleManualControl;
+
+function sendManualVelocity(vx, vy, vz, yawRate, enabled = true) {
+    const payload = {
+        command: "manual_control",
+        drone_id: selectedDroneId,
+        vx: vx,
+        vy: vy,
+        vz: vz,
+        yaw_rate: yawRate,
+        enabled: enabled
+    };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    } else {
+        fetch("/api/manual_control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).catch(() => {});
+    }
+}
+
+function handleManualFPVInput() {
+    if (!isManualControlActive) return;
+
+    const now = performance.now();
+    if (now - lastManualSendTime < 45) return; // ~20 Hz rate limit
+
+    let vx = 0.0, vy = 0.0, vz = 0.0, yawRate = 0.0;
+
+    // 1. Keyboard Controls (WASD horizontal, QE yaw, ArrowUp/ArrowDown altitude)
+    const maxSpeed = 10.0;
+    const maxClimb = 3.0;
+    const maxYaw = 1.5;
+
+    if (activeKeys["KeyW"]) vy += maxSpeed;
+    if (activeKeys["KeyS"]) vy -= maxSpeed;
+    if (activeKeys["KeyA"]) vx -= maxSpeed;
+    if (activeKeys["KeyD"]) vx += maxSpeed;
+    if (activeKeys["KeyQ"]) yawRate -= maxYaw;
+    if (activeKeys["KeyE"]) yawRate += maxYaw;
+    if (activeKeys["ArrowUp"] || activeKeys["KeyR"]) vz += maxClimb;
+    if (activeKeys["ArrowDown"] || activeKeys["KeyF"]) vz -= maxClimb;
+
+    // 2. HTML5 Gamepad API Support (Xbox / PlayStation controller)
+    if (navigator.getGamepads) {
+        const gamepads = navigator.getGamepads();
+        for (const gp of gamepads) {
+            if (gp && gp.connected) {
+                const deadzone = 0.15;
+                const applyDeadzone = (v) => Math.abs(v) > deadzone ? v : 0.0;
+
+                // Left stick: pitch / roll
+                if (gp.axes.length >= 2) {
+                    const stickX = applyDeadzone(gp.axes[0]);
+                    const stickY = applyDeadzone(gp.axes[1]);
+                    if (stickX !== 0) vx = stickX * maxSpeed;
+                    if (stickY !== 0) vy = -stickY * maxSpeed;
+                }
+                // Right stick: yaw / throttle
+                if (gp.axes.length >= 4) {
+                    const stickRX = applyDeadzone(gp.axes[2]);
+                    const stickRY = applyDeadzone(gp.axes[3]);
+                    if (stickRX !== 0) yawRate = stickRX * maxYaw;
+                    if (stickRY !== 0) vz = -stickRY * maxClimb;
+                }
+                // Triggers: RT = climb, LT = descent
+                if (gp.buttons.length >= 8) {
+                    if (gp.buttons[7].pressed) vz += maxClimb * (gp.buttons[7].value || 1.0);
+                    if (gp.buttons[6].pressed) vz -= maxClimb * (gp.buttons[6].value || 1.0);
+                }
+                break;
+            }
+        }
+    }
+
+    sendManualVelocity(vx, vy, vz, yawRate, true);
+    lastManualSendTime = now;
+}
+
+function updateFlirPaletteEffect() {
+    if (activeCamMode !== "flir") {
+        if (rendererTheater && rendererTheater.domElement) {
+            rendererTheater.domElement.style.filter = "none";
+        }
+        return;
+    }
+    const canvasDom = rendererTheater ? rendererTheater.domElement : null;
+    if (!canvasDom) return;
+
+    if (activeFlirPalette === "ironbow") {
+        sceneTheater.background = new THREE.Color(0x12031a);
+        canvasDom.style.filter = "contrast(1.4) saturate(2.4) hue-rotate(20deg)";
+    } else if (activeFlirPalette === "whitehot") {
+        sceneTheater.background = new THREE.Color(0x060606);
+        canvasDom.style.filter = "grayscale(1.0) contrast(2.2) brightness(1.15)";
+    } else if (activeFlirPalette === "blackhot") {
+        sceneTheater.background = new THREE.Color(0xdadada);
+        canvasDom.style.filter = "grayscale(1.0) invert(1) contrast(1.9) brightness(1.05)";
+    }
+}
+
+// ============================================================================
 // UI Event Handlers & View Modes
 // ============================================================================
 
@@ -2374,6 +2729,61 @@ function initUIControls() {
             const mode = e.target.getAttribute("data-mode");
             setViewportMode(mode);
         });
+    });
+
+    // Tactical Night Operations Toggle
+    const btnNight = document.getElementById("btn-night");
+    if (btnNight) {
+        btnNight.addEventListener("click", () => {
+            toggleNightOps();
+        });
+    }
+
+    // Dynamic Swarm Chaos Fault Injection
+    const btnChaos = document.getElementById("btn-chaos");
+    if (btnChaos) {
+        btnChaos.addEventListener("click", () => {
+            triggerChaosFault();
+        });
+    }
+
+    // 1-Click 3D Point Cloud Export (.PLY)
+    const btnExportPly = document.getElementById("btn-export-ply");
+    if (btnExportPly) {
+        btnExportPly.addEventListener("click", () => {
+            exportPointCloudPLY();
+        });
+    }
+
+    // Manual FPV Controller Takeover (WASD / Gamepad)
+    const btnManual = document.getElementById("btn-manual");
+    if (btnManual) {
+        btnManual.addEventListener("click", () => {
+            toggleManualControl();
+        });
+    }
+
+    // Multi-Palette Thermal FLIR Colormaps
+    document.querySelectorAll(".btn-palette").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            document.querySelectorAll(".btn-palette").forEach(b => b.classList.remove("active"));
+            e.target.classList.add("active");
+            activeFlirPalette = e.target.getAttribute("data-palette") || "ironbow";
+            const titleEl = document.getElementById("flir-hud-title");
+            if (titleEl) {
+                titleEl.textContent = `FLIR THERMAL IR • ${activeFlirPalette.toUpperCase()} SENSOR`;
+            }
+            updateFlirPaletteEffect();
+        });
+    });
+
+    // Keyboard Listeners for Manual FPV Control
+    window.addEventListener("keydown", (e) => {
+        if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) return;
+        activeKeys[e.code] = true;
+    });
+    window.addEventListener("keyup", (e) => {
+        activeKeys[e.code] = false;
     });
 
     // Pause / Resume
@@ -2423,6 +2833,62 @@ function initUIControls() {
     if (btnCloseAnalytics && drawerAnalytics) {
         btnCloseAnalytics.addEventListener("click", () => {
             drawerAnalytics.classList.add("hidden");
+        });
+    }
+
+    // Tactical Comms Drawer Toggle
+    const btnToggleComms = document.getElementById("btn-toggle-comms");
+    const drawerComms = document.getElementById("tactical-comms-panel");
+    const btnCloseComms = document.getElementById("btn-close-comms");
+    if (btnToggleComms && drawerComms) {
+        btnToggleComms.addEventListener("click", () => {
+            drawerComms.classList.toggle("hidden");
+        });
+    }
+    if (btnCloseComms && drawerComms) {
+        btnCloseComms.addEventListener("click", () => {
+            drawerComms.classList.add("hidden");
+        });
+    }
+
+    // Executive Mission Debrief Exporter Modal
+    const btnExportDebrief = document.getElementById("btn-export-debrief");
+    const modalDebrief = document.getElementById("debrief-modal");
+    const btnCloseDebrief = document.getElementById("btn-close-debrief");
+    const btnDismissDebrief = document.getElementById("btn-dismiss-debrief");
+    const btnDownloadDebriefJson = document.getElementById("btn-download-debrief-json");
+    const btnDownloadFlightCsv = document.getElementById("btn-download-flight-csv");
+
+    if (btnExportDebrief) {
+        btnExportDebrief.addEventListener("click", () => {
+            exportMissionDebrief();
+        });
+    }
+    if (btnCloseDebrief && modalDebrief) {
+        btnCloseDebrief.addEventListener("click", () => {
+            modalDebrief.classList.add("hidden");
+        });
+    }
+    if (btnDismissDebrief && modalDebrief) {
+        btnDismissDebrief.addEventListener("click", () => {
+            modalDebrief.classList.add("hidden");
+        });
+    }
+    if (btnDownloadDebriefJson) {
+        btnDownloadDebriefJson.addEventListener("click", () => {
+            if (!latestDebriefData) return;
+            const str = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(latestDebriefData, null, 2));
+            const dlAnchor = document.createElement('a');
+            dlAnchor.setAttribute("href", str);
+            dlAnchor.setAttribute("download", "UAVX_Mission_Debrief.json");
+            document.body.appendChild(dlAnchor);
+            dlAnchor.click();
+            dlAnchor.remove();
+        });
+    }
+    if (btnDownloadFlightCsv) {
+        btnDownloadFlightCsv.addEventListener("click", () => {
+            window.location.href = "/api/export_telemetry";
         });
     }
 
@@ -2512,10 +2978,17 @@ function initUIControls() {
 
             if (mode === "flir") {
                 if (flirOverlay) flirOverlay.classList.remove("hidden");
-                sceneTheater.background = new THREE.Color(0x021008);
+                updateFlirPaletteEffect();
             } else {
                 if (flirOverlay) flirOverlay.classList.add("hidden");
-                sceneTheater.background = new THREE.Color(0x060a12);
+                if (rendererTheater && rendererTheater.domElement) {
+                    rendererTheater.domElement.style.filter = "none";
+                }
+                if (isNightOps) {
+                    sceneTheater.background = new THREE.Color(0x020408);
+                } else {
+                    sceneTheater.background = new THREE.Color(0x060a12);
+                }
             }
 
             if (mode === "top") {
@@ -2693,6 +3166,11 @@ function onWindowResize() {
 function animate() {
     requestAnimationFrame(animate);
 
+    // Handle Manual FPV Controller Input (WASD / Gamepad)
+    if (isManualControlActive) {
+        handleManualFPVInput();
+    }
+
     // Spin Propeller Rotors and Blurred Discs
     rotorMeshes.forEach(rotor => {
         rotor.rotation.z += 0.45;
@@ -2769,7 +3247,7 @@ function animate() {
                 controlsTheater.target.lerp(targetMesh.position.clone().add(forward.clone().multiplyScalar(10)), 0.12);
             }
         } else if (activeCamMode === "gcs") {
-            cameraTheater.position.set(0, -150, 22);
+            cameraTheater.position.set(0, -250, 26);
             const focusMesh = droneMeshes.get(selectedDroneId) || droneMeshes.get("UAV_1");
             if (focusMesh) {
                 controlsTheater.target.lerp(focusMesh.position, 0.05);
