@@ -17,12 +17,12 @@ let isPaused = false;
 let selectedDroneId = "UAV_1";
 let latestTelemetry = null;
 let activeCamMode = "orbit";
-let activeViewportMode = "split";
+let activeViewportMode = "theater";
 let isInvestorMode = false;
 let investorStartTime = 0;
 let lastChartUpdate = 0;
 let isInspectPanelOpen = false;
-let isHudEnabled = true;
+let isHudEnabled = false;
 
 // Viewport 1: Theater Reality
 let sceneTheater, cameraTheater, rendererTheater, controlsTheater;
@@ -55,6 +55,7 @@ let maxTrajectoryPoints = 120;
 let audioContext = null;
 let isAudioMuted = true;
 let lastSurveyedCount = 0;
+let lastFleetRenderTime = 0;
 
 // Scientific Charts (Chart.js)
 let chartEKF = null;
@@ -73,6 +74,7 @@ document.addEventListener("DOMContentLoaded", () => {
     try { connectWebSocket(); } catch (e) { console.error("connectWebSocket error:", e); }
     try { initUIControls(); } catch (e) { console.error("initUIControls error:", e); }
     try { initScientificCharts(); } catch (e) { console.error("initScientificCharts error:", e); }
+    try { setViewportMode("theater"); } catch (e) { console.error("setViewportMode error:", e); }
 });
 
 // ============================================================================
@@ -1326,6 +1328,7 @@ function updateAPFVectors(apfData) {
 
 // Select Active Drone for SLAM & Inspection
 function selectDrone(droneId, openPanel = true) {
+    if (!droneId) return;
     selectedDroneId = droneId;
     slamTrajectoryPoints = []; // reset trajectory trail for new drone
 
@@ -1339,16 +1342,34 @@ function selectDrone(droneId, openPanel = true) {
     const labelHeader = document.getElementById("slam-tracking-label");
     if (labelHeader) labelHeader.textContent = `TRACKING ${droneId} LIDAR & OCTOMAP &bull; APF GUIDANCE`;
 
+    // 1. Immediately reflect visual selection in DOM fleet cards
+    document.querySelectorAll("#fleet-list .drone-card").forEach(c => {
+        const isTarget = (c.getAttribute("data-drone-id") === droneId);
+        c.classList.toggle("selected", isTarget);
+        if (isTarget) {
+            c.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+    });
+
+    // 2. Smoothly center Theater 3D camera target on selected drone
+    const targetMesh = droneMeshes.get(droneId);
+    if (targetMesh && controlsTheater) {
+        controlsTheater.target.copy(targetMesh.position);
+        controlsTheater.update();
+    }
+
+    // 3. Open Telemetry Inspect Panel
     if (openPanel && typeof toggleInspectPanel === "function") {
         toggleInspectPanel(true);
     }
 
+    // 4. Update Inspect Panel with current telemetry data
     if (latestTelemetry) {
         const drone = (latestTelemetry.drones || []).find(d => d.id === droneId);
         if (drone && isInspectPanelOpen) updateInspectPanel(drone);
-        updateHUD(latestTelemetry);
     }
 }
+window.selectDrone = selectDrone;
 
 // ============================================================================
 // Scientific Analytics Dashboard (Chart.js)
@@ -1592,8 +1613,190 @@ function updateScientificCharts(telemetry) {
 }
 
 // ============================================================================
-// HUD Updates
+// HUD Updates & Persistent Fleet Reconciliation
 // ============================================================================
+
+// Persistent Fleet List Renderer (In-place DOM reconciliation - prevents click cancellation)
+function renderFleetList(drones) {
+    const fleetContainer = document.getElementById("fleet-list");
+    if (!fleetContainer) return;
+
+    const droneList = drones || [];
+    const existingCards = new Map();
+    fleetContainer.querySelectorAll(".drone-card").forEach(c => {
+        const id = c.getAttribute("data-drone-id");
+        if (id) existingCards.set(id, c);
+    });
+
+    const activeIds = new Set();
+
+    droneList.forEach(d => {
+        activeIds.add(d.id);
+        let card = existingCards.get(d.id);
+        const isSelected = (selectedDroneId === d.id);
+
+        const isRtl = d.flight_mode === "RTL" || d.flight_mode === "LANDING";
+        const isLanded = d.flight_mode === "LANDED";
+        const isEmergency = d.flight_mode === "EMERGENCY_LAND";
+        let modeColor = "text-cyan";
+        let modeLabel = d.flight_mode;
+        if (d.comms_loss) {
+            modeColor = "text-red";
+            modeLabel = "COMMS RTB";
+        } else if (isLanded) {
+            modeColor = "text-neon-green";
+            modeLabel = "LANDED (SAFE)";
+        } else if (isRtl) {
+            modeColor = "text-neon-yellow";
+            modeLabel = d.flight_mode === "RTL" ? "RTL (RETREAT)" : "LANDING";
+        } else if (isEmergency) {
+            modeColor = "text-red";
+            modeLabel = "EMERGENCY LAND";
+        }
+
+        const roleClass = (d.role || "survey").toLowerCase();
+        const speed = Math.hypot(d.velocity[0], d.velocity[1]).toFixed(1);
+        const batClass = d.battery_pct < 20 ? 'text-red' : (d.battery_pct < 35 ? 'text-neon-yellow' : '');
+        const showRtl = (!isLanded && d.flight_mode !== "IDLE");
+        const pwr = d.power_w !== undefined ? `${d.power_w.toFixed(0)}W` : '---';
+        const comText = d.comms_loss ? 'LOST' : 'OK';
+        const comClass = d.comms_loss ? 'text-red' : 'text-cyan';
+
+        if (!card) {
+            card = document.createElement("div");
+            card.className = `drone-card ${roleClass}${isSelected ? ' selected' : ''}`;
+            card.setAttribute("data-drone-id", d.id);
+            card.setAttribute("role", "button");
+            card.setAttribute("tabindex", "0");
+            card.setAttribute("aria-label", `Select Drone ${d.id}`);
+
+            card.innerHTML = `
+                <div class="drone-header">
+                    <span class="drone-id-tag">${d.id} [${d.role}]</span>
+                    <div style="display: flex; align-items: center;">
+                        <span class="drone-mode-badge ${modeColor}">${modeLabel}</span>
+                        <button class="btn btn-sm btn-outline text-neon-yellow drone-card-rtl-btn" data-drone-id="${d.id}" style="padding: 1px 5px; font-size: 8px; margin-left: 6px; border-color: rgba(255,214,0,0.5); display: ${showRtl ? 'inline-block' : 'none'};" title="Command Drone to Return-to-Launch">RTL</button>
+                    </div>
+                </div>
+                <div class="drone-stats">
+                    <div>ALT: <span class="stat-alt">${d.position[2].toFixed(1)}m</span></div>
+                    <div>BAT: <span class="stat-bat ${batClass}">${d.battery_pct.toFixed(0)}%</span></div>
+                    <div>SPD: <span class="stat-spd">${speed} m/s</span></div>
+                    <div>POI: <span class="stat-poi">${d.assigned_poi_id || 'NONE'}</span></div>
+                    <div>PWR: <span class="stat-pwr text-neon-yellow">${pwr}</span></div>
+                    <div>COM: <span class="stat-com ${comClass}">${comText}</span></div>
+                </div>
+            `;
+            fleetContainer.appendChild(card);
+        } else {
+            // Update classes and text in-place without tearing down DOM elements
+            const expectedClass = `drone-card ${roleClass}${isSelected ? ' selected' : ''}`;
+            if (card.className !== expectedClass) {
+                card.className = expectedClass;
+            }
+
+            const idSpan = card.querySelector(".drone-id-tag");
+            if (idSpan && idSpan.textContent !== `${d.id} [${d.role}]`) {
+                idSpan.textContent = `${d.id} [${d.role}]`;
+            }
+
+            const modeSpan = card.querySelector(".drone-mode-badge");
+            if (modeSpan) {
+                if (modeSpan.textContent !== modeLabel) modeSpan.textContent = modeLabel;
+                const expectedModeClass = `drone-mode-badge ${modeColor}`;
+                if (modeSpan.className !== expectedModeClass) modeSpan.className = expectedModeClass;
+            }
+
+            const rtlBtn = card.querySelector(".drone-card-rtl-btn");
+            if (rtlBtn) {
+                const targetDisplay = showRtl ? "inline-block" : "none";
+                if (rtlBtn.style.display !== targetDisplay) rtlBtn.style.display = targetDisplay;
+            }
+
+            const altSpan = card.querySelector(".stat-alt");
+            if (altSpan) {
+                const altText = `${d.position[2].toFixed(1)}m`;
+                if (altSpan.textContent !== altText) altSpan.textContent = altText;
+            }
+
+            const batSpan = card.querySelector(".stat-bat");
+            if (batSpan) {
+                const batText = `${d.battery_pct.toFixed(0)}%`;
+                if (batSpan.textContent !== batText) batSpan.textContent = batText;
+                const expectedBatClass = `stat-bat ${batClass}`;
+                if (batSpan.className !== expectedBatClass) batSpan.className = expectedBatClass;
+            }
+
+            const spdSpan = card.querySelector(".stat-spd");
+            if (spdSpan) {
+                const spdText = `${speed} m/s`;
+                if (spdSpan.textContent !== spdText) spdSpan.textContent = spdText;
+            }
+
+            const poiSpan = card.querySelector(".stat-poi");
+            if (poiSpan) {
+                const poiText = d.assigned_poi_id || 'NONE';
+                if (poiSpan.textContent !== poiText) poiSpan.textContent = poiText;
+            }
+
+            const pwrSpan = card.querySelector(".stat-pwr");
+            if (pwrSpan) {
+                if (pwrSpan.textContent !== pwr) pwrSpan.textContent = pwr;
+            }
+
+            const comSpan = card.querySelector(".stat-com");
+            if (comSpan) {
+                if (comSpan.textContent !== comText) comSpan.textContent = comText;
+                const expComClass = `stat-com ${comClass}`;
+                if (comSpan.className !== expComClass) comSpan.className = expComClass;
+            }
+        }
+    });
+
+    // Remove any stale cards no longer present in telemetry
+    existingCards.forEach((c, id) => {
+        if (!activeIds.has(id)) c.remove();
+    });
+}
+
+// Disaster Site Priority Queue & PoI Renderer (diff-checked to eliminate layout thrashing)
+function renderPoiList(poiItems) {
+    const poiContainer = document.getElementById("poi-list");
+    if (!poiContainer) return;
+
+    const list = poiItems || [];
+    const html = list.map((p, idx) => {
+        const priority = (p.priority || 'MEDIUM').toUpperCase();
+        const pClass = priority.toLowerCase();
+        const isDone = p.is_completed || ((p.progress || 0) >= 100);
+        const progressPct = (p.progress !== undefined ? p.progress : 0).toFixed(0);
+        const rank = idx + 1;
+        const urgency = p.urgency_score !== undefined ? `URG: ${p.urgency_score.toFixed(0)}` : '';
+        const drone = p.assigned_drone || 'UNASSIGNED';
+        const deadline = p.deadline_s !== undefined ? `D-LINE: ${p.deadline_s.toFixed(0)}s` : '';
+
+        return `<div class="poi-card ${pClass}" data-poi-id="${p.id}" data-drone-id="${p.assigned_drone || ''}" role="button" tabindex="0" title="Disaster Site ${p.id} - Click to track drone">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div style="display:flex; align-items:center; gap:5px;">
+                    <span class="badge" style="font-size:7.5px; padding:1px 4px; background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.15);">${priority === 'CRITICAL' ? '⚡ P' : 'P'}${rank} ${priority}</span>
+                    <strong style="color:var(--text-primary); font-size:10px;">${p.id}</strong>
+                </div>
+                <span class="${isDone ? 'text-neon-green' : 'text-neon-yellow'}" style="font-weight:bold; font-size:10px;">${isDone ? 'COMPLETED' : progressPct + '%'}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:8px; color:var(--text-muted); margin-top:2px;">
+                <span>ASSIGNED: <strong class="text-cyan">${drone}</strong></span>
+                <span>${urgency} ${deadline}</span>
+            </div>
+            <div class="poi-progress-bar">
+                <div class="poi-progress-fill ${isDone ? 'completed' : ''}" style="width: ${progressPct}%"></div>
+            </div>
+        </div>`;
+    }).join("");
+
+    if (poiContainer.innerHTML !== html) {
+        poiContainer.innerHTML = html;
+    }
+}
 
 function updateHUD(telemetry) {
     if (!telemetry) return;
@@ -1605,6 +1808,28 @@ function updateHUD(telemetry) {
     const mins = Math.floor(t / 60);
     const secs = (t % 60).toFixed(1);
     document.getElementById("metric-time").textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(4, '0')}`;
+
+    // Mission Budget Countdown
+    const elBudget = document.getElementById("metric-budget");
+    if (elBudget && telemetry.mission_budget) {
+        const mb = telemetry.mission_budget;
+        const rem = Math.max(0, mb.remaining_s !== undefined ? mb.remaining_s : (mb.time_remaining_s !== undefined ? mb.time_remaining_s : 0));
+        const bMins = Math.floor(rem / 60);
+        const bSecs = (rem % 60).toFixed(1);
+        if (mb.is_all_completed || mb.status === "COMPLETED") {
+            elBudget.className = "metric-val text-neon-green";
+            elBudget.textContent = "COMPLETED";
+        } else {
+            elBudget.textContent = `${String(bMins).padStart(2, '0')}:${String(bSecs).padStart(4, '0')}`;
+            if (rem < 30.0 || mb.status === "TIME_EXCEEDED") {
+                elBudget.className = "metric-val text-red";
+            } else if (mb.status === "EXPEDITED" || mb.status === "CRITICAL_DEADLINE" || (mb.pacing_ratio !== undefined && mb.pacing_ratio < 0.9)) {
+                elBudget.className = "metric-val text-neon-yellow";
+            } else {
+                elBudget.className = "metric-val text-neon-green";
+            }
+        }
+    }
 
     const metrics = telemetry.metrics || {};
     document.getElementById("metric-pdr").textContent = `${((metrics.pdr || 1.0) * 100).toFixed(1)}%`;
@@ -1629,6 +1854,32 @@ function updateHUD(telemetry) {
         elFleetCount.textContent = `${drones.length} UNITS`;
     }
 
+    // Recovery & Retreat Status Badge
+    const badgeRecovery = document.getElementById("badge-recovery");
+    if (badgeRecovery) {
+        const retreatingCount = drones.filter(d => d.flight_mode === "RTL" || d.flight_mode === "LANDING").length;
+        const landedCount = drones.filter(d => d.flight_mode === "LANDED").length;
+        if (landedCount > 0 && retreatingCount === 0) {
+            badgeRecovery.textContent = `${landedCount} LANDED (SAFE)`;
+            badgeRecovery.className = "badge badge-active";
+            badgeRecovery.style.color = "#00ff66";
+            badgeRecovery.style.borderColor = "#00ff66";
+            badgeRecovery.style.background = "rgba(0, 255, 102, 0.12)";
+        } else if (retreatingCount > 0) {
+            badgeRecovery.textContent = `${retreatingCount} RETREATING (RTL)`;
+            badgeRecovery.className = "badge badge-active";
+            badgeRecovery.style.color = "#ffd600";
+            badgeRecovery.style.borderColor = "#ffd600";
+            badgeRecovery.style.background = "rgba(255, 214, 0, 0.12)";
+        } else {
+            badgeRecovery.textContent = "FLEET ACTIVE";
+            badgeRecovery.className = "badge badge-active";
+            badgeRecovery.style.color = "#00e5ff";
+            badgeRecovery.style.borderColor = "#00e5ff";
+            badgeRecovery.style.background = "rgba(0, 229, 255, 0.12)";
+        }
+    }
+
     const badgeGpu = document.getElementById("badge-gpu-hw");
     if (badgeGpu) {
         const activeGpu = typeof getActiveGPUInfo === "function" ? getActiveGPUInfo() : { isNvidia: true, cleanName: "NVIDIA RTX 4050" };
@@ -1647,70 +1898,41 @@ function updateHUD(telemetry) {
         }
     }
 
-    // Fleet List
-    const fleetContainer = document.getElementById("fleet-list");
-    fleetContainer.innerHTML = "";
-    (telemetry.drones || []).forEach(d => {
-        const card = document.createElement("div");
-        card.className = `drone-card ${d.role.toLowerCase()} ${selectedDroneId === d.id ? 'selected' : ''}`;
-        card.addEventListener("click", () => selectDrone(d.id));
-        card.innerHTML = `
-            <div class="drone-header">
-                <span>${d.id} [${d.role}]</span>
-                <span class="text-cyan">${d.flight_mode}</span>
-            </div>
-            <div class="drone-stats">
-                <div>ALT: <span>${d.position[2].toFixed(1)}m</span></div>
-                <div>BAT: <span>${d.battery_pct.toFixed(0)}%</span></div>
-                <div>SPD: <span>${Math.hypot(d.velocity[0], d.velocity[1]).toFixed(1)} m/s</span></div>
-                <div>POI: <span>${d.assigned_poi_id || 'NONE'}</span></div>
-            </div>
-        `;
-        fleetContainer.appendChild(card);
-    });
+    // 1. Throttled Fleet & Priority Queue Lists (10 Hz throttling for rock-solid UI stability)
+    const now = performance.now();
+    if (now - lastFleetRenderTime >= 100) {
+        lastFleetRenderTime = now;
+        renderFleetList(telemetry.drones);
+        const poiSource = (telemetry.priority_queue && telemetry.priority_queue.length > 0) ? telemetry.priority_queue : (telemetry.pois || []);
+        renderPoiList(poiSource);
+    }
 
-    // Routes List
+    // 2. Routes List (diff-checked to avoid unnecessary DOM reflows)
     const routesContainer = document.getElementById("routes-list");
-    routesContainer.innerHTML = "";
-    (telemetry.active_routes || []).forEach(path => {
-        const div = document.createElement("div");
-        div.className = "route-badge";
-        div.innerHTML = `<span>${path.join(" ➔ ")} (${path.length - 1} HOPS)</span>`;
-        routesContainer.appendChild(div);
-    });
+    if (routesContainer) {
+        const routeHtml = (telemetry.active_routes || []).map(path =>
+            `<div class="route-badge"><span>${path.join(" ➔ ")} (${path.length - 1} HOPS)</span></div>`
+        ).join("");
+        if (routesContainer.innerHTML !== routeHtml) {
+            routesContainer.innerHTML = routeHtml;
+        }
+    }
 
-    // Links List
+    // 3. Links List (diff-checked)
     const linksContainer = document.getElementById("links-list");
-    linksContainer.innerHTML = "";
-    (telemetry.links || []).forEach(link => {
-        const div = document.createElement("div");
-        div.className = "link-row";
-        const isLoRa = (link.band && link.band.includes("LORA")) || (link.distance > 80.0 && link.viable);
-        const bandTag = isLoRa ? '<span class="link-lora">[915MHz]</span>' : '<span class="link-payload">[2.4GHz]</span>';
-        div.innerHTML = `
-            <span>${link.source} ↔ ${link.target} ${bandTag}</span>
-            <span class="${link.viable ? 'text-neon-green' : 'text-red'}">${link.snr} dB (${link.distance.toFixed(0)}m)</span>
-        `;
-        linksContainer.appendChild(div);
-    });
-
-    // PoIs Grid
-    const poiContainer = document.getElementById("poi-list");
-    poiContainer.innerHTML = "";
-    pois.forEach(p => {
-        const card = document.createElement("div");
-        card.className = `poi-card ${(p.priority || 'MEDIUM').toLowerCase()}`;
-        card.innerHTML = `
-            <div style="display:flex; justify-content:space-between;">
-                <strong>${p.id}</strong>
-                <span class="${p.is_completed ? 'text-neon-green' : 'text-purple'}">${p.is_completed ? 'DONE' : p.progress + '%'}</span>
-            </div>
-            <div class="poi-progress-bar">
-                <div class="poi-progress-fill ${p.is_completed ? 'completed' : ''}" style="width: ${p.progress}%"></div>
-            </div>
-        `;
-        poiContainer.appendChild(card);
-    });
+    if (linksContainer) {
+        const linksHtml = (telemetry.links || []).map(link => {
+            const isLoRa = (link.band && link.band.includes("LORA")) || (link.distance > 80.0 && link.viable);
+            const bandTag = isLoRa ? '<span class="link-lora">[915MHz]</span>' : '<span class="link-payload">[2.4GHz]</span>';
+            return `<div class="link-row">
+                <span>${link.source} ↔ ${link.target} ${bandTag}</span>
+                <span class="${link.viable ? 'text-neon-green' : 'text-red'}">${link.snr} dB (${link.distance.toFixed(0)}m)</span>
+            </div>`;
+        }).join("");
+        if (linksContainer.innerHTML !== linksHtml) {
+            linksContainer.innerHTML = linksHtml;
+        }
+    }
 
     // Update Inspect Panel (only if user has opened panel)
     if (isInspectPanelOpen && selectedDroneId) {
@@ -1767,6 +1989,24 @@ function updateInspectPanel(d) {
     if (elSpd) elSpd.textContent = `${spd.toFixed(1)} m/s`;
     const elBat = document.getElementById("inspect-battery");
     if (elBat) elBat.textContent = `${d.battery_pct.toFixed(0)}%`;
+
+    const elPwr = document.getElementById("inspect-power");
+    if (elPwr) elPwr.textContent = d.power_w !== undefined ? `${d.power_w.toFixed(0)} W` : '---';
+
+    const elEndurance = document.getElementById("inspect-endurance");
+    if (elEndurance) elEndurance.textContent = d.est_endurance_min !== undefined ? `${d.est_endurance_min.toFixed(1)} min` : '---';
+
+    const elComms = document.getElementById("inspect-comms");
+    if (elComms) {
+        if (d.comms_loss) {
+            elComms.textContent = "DISCONNECTED (RTL ACTIVE)";
+            elComms.className = "val text-red";
+        } else {
+            elComms.textContent = "CONNECTED (FANET MESH)";
+            elComms.className = "val text-cyan";
+        }
+    }
+
     const elTgt = document.getElementById("inspect-target");
     if (elTgt) elTgt.textContent = d.assigned_poi_id || (d.target_position ? `[${d.target_position[0].toFixed(0)}, ${d.target_position[1].toFixed(0)}, ${d.target_position[2].toFixed(0)}]` : 'NONE');
 
@@ -2083,6 +2323,45 @@ function connectWebSocket() {
 }
 
 // ============================================================================
+// Autonomous Retreat (RTL) Command Senders
+// ============================================================================
+
+function triggerFleetRetreat() {
+    playTacticalSound("alarm");
+    const payload = { command: "retreat", cmd: "retreat" };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+    fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    }).catch(() => {});
+
+    const badgeRecovery = document.getElementById("badge-recovery");
+    if (badgeRecovery) {
+        badgeRecovery.textContent = "RETREAT ORDERED";
+        badgeRecovery.style.color = "#ffd600";
+        badgeRecovery.style.borderColor = "#ffd600";
+    }
+}
+
+function triggerDroneRTL(droneId) {
+    playTacticalSound("alarm");
+    const payload = { command: "retreat", cmd: "retreat", drone_id: droneId };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+    fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    }).catch(() => {});
+}
+window.triggerFleetRetreat = triggerFleetRetreat;
+window.triggerDroneRTL = triggerDroneRTL;
+
+// ============================================================================
 // UI Event Handlers & View Modes
 // ============================================================================
 
@@ -2114,6 +2393,14 @@ function initUIControls() {
             socket.send(JSON.stringify({ command: "reset" }));
         }
     });
+
+    // Fleet-Wide Autonomous Retreat (RTL)
+    const btnRetreat = document.getElementById("btn-retreat");
+    if (btnRetreat) {
+        btnRetreat.addEventListener("click", () => {
+            triggerFleetRetreat();
+        });
+    }
 
     // Speed Control
     const selectSpeed = document.getElementById("select-speed");
@@ -2267,6 +2554,101 @@ function initUIControls() {
             window.location.href = "/api/export_telemetry";
         });
     }
+
+    // Fleet List Delegated Event Handlers (Immediate pointerdown + debounced click to prevent selection drops)
+    const fleetContainer = document.getElementById("fleet-list");
+    if (fleetContainer) {
+        let lastSelectTime = 0;
+        const handleFleetSelect = (e) => {
+            const rtlBtn = e.target.closest(".drone-card-rtl-btn");
+            if (rtlBtn) {
+                e.stopPropagation();
+                if (e.type === "pointerdown" || e.type === "click") {
+                    const dId = rtlBtn.getAttribute("data-drone-id");
+                    if (dId && typeof triggerDroneRTL === "function") {
+                        triggerDroneRTL(dId);
+                    }
+                }
+                return;
+            }
+
+            const card = e.target.closest(".drone-card");
+            if (card) {
+                const dId = card.getAttribute("data-drone-id");
+                const now = performance.now();
+                if (dId && (now - lastSelectTime > 80)) {
+                    lastSelectTime = now;
+                    selectDrone(dId);
+                }
+            }
+        };
+
+        fleetContainer.addEventListener("pointerdown", handleFleetSelect);
+        fleetContainer.addEventListener("click", handleFleetSelect);
+
+        // Accessible keyboard enter/space on focused card
+        fleetContainer.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                const card = e.target.closest(".drone-card");
+                if (card) {
+                    e.preventDefault();
+                    const dId = card.getAttribute("data-drone-id");
+                    if (dId) selectDrone(dId);
+                }
+            }
+        });
+    }
+
+    // Disaster Site Priority Queue Interaction (Select assigned drone on click/pointerdown)
+    const poiContainer = document.getElementById("poi-list");
+    if (poiContainer) {
+        let lastPoiSelectTime = 0;
+        const handlePoiSelect = (e) => {
+            const card = e.target.closest(".poi-card");
+            if (card) {
+                const dId = card.getAttribute("data-drone-id");
+                const now = performance.now();
+                if (dId && (now - lastPoiSelectTime > 80) && typeof selectDrone === "function") {
+                    lastPoiSelectTime = now;
+                    selectDrone(dId);
+                }
+            }
+        };
+        poiContainer.addEventListener("pointerdown", handlePoiSelect);
+        poiContainer.addEventListener("click", handlePoiSelect);
+    }
+
+    // Keyboard Drone Quick-Select Hotkeys (1-8 for UAV_1..8, 9 for RELAY_1, 0 for SCOUT_1, '[' and ']' for cycle)
+    window.addEventListener("keydown", (e) => {
+        if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) return;
+
+        if (e.key >= "1" && e.key <= "8") {
+            const targetId = `UAV_${e.key}`;
+            if (latestTelemetry && (latestTelemetry.drones || []).some(d => d.id === targetId)) {
+                selectDrone(targetId);
+            }
+        } else if (e.key === "9") {
+            if (latestTelemetry && (latestTelemetry.drones || []).some(d => d.id === "RELAY_1")) {
+                selectDrone("RELAY_1");
+            }
+        } else if (e.key === "0") {
+            if (latestTelemetry && (latestTelemetry.drones || []).some(d => d.id === "SCOUT_1")) {
+                selectDrone("SCOUT_1");
+            }
+        } else if (e.key === "[" || e.key === "]") {
+            if (latestTelemetry && latestTelemetry.drones && latestTelemetry.drones.length > 0) {
+                const drones = latestTelemetry.drones;
+                const curIdx = drones.findIndex(d => d.id === selectedDroneId);
+                let nextIdx = 0;
+                if (e.key === "]") {
+                    nextIdx = curIdx >= 0 ? (curIdx + 1) % drones.length : 0;
+                } else {
+                    nextIdx = curIdx >= 0 ? (curIdx - 1 + drones.length) % drones.length : drones.length - 1;
+                }
+                selectDrone(drones[nextIdx].id);
+            }
+        }
+    });
 
     window.addEventListener("resize", onWindowResize);
     animate();
@@ -2463,9 +2845,9 @@ function handleInvestorChoreography() {
             controlsTheater.target.lerp(uavMesh.position, 0.08);
         }
     } else if (elapsedSec < 60) {
-        // Phase 4: Mission Accomplished & Survivor Localization
-        if (titleEl) titleEl.textContent = "PHASE 4: DISASTER SITES LOCALIZED & CONTINUOUS TELEMETRY SECURED";
-        if (descEl) descEl.textContent = "Multi-hop FANET delivers critical sensor payloads to GCS with 0% packet loss and 8.5ms latency across 700m theater.";
+        // Phase 4: Autonomous Swarm Recovery & Precision RTL Landing
+        if (titleEl) titleEl.textContent = "PHASE 4: AUTONOMOUS RECOVERY & RETURN-TO-LAUNCH (RTL)";
+        if (descEl) descEl.textContent = "Upon completing disaster surveillance or reaching low-battery thresholds, drones execute deconflicted corridor retreat and controlled touchdown on recovery pads.";
 
         cameraTheater.position.lerp(new THREE.Vector3(0, -340, 210), 0.04);
         controlsTheater.target.lerp(new THREE.Vector3(0, 0, 20), 0.04);
@@ -2579,6 +2961,49 @@ function renderMilitaryHUD() {
     const gpuColor = activeGpu.isNvidia ? COLOR_NVIDIA : (activeGpu.isAmd ? COLOR_YELLOW : COLOR_CYAN);
     ctx.fillStyle = gpuColor;
     ctx.fillText(`${activeGpu.cleanName} [${activeGpu.isNvidia ? "NVIDIA DISCRETE" : "INT"}] | ${gpu.temp_c || 50}°C | ${gpuPwr} | VRAM ${gpu.vram_used_mb || 291}MB | CUDA [ACTIVE]`, hudInfoX, hudInfoY + 32);
+
+    // Autonomous Retreat / Recovery Status Banner Callout
+    if (drone.flight_mode === "RTL") {
+        ctx.fillStyle = "rgba(255, 170, 0, 0.28)";
+        ctx.fillRect(cx - 180, 72, 360, 24);
+        ctx.strokeStyle = COLOR_YELLOW;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 180, 72, 360, 24);
+        ctx.font = "bold 11px 'Consolas', monospace";
+        ctx.fillStyle = COLOR_YELLOW;
+        ctx.textAlign = "center";
+        ctx.fillText("AUTONOMOUS RETREAT // RTL CORRIDOR ACTIVE", cx, 88);
+    } else if (drone.flight_mode === "LANDING") {
+        ctx.fillStyle = "rgba(0, 229, 255, 0.28)";
+        ctx.fillRect(cx - 180, 72, 360, 24);
+        ctx.strokeStyle = COLOR_CYAN;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 180, 72, 360, 24);
+        ctx.font = "bold 11px 'Consolas', monospace";
+        ctx.fillStyle = COLOR_CYAN;
+        ctx.textAlign = "center";
+        ctx.fillText("CONTROLLED DESCENT // APPROACHING RECOVERY PAD", cx, 88);
+    } else if (drone.flight_mode === "LANDED") {
+        ctx.fillStyle = "rgba(0, 255, 102, 0.28)";
+        ctx.fillRect(cx - 180, 72, 360, 24);
+        ctx.strokeStyle = COLOR_GREEN;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 180, 72, 360, 24);
+        ctx.font = "bold 11px 'Consolas', monospace";
+        ctx.fillStyle = COLOR_GREEN;
+        ctx.textAlign = "center";
+        ctx.fillText("RECOVERY COMPLETE // ENGINES SAFE & SHUTDOWN", cx, 88);
+    } else if (drone.flight_mode === "EMERGENCY_LAND") {
+        ctx.fillStyle = "rgba(255, 23, 68, 0.38)";
+        ctx.fillRect(cx - 180, 72, 360, 24);
+        ctx.strokeStyle = COLOR_RED;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - 180, 72, 360, 24);
+        ctx.font = "bold 11px 'Consolas', monospace";
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.fillText("FAILSAFE DESCENT // CRITICAL BATTERY", cx, 88);
+    }
 
     // 2. Boresight Reference Waterline Crosshair (_o_)
     ctx.strokeStyle = COLOR_CYAN;

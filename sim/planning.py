@@ -177,3 +177,11 @@ class RelayReliefManager:
         # Discharged relay returns to base
         discharged_relay.role = DroneRole.SURVEY
         discharged_relay.set_flight_mode(FlightMode.RTL)
+        if hasattr(discharged_relay, "trigger_retreat"):
+            discharged_relay.trigger_retreat()
+        elif hasattr(discharged_relay, "home_position"):
+            home = discharged_relay.home_position
+            discharged_relay.set_target_waypoint(np.array([home[0], home[1], 55.0], dtype=np.float64))
+        elif hasattr(discharged_relay, "_initial_pos"):
+            init_p = discharged_relay._initial_pos
+            discharged_relay.set_target_waypoint(np.array([init_p[0], init_p[1], 55.0], dtype=np.float64))

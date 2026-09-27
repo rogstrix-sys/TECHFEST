@@ -153,7 +153,15 @@ class SwarmSimulationCore:
         # 1. Attractive force to target waypoint
         f_att = np.zeros(3, dtype=np.float64)
         target = drone.get_target_waypoint()
-        if target is not None:
+        if drone.flight_mode in (FlightMode.LANDING, FlightMode.EMERGENCY_LAND):
+            if target is None:
+                target = np.array([pos_i[0], pos_i[1], 0.0], dtype=np.float64)
+            err_xy = target[:2] - pos_i[:2]
+            f_xy = err_xy * 1.5 - vel_i[:2] * 1.2 * m_i
+            v_z_des = -min(1.5, max(0.4, 0.4 * pos_i[2]))
+            f_z = 8.0 * (v_z_des - vel_i[2]) * m_i
+            f_att = np.array([f_xy[0], f_xy[1], f_z], dtype=np.float64)
+        elif target is not None:
             err = target - pos_i
             dist = float(np.linalg.norm(err))
             k_att = 1.5
@@ -331,7 +339,7 @@ class SwarmSimulationCore:
 
         num_relays = len(relay_drones)
         for idx, relay in enumerate(relay_drones):
-            if relay.flight_mode in (FlightMode.RTL, FlightMode.LANDED, FlightMode.COMPLETED):
+            if relay.flight_mode in (FlightMode.RTL, FlightMode.LANDING, FlightMode.LANDED, FlightMode.EMERGENCY_LAND, FlightMode.COMPLETED):
                 continue
             fraction = (idx + 1.0) / (num_relays + 1.0)
             target_xy = gcs_xy + fraction * (centroid_xy - gcs_xy)
@@ -364,7 +372,7 @@ class SwarmSimulationCore:
         forces = {}
         for drone_id in sorted(self.drones.keys()):
             drone = self.drones[drone_id]
-            if drone.flight_mode not in (FlightMode.IDLE, FlightMode.COMPLETED):
+            if drone.flight_mode not in (FlightMode.IDLE, FlightMode.LANDED, FlightMode.COMPLETED):
                 forces[drone_id] = self.compute_steering_forces(drone)
             else:
                 forces[drone_id] = np.zeros(3, dtype=np.float64)
@@ -400,6 +408,18 @@ class SwarmSimulationCore:
                     if a_dot_n < 0.0:
                         drone.acceleration -= a_dot_n * normal
 
+            # Touchdown detection for descending drones
+            if drone.flight_mode in (FlightMode.LANDING, FlightMode.EMERGENCY_LAND):
+                if drone.position[2] <= 0.25 and abs(float(drone.velocity[2])) <= 1.0:
+                    drone.position[2] = 0.0
+                    drone.velocity[:] = 0.0
+                    drone.acceleration[:] = 0.0
+                    drone.rotor_speeds[:] = 0.0
+                    drone.set_flight_mode(FlightMode.LANDED)
+                    drone.target_position = None
+                    drone.assigned_poi_id = None
+                    drone.is_transmitting = False
+
         # Phase 4: Subsystem updates (Network & Mission)
         if self.network_engine is not None:
             if hasattr(self.network_engine, "update"):
@@ -419,6 +439,7 @@ class SwarmSimulationCore:
                 drones=self.drones,
                 pois=self.pois,
                 dt=step_dt,
+                network_engine=self.network_engine,
             )
 
         # Phase 5: Generate and buffer telemetry snapshot
@@ -453,6 +474,9 @@ class SwarmSimulationCore:
                 "flight_mode": mode_str,
                 "assigned_poi_id": st.assigned_poi_id,
                 "target_position": [round(float(c), 3) for c in st.target_position] if st.target_position is not None else None,
+                "power_w": round(float(getattr(d.battery, "current_power_w", 0.0)), 1) if hasattr(d, "battery") else 0.0,
+                "est_endurance_min": round(float(d.battery.remaining_flight_time_s() / 60.0), 1) if hasattr(d, "battery") else 30.0,
+                "comms_loss": bool(getattr(d, "is_comms_loss_rtl", False)),
             }
             if getattr(self.config, "include_estimates", False) and st.estimated_position is not None:
                 drone_entry["estimated_position"] = [round(float(c), 3) for c in st.estimated_position]
@@ -512,6 +536,21 @@ class SwarmSimulationCore:
                 "turbulence_intensity": self.weather.config.turbulence_intensity,
             }
 
+        # Mission Time Budget & Priority Queue telemetry
+        rem_s = round(float(self.mission_manager.get_time_remaining()), 1) if (self.mission_manager and hasattr(self.mission_manager, "get_time_remaining")) else round(max(0.0, 300.0 - float(self.sim_time)), 1)
+        b_status = self.mission_manager.get_budget_status() if (self.mission_manager and hasattr(self.mission_manager, "get_budget_status")) else "ON_SCHEDULE"
+        mission_budget_data = {
+            "total_budget_s": float(getattr(self.mission_manager, "mission_time_budget", 300.0)),
+            "elapsed_s": round(float(self.sim_time), 1),
+            "remaining_s": rem_s,
+            "time_remaining_s": rem_s,
+            "status": b_status,
+            "is_all_completed": b_status == "COMPLETED" or (len(self.pois) > 0 and sum(1 for p in self.pois.values() if p["is_completed"]) == len(self.pois)),
+        }
+        priority_queue_data = []
+        if self.mission_manager is not None and hasattr(self.mission_manager, "get_priority_queue_telemetry"):
+            priority_queue_data = self.mission_manager.get_priority_queue_telemetry()
+
         return TelemetrySnapshot(
             sim_time=round(self.sim_time, 3),
             drones=drones_list,
@@ -522,6 +561,8 @@ class SwarmSimulationCore:
             packets=packets_list,
             metrics=metrics,
             weather=weather_data,
+            priority_queue=priority_queue_data,
+            mission_budget=mission_budget_data,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -545,3 +586,19 @@ class SwarmSimulationCore:
         self.flight_events.clear()
         for drone in self.drones.values():
             drone.reset()
+
+    def trigger_fleet_retreat(self) -> None:
+        """Command all active drones in the swarm to autonomously retreat (RTL) and land safely."""
+        if self.mission_manager is not None and hasattr(self.mission_manager, "trigger_fleet_retreat"):
+            self.mission_manager.trigger_fleet_retreat()
+        for drone in self.drones.values():
+            if drone.flight_mode not in (FlightMode.LANDED, FlightMode.IDLE):
+                drone.trigger_retreat()
+
+    def trigger_drone_retreat(self, drone_id: str) -> None:
+        """Command an individual drone to autonomously retreat (RTL) and land safely."""
+        if self.mission_manager is not None and hasattr(self.mission_manager, "trigger_drone_retreat"):
+            self.mission_manager.trigger_drone_retreat(drone_id, self.drones)
+        elif drone_id in self.drones:
+            self.drones[drone_id].trigger_retreat()
+

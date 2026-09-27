@@ -127,7 +127,7 @@ body {
 
 .viewport-header-badge {
     position: absolute;
-    top: 76px;
+    top: 92px;
     left: 20px;
     z-index: 10;
     background: rgba(8, 14, 28, 0.85);
@@ -164,7 +164,7 @@ body {
 
 .slam-stats-overlay {
     position: absolute;
-    top: 115px;
+    top: 132px;
     left: 20px;
     z-index: 10;
     background: rgba(8, 14, 28, 0.75);
@@ -222,45 +222,84 @@ body {
 
 .hud-header {
     position: absolute;
-    top: 10px;
-    left: 12px;
-    right: 12px;
-    height: 60px;
+    top: 6px;
+    left: 10px;
+    right: 10px;
+    height: auto;
+    min-height: 66px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 5px 10px;
+    gap: 4px;
+    z-index: 25;
+    overflow: visible;
+}
+
+/* Row 1: Brand + Metrics */
+.hud-header-row1 {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 0 14px;
-    z-index: 25;
+    gap: 6px;
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow: hidden;
+}
+
+/* Row 2: Controls */
+.hud-header-row2 {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
 }
 
 .hud-brand {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.hud-brand .brand-text {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 }
 
 .hud-brand h1 {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 800;
-    letter-spacing: 1.5px;
+    letter-spacing: 1px;
     color: var(--neon-cyan);
     font-family: var(--font-mono);
+    margin: 0;
+    line-height: 1.1;
+    white-space: nowrap;
 }
 
 .hud-brand .subtitle {
-    font-size: 9px;
-    letter-spacing: 1.2px;
+    font-size: 8px;
+    letter-spacing: 0.8px;
     color: var(--text-muted);
+    display: block;
+    line-height: 1.1;
+    margin-top: 1px;
+    white-space: nowrap;
 }
 
 .radar-ping {
-    width: 14px;
-    height: 14px;
+    width: 10px;
+    height: 10px;
     background: var(--neon-cyan);
     border-radius: 50%;
     position: relative;
-    box-shadow: 0 0 12px var(--neon-cyan);
+    box-shadow: 0 0 10px var(--neon-cyan);
     animation: pulse 1.8s infinite;
+    flex-shrink: 0;
 }
 
 @keyframes pulse {
@@ -271,35 +310,50 @@ body {
 
 .hud-metrics {
     display: flex;
-    gap: 16px;
+    gap: 5px;
     align-items: center;
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
 }
 
 .metric-card {
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
     font-family: var(--font-mono);
+    padding: 3px 6px;
+    background: rgba(10, 20, 36, 0.55);
+    border: 1px solid rgba(0, 229, 255, 0.15);
+    border-radius: 4px;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .metric-label {
-    font-size: 8px;
-    letter-spacing: 1px;
+    font-size: 7.5px;
+    letter-spacing: 0.8px;
     color: var(--text-muted);
+    line-height: 1;
+    margin-bottom: 2px;
 }
 
 .metric-val {
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 700;
+    line-height: 1;
 }
 
 .badge {
     display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 9.5px;
     font-weight: bold;
     font-family: var(--font-mono);
+    line-height: 1;
+    white-space: nowrap;
 }
 
 .badge-active {
@@ -311,7 +365,9 @@ body {
 .hud-controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .view-mode-group {
@@ -320,12 +376,21 @@ body {
     border: 1px solid rgba(0, 229, 255, 0.3);
     border-radius: 4px;
     overflow: hidden;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .view-mode-group .btn-mode {
     border-radius: 0;
     border: none;
     border-right: 1px solid rgba(0, 229, 255, 0.2);
+    padding: 4px 7px;
+    font-size: 10px;
+    height: 28px;
+    line-height: 18px;
+    box-sizing: border-box;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .view-mode-group .btn-mode:last-child {
@@ -342,13 +407,18 @@ body {
     background: rgba(0, 229, 255, 0.12);
     border: 1px solid var(--neon-cyan);
     color: var(--neon-cyan);
-    padding: 5px 10px;
-    font-size: 11px;
+    padding: 4px 7px;
+    font-size: 10px;
+    height: 28px;
+    line-height: 18px;
+    box-sizing: border-box;
     font-weight: 700;
     font-family: var(--font-mono);
     border-radius: 4px;
     cursor: pointer;
     transition: all 0.2s ease;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .btn:hover {
@@ -404,9 +474,15 @@ body {
     border: 1px solid var(--neon-cyan);
     color: var(--neon-cyan);
     font-family: var(--font-mono);
-    font-size: 11px;
-    padding: 4px 8px;
+    font-size: 10px;
+    padding: 3px 6px;
+    height: 28px;
+    line-height: 18px;
+    box-sizing: border-box;
     border-radius: 4px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    cursor: pointer;
 }
 
 /* ==========================================================================
@@ -415,7 +491,7 @@ body {
 
 .hud-left {
     position: absolute;
-    top: 80px;
+    top: 94px;
     left: 12px;
     width: 270px;
     bottom: 130px;
@@ -459,31 +535,87 @@ body {
 }
 
 .drone-card {
-    background: rgba(15, 27, 50, 0.6);
-    border-left: 3px solid var(--neon-cyan);
+    background: rgba(15, 27, 50, 0.7);
+    border: 1px solid rgba(0, 229, 255, 0.15);
+    border-left: 4px solid var(--neon-cyan);
     border-radius: 4px;
     padding: 6px 8px;
     font-family: var(--font-mono);
     font-size: 10px;
     cursor: pointer;
-    transition: background 0.2s;
+    transition: all 0.15s ease;
+    user-select: none;
+    position: relative;
+    pointer-events: auto;
 }
 
 .drone-card:hover {
-    background: rgba(0, 229, 255, 0.15);
+    background: rgba(0, 229, 255, 0.18);
+    border-color: rgba(0, 229, 255, 0.5);
+    transform: translateX(3px);
+}
+
+.drone-card:active {
+    transform: scale(0.98);
+    background: rgba(0, 229, 255, 0.22);
 }
 
 .drone-card.selected {
-    border: 1px solid var(--neon-cyan);
-    background: rgba(0, 229, 255, 0.2);
+    background: rgba(0, 229, 255, 0.25) !important;
+    border: 1.5px solid var(--neon-cyan) !important;
+    border-left: 5px solid var(--neon-cyan) !important;
+    box-shadow: 0 0 16px rgba(0, 229, 255, 0.5), inset 0 0 10px rgba(0, 229, 255, 0.2) !important;
+    transform: translateX(3px);
 }
 
+.drone-card.selected .drone-id-tag::before {
+    content: "▶ ";
+    color: var(--neon-cyan);
+    font-size: 9px;
+    margin-right: 2px;
+}
+
+.drone-card.survey,
 .drone-card.surveyor {
     border-left-color: var(--neon-cyan);
 }
 
 .drone-card.relay {
     border-left-color: var(--neon-yellow);
+}
+
+.drone-card.relay.selected {
+    border-color: var(--neon-yellow) !important;
+    border-left: 5px solid var(--neon-yellow) !important;
+    box-shadow: 0 0 16px rgba(255, 214, 0, 0.5), inset 0 0 10px rgba(255, 214, 0, 0.2) !important;
+}
+
+.drone-card.relay.selected .drone-id-tag::before {
+    color: var(--neon-yellow);
+}
+
+.drone-card.scout {
+    border-left-color: #a855f7;
+}
+
+.drone-card.scout.selected {
+    border-color: #a855f7 !important;
+    border-left: 5px solid #a855f7 !important;
+    box-shadow: 0 0 16px rgba(168, 85, 247, 0.5), inset 0 0 10px rgba(168, 85, 247, 0.2) !important;
+}
+
+.drone-card.scout.selected .drone-id-tag::before {
+    color: #a855f7;
+}
+
+.drone-card-rtl-btn {
+    transition: all 0.15s ease;
+    cursor: pointer;
+}
+
+.drone-card-rtl-btn:hover {
+    background: rgba(255, 214, 0, 0.25) !important;
+    box-shadow: 0 0 8px rgba(255, 214, 0, 0.6) !important;
 }
 
 .drone-header {
@@ -502,7 +634,7 @@ body {
 
 .hud-right {
     position: absolute;
-    top: 80px;
+    top: 94px;
     right: 12px;
     width: 270px;
     bottom: 130px;
@@ -627,6 +759,26 @@ body {
     border-left: 3px solid var(--neon-yellow);
 }
 
+.poi-card.low {
+    border-left: 3px solid #a855f7;
+}
+
+.poi-card {
+    cursor: pointer;
+    transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+    user-select: none;
+}
+
+.poi-card:hover {
+    background: rgba(0, 229, 255, 0.18);
+    border-color: rgba(0, 229, 255, 0.45);
+    transform: translateY(-2px);
+}
+
+.poi-card:active {
+    transform: scale(0.98);
+}
+
 .poi-progress-bar {
     height: 4px;
     background: rgba(255, 255, 255, 0.1);
@@ -652,7 +804,7 @@ body {
 
 .analytics-drawer {
     position: absolute;
-    top: 76px;
+    top: 94px;
     left: 290px;
     right: 290px;
     bottom: 125px;
@@ -965,3 +1117,58 @@ body {
     pointer-events: none; /* All mouse clicks, drags, orbits, and zooms pass through to Three.js OrbitControls */
     z-index: 10;
 }
+
+/* ==========================================================================
+   Responsive Adaptations & Anti-Clipping Media Queries
+   ========================================================================== */
+
+/* Wide Laptops & High-DPI Displays (below 1720px) */
+@media (max-width: 1720px) {
+    #metric-card-rate,
+    #metric-card-ekf {
+        display: none !important;
+    }
+}
+
+/* Standard 1080p Laptops with 125% DPI (below 1540px) */
+@media (max-width: 1540px) {
+    #metric-card-latency,
+    #metric-card-gpu {
+        display: none !important;
+    }
+}
+
+/* Compact Laptop Windows (below 1380px) */
+@media (max-width: 1380px) {
+    #metric-card-mesh {
+        display: none !important;
+    }
+    .hud-brand .subtitle {
+        display: none !important;
+    }
+}
+
+/* Small Laptop Windows (below 1220px) */
+@media (max-width: 1220px) {
+    #metric-card-pois {
+        display: none !important;
+    }
+}
+
+/* Half-screen Windows & 1024px displays (below 1100px) */
+@media (max-width: 1100px) {
+    .hud-metrics {
+        display: none !important;
+    }
+}
+
+/* Ultra-compact Windows (below 920px) */
+@media (max-width: 920px) {
+    .hud-header {
+        justify-content: flex-start;
+    }
+    .hud-brand {
+        display: none !important;
+    }
+}
+
