@@ -10,7 +10,8 @@ def test_find_browser_app_executable():
     exe = find_browser_app_executable()
     assert exe is not None
     assert os.path.isfile(exe)
-    assert "chrome.exe" in exe.lower() or "msedge.exe" in exe.lower()
+    lower = exe.lower()
+    assert any(b in lower for b in ["chrome", "msedge", "edge", "brave", "chromium"])
 
 
 def test_is_server_alive_closed_port():

@@ -135,11 +135,12 @@ class DisasterMissionManager:
         self.relief_manager = RelayReliefManager(low_battery_threshold=0.35, takeover_min_battery=0.65)
 
         # GCS Automated Battery Charging / Hot-Swap Pads
+        gx, gy, gz = float(self.gcs_position[0]), float(self.gcs_position[1]), float(self.gcs_position[2])
         self.charging_pads: List[Dict[str, Any]] = [
-            {"id": "PAD_1", "position": [-15.0, -250.0, 0.0], "status": "AVAILABLE", "assigned_drone_id": None, "swap_timer": 0.0},
-            {"id": "PAD_2", "position": [-5.0, -250.0, 0.0], "status": "AVAILABLE", "assigned_drone_id": None, "swap_timer": 0.0},
-            {"id": "PAD_3", "position": [5.0, -250.0, 0.0], "status": "AVAILABLE", "assigned_drone_id": None, "swap_timer": 0.0},
-            {"id": "PAD_4", "position": [15.0, -250.0, 0.0], "status": "AVAILABLE", "assigned_drone_id": None, "swap_timer": 0.0},
+            {"id": "PAD_1", "position": [gx - 15.0, gy, gz], "status": "AVAILABLE", "assigned_drone_id": None, "swap_timer": 0.0},
+            {"id": "PAD_2", "position": [gx - 5.0, gy, gz], "status": "AVAILABLE", "assigned_drone_id": None, "swap_timer": 0.0},
+            {"id": "PAD_3", "position": [gx + 5.0, gy, gz], "status": "AVAILABLE", "assigned_drone_id": None, "swap_timer": 0.0},
+            {"id": "PAD_4", "position": [gx + 15.0, gy, gz], "status": "AVAILABLE", "assigned_drone_id": None, "swap_timer": 0.0},
         ]
 
         # Tactical Visual Comms Chatter Feed (No Audio)

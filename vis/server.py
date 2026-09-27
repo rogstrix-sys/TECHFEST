@@ -70,102 +70,152 @@ def get_gpu_telemetry() -> Dict[str, Any]:
 
 
 def create_default_simulation() -> SwarmSimulationCore:
-    """Instantiate a fully configured post-disaster UAV swarm simulation (16-UAV Fleet, 700x700m Theater)."""
+    """Instantiate a fully configured UAV swarm simulation aligned with Sector Delta 3D Diorama."""
     config = SimulationConfig(
         dt=0.05,
-        world_bounds_x=(-350.0, 350.0),
-        world_bounds_y=(-350.0, 350.0),
+        world_bounds_x=(-175.0, 175.0),
+        world_bounds_y=(-175.0, 175.0),
         world_bounds_z=(0.0, 130.0),
-        gcs_position=(0.0, -250.0, 0.0),
-        gcs_comm_radius=220.0,
+        gcs_position=(0.0, -145.0, 0.0),
+        gcs_comm_radius=280.0,
         enable_downwash=True,
         enable_vsm_relays=True,
         enable_weather=True,
-        wind_config=WindConfig(mean_speed_mps=5.5, direction_deg=45.0, turbulence_intensity="MODERATE", gust_probability=0.03, gust_magnitude_mps=6.0),
+        wind_config=WindConfig(mean_speed_mps=5.5, direction_deg=45.0, turbulence_intensity="LIGHT", gust_probability=0.03, gust_magnitude_mps=6.0),
     )
     sim = SwarmSimulationCore(config=config)
 
-    # 1. Add disaster obstacles (collapsed high-rises and rubble)
-    for obs in create_default_disaster_obstacles():
-        sim.add_obstacle(obs)
-
-    # Extra regional obstacles across the 700x700m operational theater
-    extra_obstacles = [
+    # 1. Add architectural obstacles matching Sector Delta visual 3D buildings
+    sector_delta_obstacles = [
+        # Tower 1: Iconic Faceted Glass Skyscraper with Angled Crown (center: -60, 20)
         ObstacleAABB(
-            id="OBS_BRIDGE_PYLON",
-            name="River Truss Bridge Pylon",
-            min_pt=np.array([-200.0, 210.0, 0.0]),
-            max_pt=np.array([-140.0, 260.0, 35.0]),
-            material="reinforced_concrete",
-            base_attenuation_db=22.0,
-        ),
-        ObstacleAABB(
-            id="OBS_SUBSTATION",
-            name="Grid Substation Transformers",
-            min_pt=np.array([120.0, 10.0, 0.0]),
-            max_pt=np.array([180.0, 60.0, 26.0]),
-            material="metal_composite",
-            base_attenuation_db=20.0,
-        ),
-        ObstacleAABB(
-            id="OBS_WEST_PLAZA",
-            name="Collapsed West Plaza Tower",
-            min_pt=np.array([-260.0, -170.0, 0.0]),
-            max_pt=np.array([-190.0, -100.0, 40.0]),
+            id="OBS_TOWER_GLASS",
+            name="Faceted Glass Skyscraper",
+            min_pt=np.array([-80.0, 0.0, 0.0]),
+            max_pt=np.array([-40.0, 40.0, 80.0]),
             material="steel_concrete",
             base_attenuation_db=24.0,
         ),
+        # Tower 2: Hexagonal / Cylindrical High-Rise (center: -110, -18)
         ObstacleAABB(
-            id="OBS_EAST_SILOS",
-            name="Chemical Silos East",
-            min_pt=np.array([190.0, 130.0, 0.0]),
-            max_pt=np.array([250.0, 190.0, 42.0]),
-            material="heavy_concrete",
+            id="OBS_TOWER_HEX",
+            name="Hexagonal Glass High-Rise",
+            min_pt=np.array([-128.0, -36.0, 0.0]),
+            max_pt=np.array([-92.0, 0.0, 92.0]),
+            material="reinforced_concrete",
             base_attenuation_db=25.0,
         ),
+        # Tower 3: Stepped Corporate High-Rise (center: 10, 52)
+        ObstacleAABB(
+            id="OBS_TOWER_STEPPED",
+            name="Stepped Corporate High-Rise",
+            min_pt=np.array([-12.0, 32.0, 0.0]),
+            max_pt=np.array([32.0, 72.0, 96.0]),
+            material="reinforced_concrete",
+            base_attenuation_db=24.0,
+        ),
+        # Tower 4: Rear Slender Spire Tower (center: -25, 88)
+        ObstacleAABB(
+            id="OBS_TOWER_SPIRE",
+            name="Slender Spire High-Rise",
+            min_pt=np.array([-38.0, 75.0, 0.0]),
+            max_pt=np.array([-12.0, 101.0, 110.0]),
+            material="steel_concrete",
+            base_attenuation_db=26.0,
+        ),
+        # Tower 5: Sandstone Tower with Rooftop Relay Pad (center: 70, -12)
+        ObstacleAABB(
+            id="OBS_TOWER_SANDSTONE",
+            name="Sandstone Tower (Relay Hub)",
+            min_pt=np.array([50.0, -33.0, 0.0]),
+            max_pt=np.array([90.0, 9.0, 76.0]),
+            material="heavy_concrete",
+            base_attenuation_db=22.0,
+        ),
+        # Tower 6: Sandstone High-Rise East (center: 118, -42)
+        ObstacleAABB(
+            id="OBS_TOWER_SANDSTONE_EAST",
+            name="Sandstone Tower East",
+            min_pt=np.array([102.0, -60.0, 0.0]),
+            max_pt=np.array([134.0, -24.0, 82.0]),
+            material="heavy_concrete",
+            base_attenuation_db=23.0,
+        ),
+        # Tower 7: Modern Curved White High-Rise (center: 135, 20)
+        ObstacleAABB(
+            id="OBS_TOWER_WHITE",
+            name="Modern Curved High-Rise",
+            min_pt=np.array([120.0, 4.0, 0.0]),
+            max_pt=np.array([150.0, 36.0, 66.0]),
+            material="concrete_debris",
+            base_attenuation_db=20.0,
+        ),
+        # Mid-Rise 1 (center: 12, -42)
+        ObstacleAABB(
+            id="OBS_MIDRISE_1",
+            name="Center Plaza Mid-Rise",
+            min_pt=np.array([-3.0, -58.0, 0.0]),
+            max_pt=np.array([27.0, -26.0, 36.0]),
+            material="reinforced_concrete",
+            base_attenuation_db=18.0,
+        ),
+        # Mid-Rise 2 (center: -18, -55)
+        ObstacleAABB(
+            id="OBS_MIDRISE_2",
+            name="West Avenue Mid-Rise",
+            min_pt=np.array([-30.0, -68.0, 0.0]),
+            max_pt=np.array([-6.0, -42.0, 30.0]),
+            material="reinforced_concrete",
+            base_attenuation_db=18.0,
+        ),
     ]
-    for obs in extra_obstacles:
+    for obs in sector_delta_obstacles:
         sim.add_obstacle(obs)
 
-    # 2. Add high-priority disaster Points of Interest (8 PoIs across all quadrants)
-    sim.add_poi("POI_SURVIVORS", position=[220.0, 160.0, 25.0], priority="CRITICAL", required_dwell_time=12.0)
-    sim.add_poi("POI_COLLAPSE", position=[-210.0, 90.0, 32.0], priority="HIGH", required_dwell_time=10.0)
-    sim.add_poi("POI_HAZARD", position=[30.0, 260.0, 28.0], priority="MEDIUM", required_dwell_time=8.0)
-    sim.add_poi("POI_BRIDGE", position=[-170.0, 240.0, 22.0], priority="HIGH", required_dwell_time=8.0)
-    sim.add_poi("POI_SHELTER", position=[190.0, -80.0, 20.0], priority="MEDIUM", required_dwell_time=6.0)
-    sim.add_poi("POI_HOSPITAL", position=[-40.0, 140.0, 35.0], priority="CRITICAL", required_dwell_time=12.0)
-    sim.add_poi("POI_SUBSTATION", position=[160.0, 40.0, 26.0], priority="HIGH", required_dwell_time=10.0)
-    sim.add_poi("POI_HIGHWAY", position=[-240.0, -120.0, 20.0], priority="MEDIUM", required_dwell_time=8.0)
+    # 2. Add high-priority disaster Points of Interest located INSIDE Sector Delta diorama
+    sim.add_poi("POI_SURVIVORS", position=[25.0, -55.0, 20.0], priority="CRITICAL", required_dwell_time=12.0)
+    sim.add_poi("POI_COLLAPSE", position=[-85.0, -60.0, 18.0], priority="HIGH", required_dwell_time=10.0)
+    sim.add_poi("POI_HAZARD", position=[-20.0, 95.0, 26.0], priority="MEDIUM", required_dwell_time=8.0)
+    sim.add_poi("POI_BRIDGE", position=[40.0, -95.0, 16.0], priority="HIGH", required_dwell_time=8.0)
+    sim.add_poi("POI_SHELTER", position=[-50.0, -85.0, 16.0], priority="MEDIUM", required_dwell_time=6.0)
+    sim.add_poi("POI_HOSPITAL", position=[-60.0, 25.0, 30.0], priority="CRITICAL", required_dwell_time=12.0)
+    sim.add_poi("POI_SUBSTATION", position=[115.0, -40.0, 24.0], priority="HIGH", required_dwell_time=10.0)
+    sim.add_poi("POI_HIGHWAY", position=[-100.0, -100.0, 14.0], priority="MEDIUM", required_dwell_time=8.0)
 
-    # 3. Add heterogeneous fleet of 16 UAVs (Surveyors, High-Altitude Relays, Scouts)
+    # 3. Add heterogeneous fleet of 16 UAVs spawning on the GCS launch apron on the diorama board
     fleet_init = [
-        # Heavy Disaster Surveyors
-        ("UAV_1", DroneRole.SURVEY, [-90.0, -240.0, 0.0]),
-        ("UAV_2", DroneRole.SURVEY, [-65.0, -240.0, 0.0]),
-        ("UAV_3", DroneRole.SURVEY, [-40.0, -240.0, 0.0]),
-        ("UAV_4", DroneRole.SURVEY, [-15.0, -240.0, 0.0]),
-        ("UAV_5", DroneRole.SURVEY, [15.0, -240.0, 0.0]),
-        ("UAV_6", DroneRole.SURVEY, [40.0, -240.0, 0.0]),
-        ("UAV_7", DroneRole.SURVEY, [65.0, -240.0, 0.0]),
-        ("UAV_8", DroneRole.SURVEY, [90.0, -240.0, 0.0]),
-        # Elevated High-Altitude Multi-Hop Relays (70-90m altitude corridor)
-        ("RELAY_1", DroneRole.RELAY, [-60.0, -200.0, 0.0]),
-        ("RELAY_2", DroneRole.RELAY, [-20.0, -200.0, 0.0]),
-        ("RELAY_3", DroneRole.RELAY, [20.0, -200.0, 0.0]),
-        ("RELAY_4", DroneRole.RELAY, [60.0, -200.0, 0.0]),
-        # Rapid Reconnaissance Scouts
-        ("SCOUT_1", DroneRole.SURVEY, [-130.0, -220.0, 0.0]),
-        ("SCOUT_2", DroneRole.SURVEY, [130.0, -220.0, 0.0]),
-        ("SCOUT_3", DroneRole.SURVEY, [-70.0, -220.0, 0.0]),
-        ("SCOUT_4", DroneRole.SURVEY, [70.0, -220.0, 0.0]),
+        # Heavy Disaster Surveyors (Front row along tactical apron y = -145)
+        ("UAV_1", DroneRole.SURVEY, [-70.0, -145.0, 0.2]),
+        ("UAV_2", DroneRole.SURVEY, [-50.0, -145.0, 0.2]),
+        ("UAV_3", DroneRole.SURVEY, [-30.0, -145.0, 0.2]),
+        ("UAV_4", DroneRole.SURVEY, [-10.0, -145.0, 0.2]),
+        ("UAV_5", DroneRole.SURVEY, [10.0, -145.0, 0.2]),
+        ("UAV_6", DroneRole.SURVEY, [30.0, -145.0, 0.2]),
+        ("UAV_7", DroneRole.SURVEY, [50.0, -145.0, 0.2]),
+        ("UAV_8", DroneRole.SURVEY, [70.0, -145.0, 0.2]),
+        # Elevated High-Altitude Multi-Hop Relays (Relay pad row y = -136)
+        ("RELAY_1", DroneRole.RELAY, [-45.0, -136.0, 0.2]),
+        ("RELAY_2", DroneRole.RELAY, [-15.0, -136.0, 0.2]),
+        ("RELAY_3", DroneRole.RELAY, [15.0, -136.0, 0.2]),
+        ("RELAY_4", DroneRole.RELAY, [45.0, -136.0, 0.2]),
+        # Rapid Reconnaissance Scouts (Scout pad row y = -153)
+        ("SCOUT_1", DroneRole.SURVEY, [-45.0, -153.0, 0.2]),
+        ("SCOUT_2", DroneRole.SURVEY, [-15.0, -153.0, 0.2]),
+        ("SCOUT_3", DroneRole.SURVEY, [15.0, -153.0, 0.2]),
+        ("SCOUT_4", DroneRole.SURVEY, [45.0, -153.0, 0.2]),
     ]
     for d_id, role, pos in fleet_init:
         drone = Drone(d_id, role=role, initial_pos=np.array(pos, dtype=np.float64))
         sim.add_drone(drone)
 
-    # 4. Attach subsystems
+    # 4. Attach subsystems with extended mission budget and generous comms timeout
     sim.set_network_engine(FANETNetworkEngine())
-    sim.set_mission_manager(DisasterMissionManager(gcs_position=config.gcs_position))
+    sim.set_mission_manager(DisasterMissionManager(
+        gcs_position=config.gcs_position,
+        mission_time_budget=1200.0,
+        comms_loss_timeout=8.0,
+        survey_dwell_radius=14.0,
+    ))
 
     return sim
 
@@ -192,6 +242,7 @@ class SimulationServer:
             range_noise_std_m=0.03
         )
         self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
+        self.latest_payload: Optional[str] = None
 
     def reset(self) -> None:
         """Reset simulation and SLAM occupancy grid to initial disaster scenario."""
@@ -318,8 +369,9 @@ class SimulationServer:
                     data["gpu"] = get_gpu_telemetry()
 
                     # 7. Broadcast to connected WebSockets
+                    payload = json.dumps(data)
+                    self.latest_payload = payload
                     if self.clients:
-                        payload = json.dumps(data)
                         dead_clients = set()
                         for ws in list(self.clients):
                             try:
@@ -591,6 +643,11 @@ async def post_control(payload: Dict[str, Any]):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     server_manager.clients.add(websocket)
+    if server_manager.latest_payload:
+        try:
+            await websocket.send_text(server_manager.latest_payload)
+        except Exception:
+            pass
     try:
         while True:
             msg = await websocket.receive_text()

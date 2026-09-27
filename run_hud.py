@@ -35,17 +35,28 @@ from typing import Optional
 
 
 def find_browser_app_executable() -> Optional[str]:
-    """Locate Chrome or Edge executable on Windows for standalone desktop app window mode."""
+    """Locate Chrome or Edge executable on Windows, macOS, or Linux for standalone desktop app window mode."""
     candidates = [
+        # Windows
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
+        # macOS
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        # Linux
+        shutil.which("google-chrome") or "",
+        shutil.which("google-chrome-stable") or "",
+        shutil.which("chromium") or "",
+        shutil.which("chromium-browser") or "",
     ]
     for p in candidates:
-        if os.path.isfile(p):
+        if p and os.path.isfile(p):
             return p
     return None
 

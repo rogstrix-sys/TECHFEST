@@ -21,6 +21,10 @@
                 <span class="v-title">VIEWPORT 1: EXTERNAL THEATER (GROUND TRUTH REALITY)</span>
                 <span class="v-sub">OPTICAL 3D SENSING &bull; 16-UAV FLEET &bull; RF TUBES</span>
             </div>
+            <div class="theater-nav-hint" id="theater-nav-hint">
+                <span class="pulse-dot cyan" style="width:5px;height:5px;"></span>
+                <span><b>NAVIGATION:</b> Left-Click to Rotate &bull; <b>Right-Click Drag</b> (or <span class="hint-pill">&#9995; DRAG</span>) to Move Screen &bull; <b>Double-Click</b> to Center &bull; <b>WASD / Arrows</b> to Pan</span>
+            </div>
             <div id="canvas-theater-container" class="canvas-holder"></div>
             <!-- Military Aerospace Heads-Up Display (MIL-STD-1787D) Overlay Layer -->
             <canvas id="web-military-hud" class="web-military-hud"></canvas>
@@ -301,6 +305,7 @@
                 <button class="btn btn-sm btn-cam" data-cam="fpv">FPV CHASE</button>
                 <button class="btn btn-sm btn-cam" data-cam="gcs">GCS MAST</button>
                 <button class="btn btn-sm btn-cam" data-cam="flir">FLIR THERMAL</button>
+                <button class="btn btn-sm btn-drag-mode" id="btn-toggle-pan" title="Toggle Drag/Pan: Click to switch Left-Click between Move Map (Drag) and Rotate. (You can also use Right-Click Drag, WASD keys, or Double-Click anywhere).">&#9995; DRAG: OFF</button>
             </div>
         </div>
         <div id="poi-list" class="poi-grid">
@@ -308,6 +313,7 @@
         </div>
     </footer>
 
+    <script src="/static/js/sector_delta_diorama.js?v=2.5.0"></script>
     <script src="/static/js/cockpit.js?v=2.5.0"></script>
 </body>
 </html>
