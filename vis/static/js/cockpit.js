@@ -101,32 +101,17 @@ let outerGroundMesh = null;
 let gcsBaseGroup = null;
 
 function applyScenarioUI(scen) {
-    if (!scen) return;
-    currentScenario = scen;
-    const isChallenge = (scen === "challenge");
-    const btn = document.getElementById("btn-challenge");
-    if (btn) {
-        btn.classList.toggle("active", isChallenge);
-        btn.textContent = isChallenge ? "IIT-B 1000m: ON" : "IIT-B 1000m";
-    }
+    currentScenario = "sector_delta";
     const card = document.getElementById("metric-card-challenge");
     if (card) {
-        card.style.display = isChallenge ? "flex" : "none";
+        card.style.display = "none";
     }
+    if (outerGroundMesh) outerGroundMesh.visible = true;
+    if (gcsBaseGroup) gcsBaseGroup.visible = true;
     if (window.SectorDelta && typeof window.SectorDelta.setScenario === "function") {
-        window.SectorDelta.setScenario(scen);
+        window.SectorDelta.setScenario("sector_delta");
     }
-    if (outerGroundMesh) outerGroundMesh.visible = !isChallenge;
-    if (gcsBaseGroup) gcsBaseGroup.visible = !isChallenge;
-
-    // Reposition camera if switching to challenge mode to view 1000m arena
-    if (isChallenge && cameraTheater && controlsTheater) {
-        smoothPanProgress = 1.0;
-        controlsTheater.maxDistance = 3000;
-        cameraTheater.position.set(450, -850, 550);
-        controlsTheater.target.set(450, 0, 0);
-        controlsTheater.update();
-    } else if (!isChallenge && cameraTheater && controlsTheater) {
+    if (cameraTheater && controlsTheater) {
         smoothPanProgress = 1.0;
         controlsTheater.maxDistance = 1600;
         cameraTheater.position.set(135, -345, 215);

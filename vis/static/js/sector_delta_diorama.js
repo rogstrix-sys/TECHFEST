@@ -2217,12 +2217,11 @@ const SectorDelta = (() => {
             console.log("[SectorDelta] Diorama initialized with 3D buildings, plinth, overpasses, and trees.");
         },
 
-        // Switch visual environment between Sector Delta diorama and 1000m Challenge Arena
+        // Maintain 3D City Diorama as the single unified visual environment
         setScenario(scenarioName) {
-            const isChallenge = (scenarioName === "challenge");
-            if (dioramaGroup) dioramaGroup.visible = !isChallenge;
-            if (challengeGroup) challengeGroup.visible = isChallenge;
-            console.log(`[SectorDelta] Visual scenario active: ${scenarioName}`);
+            if (dioramaGroup) dioramaGroup.visible = true;
+            if (challengeGroup) challengeGroup.visible = false;
+            console.log(`[SectorDelta] 3D City Diorama active`);
         },
 
         // Links are rendered as simple clean colored lines in cockpit.js
