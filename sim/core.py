@@ -171,15 +171,19 @@ class SwarmSimulationCore:
                 f_att = err * k_att
 
         # Prioritized Safety Attenuation: Attenuate attractive force along blocked paths
+        r_sep_limit = getattr(drone.limits, "separation_radius", 6.0)
+        atten_horizon = max(8.0, r_sep_limit * 1.5)
+        atten_barrier = max(2.2, r_sep_limit * 1.1)
+
         for other_id in sorted(self.drones.keys()):
             if other_id == drone.id:
                 continue
             other = self.drones[other_id]
             delta = pos_i - other.position
             d_peer = float(np.linalg.norm(delta))
-            if 0.0 < d_peer < 8.0:
+            if 0.0 < d_peer < atten_horizon:
                 r_hat = delta / d_peer
-                gamma = 0.0 if d_peer <= 2.2 else ((d_peer - 2.2) / (8.0 - 2.2)) ** 2
+                gamma = 0.0 if d_peer <= atten_barrier else ((d_peer - atten_barrier) / (atten_horizon - atten_barrier)) ** 2
                 proj = max(0.0, float(np.dot(f_att, -r_hat)))
                 f_att -= proj * (1.0 - gamma) * (-r_hat)
 
@@ -217,21 +221,33 @@ class SwarmSimulationCore:
             delta = pos_i - other.position
             dist = float(np.linalg.norm(delta))
 
-            # Dynamic closing velocity repulsive horizon
+            # Dynamic closing velocity repulsive horizon scaled by separation_radius
             if dist > 1e-4:
                 r_hat = delta / dist
                 v_rel = vel_i - other.velocity
                 v_close = max(0.0, float(-np.dot(v_rel, r_hat)))
-                r_sep_dyn = max(6.0, (v_close ** 2) / 6.0 + 0.8 * v_close + 2.5)
-
-                if dist < r_sep_dyn:
-                    d_eff = max(dist - 1.8, 0.1)
-                    r_eff = max(r_sep_dyn - 1.8, 0.2)
-                    mag_apf = 45.0 * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
-                    mag_damp = 12.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m_i
-                    mag_barrier = 80.0 * ((2.2 / max(dist, 0.1)) ** 3) if dist < 2.5 else 0.0
-                    mag_total = min(mag_apf + mag_damp + mag_barrier, 250.0)
-                    f_sep += mag_total * r_hat
+                if r_sep_limit > 6.0:
+                    r_sep_dyn = max(r_sep_limit * 1.35, (v_close ** 2) / 4.0 + 1.2 * v_close + r_sep_limit * 1.1)
+                    if dist < r_sep_dyn:
+                        d_eff = max(dist - (r_sep_limit * 0.4), 0.1)
+                        r_eff = max(r_sep_dyn - (r_sep_limit * 0.4), 0.2)
+                        scale = max(1.0, (r_sep_dyn / 6.0) ** 2)
+                        mag_apf = 60.0 * scale * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
+                        mag_damp = 18.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m_i
+                        barrier_dist = r_sep_limit * 1.15
+                        mag_barrier = 150.0 * ((barrier_dist / max(dist, 0.1)) ** 3) if dist < barrier_dist else 0.0
+                        mag_total = min(mag_apf + mag_damp + mag_barrier, 400.0)
+                        f_sep += mag_total * r_hat
+                else:
+                    r_sep_dyn = max(6.0, (v_close ** 2) / 6.0 + 0.8 * v_close + 2.5)
+                    if dist < r_sep_dyn:
+                        d_eff = max(dist - 1.8, 0.1)
+                        r_eff = max(r_sep_dyn - 1.8, 0.2)
+                        mag_apf = 45.0 * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
+                        mag_damp = 12.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m_i
+                        mag_barrier = 80.0 * ((2.2 / max(dist, 0.1)) ** 3) if dist < 2.5 else 0.0
+                        mag_total = min(mag_apf + mag_damp + mag_barrier, 250.0)
+                        f_sep += mag_total * r_hat
             elif dist <= 1e-4:
                 f_sep += np.array([1.0, 0.0, 0.0], dtype=np.float64) * 80.0
 
@@ -338,15 +354,37 @@ class SwarmSimulationCore:
         gcs_xy = np.array(self.config.gcs_position[:2], dtype=np.float64)
 
         num_relays = len(relay_drones)
-        for idx, relay in enumerate(relay_drones):
-            if relay.flight_mode in (FlightMode.RTL, FlightMode.LANDING, FlightMode.LANDED, FlightMode.EMERGENCY_LAND, FlightMode.COMPLETED):
-                continue
-            fraction = (idx + 1.0) / (num_relays + 1.0)
-            target_xy = gcs_xy + fraction * (centroid_xy - gcs_xy)
-            # Partition altitude in Layer 4 ([70, 90]m)
-            target_z = 70.0 + idx * (20.0 / max(num_relays - 1, 1))
-            target_pos = np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64)
-            relay.set_target_waypoint(target_pos)
+
+        # Check if fleet is dispersed across both West (x < 0) and East (x >= 0) sectors
+        west_surveys = [d for d in survey_drones if d.position[0] < 0]
+        east_surveys = [d for d in survey_drones if d.position[0] >= 0]
+
+        if west_surveys and east_surveys and num_relays >= 2:
+            west_centroid = np.mean([d.position[:2] for d in west_surveys], axis=0)
+            east_centroid = np.mean([d.position[:2] for d in east_surveys], axis=0)
+            num_west = num_relays // 2
+            for idx, relay in enumerate(relay_drones):
+                if relay.flight_mode in (FlightMode.IDLE, FlightMode.TAKEOFF, FlightMode.RTL, FlightMode.LANDING, FlightMode.LANDED, FlightMode.EMERGENCY_LAND, FlightMode.COMPLETED):
+                    continue
+                if idx < num_west:
+                    frac = (idx + 1.0) / (num_west + 1.0)
+                    target_xy = gcs_xy + frac * (west_centroid - gcs_xy)
+                else:
+                    e_idx = idx - num_west
+                    frac = (e_idx + 1.0) / (num_relays - num_west + 1.0)
+                    target_xy = gcs_xy + frac * (east_centroid - gcs_xy)
+                target_z = 70.0 + idx * (20.0 / max(num_relays - 1, 1))
+                relay.set_target_waypoint(np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64))
+        else:
+            for idx, relay in enumerate(relay_drones):
+                if relay.flight_mode in (FlightMode.IDLE, FlightMode.TAKEOFF, FlightMode.RTL, FlightMode.LANDING, FlightMode.LANDED, FlightMode.EMERGENCY_LAND, FlightMode.COMPLETED):
+                    continue
+                fraction = (idx + 1.0) / (num_relays + 1.0)
+                target_xy = gcs_xy + fraction * (centroid_xy - gcs_xy)
+                # Partition altitude in Layer 4 ([70, 90]m)
+                target_z = 70.0 + idx * (20.0 / max(num_relays - 1, 1))
+                target_pos = np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64)
+                relay.set_target_waypoint(target_pos)
 
     # -------------------------------------------------------------------------
     # Master Step Execution Loop
@@ -420,7 +458,10 @@ class SwarmSimulationCore:
                     drone.assigned_poi_id = None
                     drone.is_transmitting = False
 
-        # Phase 4: Subsystem updates (Network & Mission)
+        # Phase 4: Subsystem updates (Network, Mission & Dynamic POI Spawner)
+        if hasattr(self, "poi_spawner") and self.poi_spawner is not None:
+            self.poi_spawner.update(self.sim_time, self.pois)
+
         if self.network_engine is not None:
             if hasattr(self.network_engine, "update"):
                 self.network_engine.update(
@@ -477,6 +518,11 @@ class SwarmSimulationCore:
                 "power_w": round(float(getattr(d.battery, "current_power_w", 0.0)), 1) if hasattr(d, "battery") else 0.0,
                 "est_endurance_min": round(float(d.battery.remaining_flight_time_s() / 60.0), 1) if hasattr(d, "battery") else 30.0,
                 "comms_loss": bool(getattr(d, "is_comms_loss_rtl", False)),
+                "is_manual_override": bool(st.is_manual_override),
+                "is_fault_injected": bool(st.is_fault_injected),
+                "is_drafting": bool(st.is_drafting),
+                "drafting_leader_id": st.drafting_leader_id,
+                "drafting_saving_pct": float(st.drafting_saving_pct),
             }
             if getattr(self.config, "include_estimates", False) and st.estimated_position is not None:
                 drone_entry["estimated_position"] = [round(float(c), 3) for c in st.estimated_position]
@@ -496,14 +542,25 @@ class SwarmSimulationCore:
             poi = self.pois[poi_id]
             req_time = max(poi["required_dwell_time"], 1e-4)
             progress = round(float(min(1.0, poi["current_dwell_time"] / req_time) * 100.0), 1)
-            pois_list.append({
+            p_dict = {
                 "id": poi["id"],
                 "position": [round(float(c), 2) for c in poi["position"]],
                 "priority": poi["priority"],
                 "progress": progress,
                 "is_completed": poi["is_completed"],
                 "assigned_drone": poi["assigned_drone_id"],
-            })
+            }
+            if "is_spawned" in poi:
+                p_dict["is_spawned"] = poi["is_spawned"]
+            if "is_detected" in poi:
+                p_dict["is_detected"] = poi["is_detected"]
+            if "is_reported" in poi:
+                p_dict["is_reported"] = poi["is_reported"]
+            if "reporting_latency_s" in poi:
+                p_dict["reporting_latency_s"] = poi["reporting_latency_s"]
+            if "is_sla_compliant" in poi:
+                p_dict["is_sla_compliant"] = poi["is_sla_compliant"]
+            pois_list.append(p_dict)
 
         # Network links and routes
         active_routes: List[List[str]] = []
@@ -528,11 +585,17 @@ class SwarmSimulationCore:
         weather_data = None
         if self.config.enable_weather:
             ref_wind = self.weather.get_mean_wind(10.0)
+            sample_wind = self.weather.sample(np.array([0.0, 0.0, 20.0]), np.zeros(3), 0.05)
+            sample_speed = float(np.linalg.norm(sample_wind))
             weather_data = {
                 "enabled": True,
                 "mean_speed_mps": round(float(self.weather.config.mean_speed_mps), 2),
+                "current_speed_mps": round(sample_speed, 2),
+                "current_speed_kts": round(sample_speed * 1.94384, 1),
                 "direction_deg": round(float(self.weather.config.direction_deg), 1),
                 "ref_wind_vector": [round(float(w), 2) for w in ref_wind],
+                "sample_wind_vector": [round(float(w), 2) for w in sample_wind],
+                "gust_active": bool(getattr(self.weather, "_gust_active", False)),
                 "turbulence_intensity": self.weather.config.turbulence_intensity,
             }
 
@@ -551,6 +614,21 @@ class SwarmSimulationCore:
         if self.mission_manager is not None and hasattr(self.mission_manager, "get_priority_queue_telemetry"):
             priority_queue_data = self.mission_manager.get_priority_queue_telemetry()
 
+        # Synthetic Thermal AI Survivors, Tactical Visual Comms, and Charging Pads
+        survivors_data = self.mission_manager.get_survivors_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_survivors_telemetry")) else None
+        tactical_comms_data = self.mission_manager.get_tactical_comms_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_tactical_comms_telemetry")) else None
+        charging_pads_data = self.mission_manager.get_charging_pads_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_charging_pads_telemetry")) else None
+
+        challenge_data = None
+        if hasattr(self, "challenge_monitor") and self.challenge_monitor is not None:
+            challenge_data = self.challenge_monitor.evaluate_step(
+                self.sim_time,
+                self.drones,
+                getattr(self, "poi_spawner", None),
+                links_list,
+                np.array(self.config.gcs_position),
+            )
+
         return TelemetrySnapshot(
             sim_time=round(self.sim_time, 3),
             drones=drones_list,
@@ -563,6 +641,10 @@ class SwarmSimulationCore:
             weather=weather_data,
             priority_queue=priority_queue_data,
             mission_budget=mission_budget_data,
+            survivors=survivors_data,
+            tactical_comms=tactical_comms_data,
+            charging_pads=charging_pads_data,
+            challenge_constraints=challenge_data,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -601,4 +683,36 @@ class SwarmSimulationCore:
             self.mission_manager.trigger_drone_retreat(drone_id, self.drones)
         elif drone_id in self.drones:
             self.drones[drone_id].trigger_retreat()
+
+    def trigger_chaos_fault(self, target_drone_id: Optional[str] = None) -> Optional[str]:
+        """
+        Swarm Self-Healing Chaos Fault Injection:
+        Simulate sudden motor flameout on target or random airborne drone.
+        """
+        if self.mission_manager is not None and hasattr(self.mission_manager, "trigger_chaos_fault"):
+            victim_id = self.mission_manager.trigger_chaos_fault(self.drones, target_drone_id)
+            return victim_id
+        elif target_drone_id and target_drone_id in self.drones:
+            self.drones[target_drone_id].inject_fault()
+            return target_drone_id
+        return None
+
+    def set_drone_manual_control(
+        self,
+        drone_id: str,
+        vx: float = 0.0,
+        vy: float = 0.0,
+        vz: float = 0.0,
+        yaw_rate: float = 0.0,
+        enabled: bool = True
+    ) -> bool:
+        """
+        Manual FPV Controller Mode:
+        Direct manual velocity vector control override for operator takeover.
+        """
+        if drone_id not in self.drones:
+            return False
+        drone = self.drones[drone_id]
+        drone.set_manual_control(vx, vy, vz, yaw_rate, enabled=enabled)
+        return True
 

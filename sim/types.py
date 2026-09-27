@@ -33,7 +33,9 @@ class FlightMode(str, Enum):
     RTL = "RTL"                        # Returning to Ground Control Station (Return-to-Launch)
     LANDING = "LANDING"                # Final vertical descent phase
     LANDED = "LANDED"                  # Safely landed and disarmed at base
+    DOCKED_SWAPPING = "DOCKED_SWAPPING"# Landed at charging pad undergoing automated battery hot-swap
     EMERGENCY_LAND = "EMERGENCY_LAND"  # Critical failsafe descent due to low battery or fault
+    MANUAL = "MANUAL"                  # Direct human pilot manual override via gamepad / keyboard
     COMPLETED = "COMPLETED"            # Mission objectives completed
 
     def __str__(self) -> str:
@@ -97,6 +99,7 @@ class DroneLimits:
     collision_radius: float = 1.0       # Physical airframe safety radius for collision test (m)
     drag_coeff_xy: float = 0.15         # Linear drag coefficient in horizontal plane (N*s/m)
     drag_coeff_z: float = 0.25          # Linear drag coefficient in vertical direction (N*s/m)
+    clamp_3d_speed: bool = False        # When True, clamps total 3D speed to max_speed_xy
 
 
 @dataclass
@@ -133,6 +136,7 @@ class BatteryModel:
         altitude: float = 0.0,
         climb_rate: float = 0.0,
         airspeed: Optional[float] = None,
+        drafting_factor: float = 0.0,
     ) -> float:
         if airspeed is not None:
             speed = airspeed
@@ -145,6 +149,7 @@ class BatteryModel:
            grows cubically with airspeed (0.5 * rho * v^3 * Cd * A).
         3. Climb rate: Climbing against gravity consumes potential power (m * g * vz / eta),
            while descent lowers power draw.
+        4. Formation drafting upwash: Reduces induced hover power by drafting_factor (up to 20%).
         """
         # 1. Barometric air density ratio relative to sea-level (rho0 = 1.225 kg/m^3)
         alt = max(0.0, float(altitude))
@@ -156,6 +161,8 @@ class BatteryModel:
         v = max(0.0, float(speed))
         # Translational lift reduces induced hover power (minimum power cruise speed bucket ~ 6.5 m/s)
         trans_lift_factor = max(0.72, 1.0 / float(np.sqrt(1.0 + (v / 8.0) ** 2)))
+        # Upwash drafting attenuation (V-formation aerodynamic benefit)
+        draft_benefit = max(0.0, min(0.20, float(drafting_factor)))
         # Parasite drag scales cubically with airspeed: 0.5 * rho * CdA * v^3
         # Frontal drag area CdA ~ 0.075 m^2 for tilted quadcopter body and frame
         p_parasite = 0.5 * 1.225 * rho_ratio * 0.075 * (v ** 3)
@@ -174,7 +181,7 @@ class BatteryModel:
         self.last_p_climb = p_climb
 
         # Total aerodynamic & dynamic propulsion power
-        p_prop = (self.p_hover_w * trans_lift_factor * alt_factor) + p_parasite + p_climb + (self.p_hover_w * 0.08 * abs(accel))
+        p_prop = (self.p_hover_w * (1.0 - draft_benefit) * trans_lift_factor * alt_factor) + p_parasite + p_climb + (self.p_hover_w * 0.08 * abs(accel))
         p_prop = max(25.0, p_prop)
         self.last_p_prop = p_prop
 
@@ -258,6 +265,11 @@ class DroneState:
     acceleration: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
     estimated_position: Optional[np.ndarray] = None
     estimated_velocity: Optional[np.ndarray] = None
+    is_manual_override: bool = False
+    is_fault_injected: bool = False
+    is_drafting: bool = False
+    drafting_leader_id: Optional[str] = None
+    drafting_saving_pct: float = 0.0
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, dtype=np.float64)
@@ -273,7 +285,7 @@ class DroneState:
         """Serializes state into a compact dictionary for WebSocket telemetry frames."""
         role_str = self.role.value if hasattr(self.role, "value") else str(self.role)
         mode_str = self.flight_mode.value if hasattr(self.flight_mode, "value") else str(self.flight_mode)
-        return {
+        d = {
             "id": self.id,
             "role": role_str,
             "flight_mode": mode_str,
@@ -288,6 +300,57 @@ class DroneState:
             "target_position": [round(float(v), 3) for v in self.target_position] if self.target_position is not None else None,
             "estimated_position": [round(float(v), 3) for v in self.estimated_position] if self.estimated_position is not None else None,
             "estimated_velocity": [round(float(v), 3) for v in self.estimated_velocity] if self.estimated_velocity is not None else None,
+            "is_manual_override": bool(self.is_manual_override),
+            "is_fault_injected": bool(self.is_fault_injected),
+            "is_drafting": bool(self.is_drafting),
+        }
+        if self.is_drafting:
+            d["drafting_leader_id"] = self.drafting_leader_id
+            d["drafting_saving_pct"] = round(float(self.drafting_saving_pct), 1)
+        return d
+
+
+@dataclass
+class TacticalCommsEvent:
+    """Tactical radio comms chatter event displayed on visual HUD ticker and log."""
+    timestamp: float
+    level: str             # 'INFO' | 'WARN' | 'CRITICAL' | 'SUCCESS'
+    callsign: str          # e.g. 'GCS', 'SCOUT_1', 'RELAY_3'
+    message: str
+    category: str = "MISSION"  # 'COMMS' | 'BATTERY' | 'SAR' | 'MISSION' | 'SWAP'
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "timestamp": round(float(self.timestamp), 2),
+            "level": self.level,
+            "callsign": self.callsign,
+            "message": self.message,
+            "category": self.category,
+        }
+
+
+@dataclass
+class SurvivorRecord:
+    """Simulated trapped survivor heat signature located at disaster site."""
+    id: str
+    poi_id: str
+    position: List[float]
+    heat_c: float
+    confidence: float
+    discovered: bool = False
+    discovery_time: Optional[float] = None
+    discovered_by: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "poi_id": self.poi_id,
+            "position": [round(float(v), 2) for v in self.position],
+            "heat_c": round(float(self.heat_c), 1),
+            "confidence": round(float(self.confidence), 2),
+            "discovered": bool(self.discovered),
+            "discovery_time": round(float(self.discovery_time), 2) if self.discovery_time is not None else None,
+            "discovered_by": self.discovered_by,
         }
 
 
@@ -295,7 +358,7 @@ class DroneState:
 class TelemetrySnapshot:
     """
     Complete simulation state snapshot conforming to PROJECT.md Contract #4.
-    Compact frame size (< 1.5 KB @ 30 Hz).
+    Compact frame size (< 2.5 KB @ 30 Hz).
     """
     sim_time: float
     drones: List[Dict[str, Any]]
@@ -308,6 +371,10 @@ class TelemetrySnapshot:
     weather: Optional[Dict[str, Any]] = None
     priority_queue: Optional[List[Dict[str, Any]]] = None
     mission_budget: Optional[Dict[str, Any]] = None
+    survivors: Optional[Dict[str, Any]] = None
+    tactical_comms: Optional[List[Dict[str, Any]]] = None
+    charging_pads: Optional[List[Dict[str, Any]]] = None
+    challenge_constraints: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes snapshot to dictionary with Three.js cockpit compatible aliases."""
@@ -323,9 +390,19 @@ class TelemetrySnapshot:
         }
         if self.weather is not None:
             d["weather"] = self.weather
+            d["wind"] = self.weather
         if self.priority_queue is not None:
             d["priority_queue"] = self.priority_queue
         if self.mission_budget is not None:
             d["mission_budget"] = self.mission_budget
+        if self.survivors is not None:
+            d["survivors"] = self.survivors
+        if self.tactical_comms is not None:
+            d["tactical_comms"] = self.tactical_comms
+        if self.charging_pads is not None:
+            d["charging_pads"] = self.charging_pads
+        if self.challenge_constraints is not None:
+            d["challenge_constraints"] = self.challenge_constraints
         return TelemetryDict(d)
+
 

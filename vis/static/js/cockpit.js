@@ -38,6 +38,35 @@ let washParticles = null;
 let raycasterTheater = new THREE.Raycaster();
 let mouseTheater = new THREE.Vector2();
 
+// Tactical Night Operations & Dynamic Lighting
+let isNightOps = false;
+let ambientLightTheater = null;
+let dirLightTheater = null;
+let hemiLightTheater = null;
+let fillLightTheater = null;
+let theaterSkyTex = null;
+const droneSearchlights = [];
+
+// Map Navigation & Drag / Pan Control State
+let isPanMode = false;
+let isShiftHeld = false;
+let isMouseDownOnTheater = false;
+let pressedNavKeys = {};
+let smoothPanTarget = null;
+let smoothPanStartTarget = null;
+let smoothPanStartCam = null;
+let smoothPanProgress = 1.0;
+const smoothPanDuration = 400; // ms
+let smoothPanStartTime = 0;
+
+// Multi-Palette Thermal FLIR
+let activeFlirPalette = "ironbow"; // "ironbow", "whitehot", "blackhot"
+
+// Manual FPV Controller Mode
+let isManualControlActive = false;
+const activeKeys = {};
+let lastManualSendTime = 0;
+
 // Viewport 2: Autonomous SLAM Perception
 let sceneSLAM, cameraSLAM, rendererSLAM, controlsSLAM;
 let slamDroneMesh = null;
@@ -56,6 +85,7 @@ let audioContext = null;
 let isAudioMuted = true;
 let lastSurveyedCount = 0;
 let lastFleetRenderTime = 0;
+let lastAnimateTime = performance.now();
 
 // Scientific Charts (Chart.js)
 let chartEKF = null;
@@ -66,6 +96,30 @@ let chartHistoryTime = [];
 let chartHistoryEKF = [];
 let chartHistoryPDR = [];
 let chartHistoryThroughput = [];
+let currentScenario = "sector_delta";
+let outerGroundMesh = null;
+let gcsBaseGroup = null;
+
+function applyScenarioUI(scen) {
+    currentScenario = "sector_delta";
+    const card = document.getElementById("metric-card-challenge");
+    if (card) {
+        card.style.display = "none";
+    }
+    if (outerGroundMesh) outerGroundMesh.visible = true;
+    if (gcsBaseGroup) gcsBaseGroup.visible = true;
+    if (window.SectorDelta && typeof window.SectorDelta.setScenario === "function") {
+        window.SectorDelta.setScenario("sector_delta");
+    }
+    if (cameraTheater && controlsTheater) {
+        smoothPanProgress = 1.0;
+        controlsTheater.maxDistance = 1600;
+        cameraTheater.position.set(135, -345, 215);
+        controlsTheater.target.set(0, -45, 25);
+        controlsTheater.update();
+    }
+}
+window.applyScenarioUI = applyScenarioUI;
 
 // Initialize on DOM ready
 document.addEventListener("DOMContentLoaded", () => {
@@ -75,6 +129,15 @@ document.addEventListener("DOMContentLoaded", () => {
     try { initUIControls(); } catch (e) { console.error("initUIControls error:", e); }
     try { initScientificCharts(); } catch (e) { console.error("initScientificCharts error:", e); }
     try { setViewportMode("theater"); } catch (e) { console.error("setViewportMode error:", e); }
+    // Fetch initial active scenario from server to guarantee sync
+    fetch("/api/scenario")
+        .then(r => r.json())
+        .then(data => {
+            if (data && data.scenario && data.scenario !== currentScenario) {
+                applyScenarioUI(data.scenario);
+            }
+        })
+        .catch(err => console.warn("[Scenario] fetch error:", err));
 });
 
 // ============================================================================
@@ -86,59 +149,140 @@ function initTheaterViewport() {
     const width = container.clientWidth || window.innerWidth / 2;
     const height = container.clientHeight || window.innerHeight;
 
-    // 1. Scene
+    // 1. Scene & Photorealistic Daytime Sky Gradient
     sceneTheater = new THREE.Scene();
-    sceneTheater.background = new THREE.Color(0x060a12);
-    sceneTheater.fog = new THREE.FogExp2(0x060a12, 0.0011);
 
-    // 2. Camera (Expanded 700m Operational Zone)
-    cameraTheater = new THREE.PerspectiveCamera(50, width / height, 1, 3500);
-    cameraTheater.position.set(0, -380, 240);
+    // Procedural Vibrant Daytime Sky Dome Canvas Texture matching reference photo
+    const skyCanvas = document.createElement("canvas");
+    skyCanvas.width = 512;
+    skyCanvas.height = 512;
+    const skyCtx = skyCanvas.getContext("2d");
+    const skyGrad = skyCtx.createLinearGradient(0, 0, 0, 512);
+    skyGrad.addColorStop(0.0, "#3382dc"); // Deep rich sky blue at zenith
+    skyGrad.addColorStop(0.35, "#529ce8"); // Bright summer blue
+    skyGrad.addColorStop(0.70, "#7ab6f0"); // Soft azure horizon
+    skyGrad.addColorStop(1.0, "#a5d2f8"); // Crisp sunny haze
+    skyCtx.fillStyle = skyGrad;
+    skyCtx.fillRect(0, 0, 512, 512);
+
+    const skyTex = new THREE.CanvasTexture(skyCanvas);
+    theaterSkyTex = skyTex;
+    sceneTheater.background = skyTex;
+    sceneTheater.fog = new THREE.FogExp2(0x95c7f2, 0.00045);
+
+    // 2. Camera (3/4 Elevated Isometric Perspective matching reference photograph)
+    cameraTheater = new THREE.PerspectiveCamera(46, width / height, 1, 3500);
+    cameraTheater.position.set(135, -345, 215);
     cameraTheater.up.set(0, 0, 1);
 
-    // 3. Renderer (NVIDIA RTX 4050 High-Performance Hardware Context)
+    // 3. Renderer (High-Performance Hardware Context with ACES Filmic Tone Mapping)
     rendererTheater = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     rendererTheater.setSize(width, height);
     rendererTheater.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     rendererTheater.shadowMap.enabled = true;
     rendererTheater.shadowMap.type = THREE.PCFSoftShadowMap;
+    rendererTheater.toneMapping = THREE.ACESFilmicToneMapping;
+    rendererTheater.toneMappingExposure = 1.08;
     container.appendChild(rendererTheater.domElement);
 
-    // 4. Controls
+    // 4. Controls (Smooth Orbit & Pan)
     if (typeof THREE.OrbitControls !== "undefined") {
         controlsTheater = new THREE.OrbitControls(cameraTheater, rendererTheater.domElement);
         controlsTheater.enableDamping = true;
         controlsTheater.dampingFactor = 0.05;
         controlsTheater.maxPolarAngle = Math.PI / 2 - 0.02;
-        controlsTheater.target.set(0, 0, 20);
+        controlsTheater.minDistance = 20;
+        controlsTheater.maxDistance = 1600;
+        controlsTheater.target.set(0, -45, 25);
+        controlsTheater.enablePan = true;
+        controlsTheater.screenSpacePanning = false; // Panning glides parallel to ground plane
+        controlsTheater.panSpeed = 1.5;
+        controlsTheater.mouseButtons = {
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.DOLLY,
+            RIGHT: THREE.MOUSE.PAN
+        };
+        controlsTheater.touches = {
+            ONE: THREE.TOUCH.ROTATE,
+            TWO: THREE.TOUCH.DOLLY_PAN
+        };
+        controlsTheater.addEventListener("start", () => {
+            smoothPanProgress = 1.0; // Hand over control immediately if user begins manual interaction
+        });
     }
 
-    // 5. Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
-    sceneTheater.add(ambientLight);
+    // 5. Lighting (Warm Crisp Sun & Sky Ambient Fill)
+    const hemiLight = new THREE.HemisphereLight(0xe4f2ff, 0x2e421c, 0.85);
+    hemiLight.position.set(0, 0, 300);
+    hemiLightTheater = hemiLight;
+    ambientLightTheater = hemiLight;
+    sceneTheater.add(hemiLight);
 
-    const dirLight = new THREE.DirectionalLight(0x00e5ff, 0.85);
-    dirLight.position.set(180, -220, 280);
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 2048;
-    dirLight.shadow.mapSize.height = 2048;
-    sceneTheater.add(dirLight);
+    const sunLight = new THREE.DirectionalLight(0xfffaee, 1.35);
+    sunLight.position.set(240, -190, 320); // Front-right sun casting crisp soft shadows
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.camera.near = 10;
+    sunLight.shadow.camera.far = 1200;
+    const d = 260;
+    sunLight.shadow.camera.left = -d;
+    sunLight.shadow.camera.right = d;
+    sunLight.shadow.camera.top = d;
+    sunLight.shadow.camera.bottom = -d;
+    sunLight.shadow.bias = -0.0004;
+    dirLightTheater = sunLight;
+    sceneTheater.add(sunLight);
 
-    const gcsBeaconLight = new THREE.PointLight(0xff0055, 3.0, 180);
-    gcsBeaconLight.position.set(0, -250, 18);
-    sceneTheater.add(gcsBeaconLight);
+    const fillLight = new THREE.DirectionalLight(0x9eccff, 0.35);
+    fillLight.position.set(-220, 210, 160);
+    fillLightTheater = fillLight;
+    sceneTheater.add(fillLight);
 
-    // 6. Realistic Graphical Terrain (Highways, River, Airfield, Helipads, Rubble)
-    createTheaterTerrain();
+    // 6. Sector Delta Architectural Diorama (or fallback Theater Terrain)
+    if (typeof SectorDelta !== "undefined") {
+        SectorDelta.init(sceneTheater);
+    } else {
+        createTheaterTerrain();
+    }
 
-    // 7. GCS Base Station Compound at (0, -250, 0)
-    createGCSBase(0, -250, 0);
+    // 7. Base ground plane outside the diorama tray (Expansive natural parkland landscape fading into horizon haze)
+    const outerGroundGeo = new THREE.PlaneGeometry(6000, 6000);
+    const outerGroundMat = new THREE.MeshStandardMaterial({
+        color: 0x1a4016, // Rich botanical green complementary to diorama parkland
+        roughness: 0.95,
+        metalness: 0.02,
+    });
+    const outerGround = new THREE.Mesh(outerGroundGeo, outerGroundMat);
+    outerGround.position.set(0, 0, -10.5);
+    outerGround.receiveShadow = true;
+    outerGround.matrixAutoUpdate = false;
+    outerGround.updateMatrix();
+    outerGroundMesh = outerGround;
+    sceneTheater.add(outerGround);
+
+    // 7. GCS Base Station Compound on Sector Delta Diorama Tray at (0, -145, 0.1)
+    createGCSBase(0, -145, 0.1);
 
     // 8. Particle Systems
     initParticleSystems();
 
-    // 9. Interactive Raycasting Click-to-Inspect
+    // 9. Interactive Raycasting Click-to-Inspect & Double-Click to Center
     rendererTheater.domElement.addEventListener("click", onTheaterCanvasClick);
+    rendererTheater.domElement.addEventListener("dblclick", onTheaterCanvasDblClick);
+    rendererTheater.domElement.addEventListener("mousedown", () => {
+        isMouseDownOnTheater = true;
+        updateCanvasCursor();
+    });
+    window.addEventListener("mouseup", () => {
+        isMouseDownOnTheater = false;
+        updateCanvasCursor();
+    });
+
+    // Synchronize initial scenario visuals and camera if challenge mode was pre-set
+    if (currentScenario === "challenge") {
+        applyScenarioUI("challenge");
+    }
 }
 
 function createTheaterTerrain() {
@@ -522,61 +666,132 @@ function createTheaterTerrain() {
 function createGCSBase(x, y, z) {
     const group = new THREE.Group();
     group.position.set(x, y, z);
+    gcsBaseGroup = group;
 
-    // Ground bunker structure (Reinforced Concrete Pad)
-    const bunkerGeo = new THREE.CylinderGeometry(10, 14, 4, 8);
-    const bunkerMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.85, roughness: 0.25 });
+    // 1. Reinforced Hexagonal Apron Plinth
+    const bunkerGeo = new THREE.CylinderGeometry(8.5, 9.8, 2.2, 8);
+    const bunkerMat = new THREE.MeshStandardMaterial({
+        color: 0x18202c,
+        metalness: 0.85,
+        roughness: 0.3,
+    });
     const bunker = new THREE.Mesh(bunkerGeo, bunkerMat);
     bunker.rotation.x = Math.PI / 2;
-    bunker.position.z = 2;
+    bunker.position.z = 1.1;
+    bunker.receiveShadow = true;
     group.add(bunker);
 
-    // Heavy Comm Mast Tower
-    const towerGeo = new THREE.CylinderGeometry(0.8, 1.6, 22, 6);
-    const towerMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.92, roughness: 0.1 });
-    const tower = new THREE.Mesh(towerGeo, towerMat);
-    tower.rotation.x = Math.PI / 2;
-    tower.position.z = 13;
-    group.add(tower);
+    // Hazard Safety Striping Border Ring
+    const stripeGeo = new THREE.RingGeometry(8.6, 9.8, 8);
+    const stripeMat = new THREE.MeshBasicMaterial({
+        color: 0xffd600,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.85,
+    });
+    const stripe = new THREE.Mesh(stripeGeo, stripeMat);
+    stripe.position.z = 2.25;
+    group.add(stripe);
 
-    // Satellite Dish Receiver
-    const dishGeo = new THREE.SphereGeometry(4.2, 12, 12, 0, Math.PI * 2, 0, Math.PI / 2);
-    const dishMat = new THREE.MeshStandardMaterial({ color: 0x00e5ff, wireframe: true });
+    // 2. Heavy Communications Lattice Mast Tower
+    const mastHeight = 26;
+    const mastGeo = new THREE.CylinderGeometry(0.8, 1.8, mastHeight, 6);
+    const mastMat = new THREE.MeshStandardMaterial({
+        color: 0x78909c,
+        metalness: 0.92,
+        roughness: 0.15,
+    });
+    const mast = new THREE.Mesh(mastGeo, mastMat);
+    mast.rotation.x = Math.PI / 2;
+    mast.position.z = mastHeight / 2 + 2.2;
+    mast.castShadow = true;
+    group.add(mast);
+
+    // Secondary Cross-Bracing Truss Struts
+    for (let k = 0; k < 4; k++) {
+        const theta = (k / 4) * Math.PI * 2;
+        const legGeo = new THREE.CylinderGeometry(0.2, 0.4, 18, 4);
+        const leg = new THREE.Mesh(legGeo, mastMat);
+        leg.position.set(Math.cos(theta) * 3.2, Math.sin(theta) * 3.2, 9.0);
+        leg.rotation.z = theta;
+        leg.rotation.y = 0.35;
+        leg.rotation.x = Math.PI / 2;
+        group.add(leg);
+    }
+
+    // 3. High-Gain Radar / Satellite Dish Receiver (Oriented toward city center)
+    const dishGeo = new THREE.SphereGeometry(4.8, 16, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+    const dishMat = new THREE.MeshStandardMaterial({
+        color: 0x00e5ff,
+        metalness: 0.8,
+        roughness: 0.2,
+        wireframe: true,
+    });
     const dish = new THREE.Mesh(dishGeo, dishMat);
-    dish.rotation.x = -Math.PI / 3;
-    dish.position.z = 24;
+    dish.rotation.x = -Math.PI / 3.2;
+    dish.position.set(0, 2, mastHeight + 3);
     group.add(dish);
 
-    // High-Intensity Red Tactical Strobe Beacon
-    const beaconGeo = new THREE.SphereGeometry(1.2, 8, 8);
+    // 4. Omnidirectional Phased-Array Radome Beacon
+    const beaconGeo = new THREE.SphereGeometry(1.2, 12, 12);
     const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff0055 });
     const beacon = new THREE.Mesh(beaconGeo, beaconMat);
-    beacon.position.z = 25;
+    beacon.position.set(0, 0, mastHeight + 5.5);
     group.add(beacon);
+    strobeObjects.push(beacon);
+    beacon.strobeType = "beacon";
+
+    // 5. Tactical Mobile Command Ops Trailer / Field Shelter
+    const opsGeo = new THREE.BoxGeometry(14, 8, 5.5);
+    const opsMat = new THREE.MeshStandardMaterial({
+        color: 0x243242,
+        metalness: 0.7,
+        roughness: 0.4,
+    });
+    const ops = new THREE.Mesh(opsGeo, opsMat);
+    ops.position.set(0, -9, 5.25);
+    ops.castShadow = true;
+    group.add(ops);
+
+    // Illuminated Ops Center Observation Visor Windows
+    const winGeo = new THREE.BoxGeometry(12, 0.4, 1.8);
+    const winMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.85 });
+    const win = new THREE.Mesh(winGeo, winMat);
+    win.position.set(0, -4.8, 6.2);
+    group.add(win);
+
+    // Ops Trailer Rooftop Radome Dome
+    const domeGeo = new THREE.SphereGeometry(1.6, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+    const domeMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, metalness: 0.3, roughness: 0.2 });
+    const dome = new THREE.Mesh(domeGeo, domeMat);
+    dome.position.set(-3.5, -9, 8.0);
+    group.add(dome);
 
     sceneTheater.add(group);
 }
 
 function initParticleSystems() {
-    // 1. Disaster Smoke & Fire Embers at Disaster Sites across 700m Area
+    // 1. Disaster Smoke & Fire Embers at active disaster PoIs INSIDE Sector Delta
     const smokeCount = 350;
     const smokeGeo = new THREE.BufferGeometry();
     const smokePositions = new Float32Array(smokeCount * 3);
     const smokeSpeeds = new Float32Array(smokeCount);
 
     const origins = [
-        new THREE.Vector3(-210, 90, 2),   // POI_COLLAPSE
-        new THREE.Vector3(30, 260, 2),    // POI_HAZARD
-        new THREE.Vector3(-170, 240, 2),  // POI_BRIDGE
-        new THREE.Vector3(220, 160, 2),   // POI_SURVIVORS
+        new THREE.Vector3(-85, -60, 2),   // POI_COLLAPSE (West Collapsed Apartment Complex)
+        new THREE.Vector3(-20, 95, 2),    // POI_HAZARD (North Chemical Processing Plant & Hazard Silos)
+        new THREE.Vector3(40, -95, 2),    // POI_BRIDGE (Elevated Highway Overpass Viaduct Fracture)
+        new THREE.Vector3(25, -55, 2),    // POI_SURVIVORS (Downtown Central Plaza Skybridge Rubble)
+        new THREE.Vector3(115, -40, 2),   // POI_SUBSTATION (East Regional Power Substation)
+        new THREE.Vector3(-60, 25, 2),    // POI_HOSPITAL (St. Jude Medical Center Trauma Helipad)
     ];
 
     for (let i = 0; i < smokeCount; i++) {
         const origin = origins[i % origins.length];
-        smokePositions[i * 3] = origin.x + (Math.random() - 0.5) * 16;
-        smokePositions[i * 3 + 1] = origin.y + (Math.random() - 0.5) * 16;
-        smokePositions[i * 3 + 2] = origin.z + Math.random() * 45;
-        smokeSpeeds[i] = 0.25 + Math.random() * 0.45;
+        smokePositions[i * 3] = origin.x + (Math.random() - 0.5) * 14;
+        smokePositions[i * 3 + 1] = origin.y + (Math.random() - 0.5) * 14;
+        smokePositions[i * 3 + 2] = origin.z + Math.random() * 40;
+        smokeSpeeds[i] = 0.22 + Math.random() * 0.40;
     }
     smokeGeo.setAttribute('position', new THREE.BufferAttribute(smokePositions, 3));
     const smokeMat = new THREE.PointsMaterial({
@@ -760,7 +975,7 @@ function createQuadcopterMesh(role) {
     flir.position.set(0, 0.72, -0.15);
     droneGroup.add(flir);
 
-    // 6. Downward Scanning Laser Footprint Cone
+    // 6. Downward Scanning Laser Footprint Cone & Ground Drop Reticle
     const laserConeGeo = new THREE.ConeGeometry(2.5, 12.0, 16, 1, true);
     const laserConeMat = new THREE.MeshBasicMaterial({
         color: primaryColor,
@@ -773,6 +988,51 @@ function createQuadcopterMesh(role) {
     laserCone.rotation.x = Math.PI; // point downward
     laserCone.position.set(0, 0, -6.0);
     droneGroup.add(laserCone);
+
+    // Ground Drop Laser Line & Ground Footprint Reticle (shown only for active/selected drone)
+    const altLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+    const altLineMat = new THREE.LineDashedMaterial({
+        color: primaryColor,
+        dashSize: 1.5,
+        gapSize: 1.0,
+        transparent: true,
+        opacity: 0.75,
+        depthWrite: false
+    });
+    const altLine = new THREE.Line(altLineGeo, altLineMat);
+    altLine.visible = false;
+    droneGroup.add(altLine);
+    droneGroup.altLine = altLine;
+
+    // Laser Ground Reticle
+    const reticleGeo = new THREE.RingGeometry(1.6, 2.2, 24);
+    const reticleMat = new THREE.MeshBasicMaterial({
+        color: primaryColor,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.65,
+        depthWrite: false
+    });
+    const reticle = new THREE.Mesh(reticleGeo, reticleMat);
+    reticle.visible = false;
+    droneGroup.add(reticle);
+    droneGroup.reticle = reticle;
+
+    // 7. Tactical Night Operations Searchlight
+    const searchLight = new THREE.SpotLight(0xfff3e0, isNightOps ? 3.5 : 0.0, 110, Math.PI / 5.5, 0.45, 1.2);
+    searchLight.position.set(0, 0, -0.3);
+    const searchTarget = new THREE.Object3D();
+    searchTarget.position.set(0, 0, -35);
+    droneGroup.add(searchTarget);
+    searchLight.target = searchTarget;
+    droneGroup.add(searchLight);
+    droneGroup.searchLight = searchLight;
+    droneSearchlights.push(searchLight);
+
+    // Dynamic Motion Interpolation Targets (60-144 FPS smooth animation)
+    droneGroup.targetPosition = new THREE.Vector3();
+    droneGroup.targetQuaternion = new THREE.Quaternion();
+    droneGroup.hasInitialPose = false;
 
     return droneGroup;
 }
@@ -800,6 +1060,85 @@ function onTheaterCanvasClick(event) {
         if (hit.droneId) {
             selectDrone(hit.droneId);
         }
+    }
+}
+
+function updateCanvasCursor() {
+    if (!rendererTheater || !rendererTheater.domElement) return;
+    if (isPanMode || isShiftHeld) {
+        rendererTheater.domElement.style.cursor = isMouseDownOnTheater ? "grabbing" : "grab";
+    } else {
+        rendererTheater.domElement.style.cursor = "";
+    }
+}
+
+function setPanMode(active) {
+    isPanMode = active;
+    const btn = document.getElementById("btn-toggle-pan");
+    if (controlsTheater) {
+        if (isPanMode) {
+            controlsTheater.mouseButtons.LEFT = THREE.MOUSE.PAN;
+            if (controlsTheater.touches) controlsTheater.touches.ONE = THREE.TOUCH.PAN;
+            if (btn) {
+                btn.classList.add("active");
+                btn.innerHTML = "&#9995; DRAG: ON";
+                btn.title = "Drag Mode ACTIVE: Left-click and drag anywhere to move across map. Click to return to Orbit Rotate.";
+            }
+        } else {
+            controlsTheater.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+            if (controlsTheater.touches) controlsTheater.touches.ONE = THREE.TOUCH.ROTATE;
+            if (btn) {
+                btn.classList.remove("active");
+                btn.innerHTML = "&#9995; DRAG: OFF";
+                btn.title = "Click to toggle Drag/Pan: Left-click drags the map to move anywhere. (Or use Right-Click Drag, WASD keys, or Double-Click).";
+            }
+        }
+    }
+    updateCanvasCursor();
+}
+
+function smoothPanTo(destination) {
+    if (!controlsTheater || !cameraTheater || !destination) return;
+    smoothPanStartTarget = controlsTheater.target.clone();
+    smoothPanStartCam = cameraTheater.position.clone();
+    smoothPanTarget = destination.clone();
+    smoothPanTarget.z = Math.max(0, Math.min(destination.z !== undefined ? destination.z : 0, 80));
+    smoothPanProgress = 0.0;
+    smoothPanStartTime = performance.now();
+}
+
+function onTheaterCanvasDblClick(event) {
+    if (!rendererTheater || !cameraTheater || !sceneTheater) return;
+    const rect = rendererTheater.domElement.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, cameraTheater);
+
+    const intersects = raycaster.intersectObjects(sceneTheater.children, true);
+    let hitPoint = null;
+
+    for (let i = 0; i < intersects.length; i++) {
+        const obj = intersects[i].object;
+        if (obj && obj.isMesh && obj.visible && !obj.isLine && intersects[i].distance > 1) {
+            hitPoint = intersects[i].point.clone();
+            break;
+        }
+    }
+
+    if (!hitPoint) {
+        const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        const groundHit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(groundPlane, groundHit)) {
+            hitPoint = groundHit;
+        }
+    }
+
+    if (hitPoint) {
+        smoothPanTo(hitPoint);
     }
 }
 
@@ -925,18 +1264,29 @@ function updateDrones(dronesData) {
             droneMeshes.set(drone.id, mesh);
         }
 
-        mesh.position.set(drone.position[0], drone.position[1], drone.position[2]);
-        if (drone.attitude) {
-            mesh.rotation.set(drone.attitude[0], drone.attitude[1], drone.attitude[2]);
+        if (!mesh.targetPosition) {
+            mesh.targetPosition = new THREE.Vector3();
+            mesh.targetQuaternion = new THREE.Quaternion();
+            mesh.hasInitialPose = false;
         }
 
-        // Sync focused drone in SLAM Viewport
-        if (drone.id === selectedDroneId && slamDroneMesh) {
-            slamDroneMesh.position.copy(mesh.position);
-            slamDroneMesh.rotation.copy(mesh.rotation);
+        // Store new target position & attitude quaternion from telemetry packet
+        mesh.targetPosition.set(drone.position[0], drone.position[1], drone.position[2]);
+        if (drone.attitude) {
+            const euler = new THREE.Euler(drone.attitude[0], drone.attitude[1], drone.attitude[2], 'XYZ');
+            mesh.targetQuaternion.setFromEuler(euler);
+        }
 
-            // Record trajectory point
-            slamTrajectoryPoints.push(mesh.position.clone());
+        // Snap to initial pose on first packet or when sitting on ground launch pad
+        if (!mesh.hasInitialPose || drone.flight_mode === "IDLE" || drone.flight_mode === "LANDED" || (drone.position && drone.position[2] <= 0.55)) {
+            mesh.position.copy(mesh.targetPosition);
+            mesh.quaternion.copy(mesh.targetQuaternion);
+            mesh.hasInitialPose = true;
+        }
+
+        // Record trajectory point for focused drone at telemetry sample rate
+        if (drone.id === selectedDroneId) {
+            slamTrajectoryPoints.push(new THREE.Vector3(drone.position[0], drone.position[1], drone.position[2]));
             if (slamTrajectoryPoints.length > maxTrajectoryPoints) {
                 slamTrajectoryPoints.shift();
             }
@@ -956,6 +1306,8 @@ function updateDrones(dronesData) {
 }
 
 function updateObstacles(obstaclesData) {
+    // In Sector Delta diorama mode, the architectural models and buildings are rendered by SectorDelta
+    if (typeof SectorDelta !== "undefined") return;
     if (!obstaclesData || obstacleMeshes.size > 0) return;
 
     obstaclesData.forEach(obs => {
@@ -1088,23 +1440,36 @@ function updatePoIs(poisData) {
             group = new THREE.Group();
             group.position.set(poi.position[0], poi.position[1], 0);
 
+            const isChallenge = (currentScenario === "challenge");
+            const baseColor = isChallenge ? 0xff1744 : 0xd500f9;
+
             // Ground Target Ring
-            const ringGeo = new THREE.RingGeometry(4, 5.5, 24);
-            const ringMat = new THREE.MeshBasicMaterial({ color: 0xd500f9, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+            const ringGeo = new THREE.RingGeometry(3.5, 5.0, 24);
+            const ringMat = new THREE.MeshBasicMaterial({ color: baseColor, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
             const ring = new THREE.Mesh(ringGeo, ringMat);
             group.add(ring);
+            group.ring = ring;
+
+            // Concentric Radar Ripple Beacon Ring (matching Challenge problem statement graphic!)
+            const rippleGeo = new THREE.RingGeometry(1.0, 2.2, 24);
+            const rippleMat = new THREE.MeshBasicMaterial({ color: baseColor, side: THREE.DoubleSide, transparent: true, opacity: 0.6 });
+            const ripple = new THREE.Mesh(rippleGeo, rippleMat);
+            ripple.position.z = 0.1;
+            group.add(ripple);
+            group.ripple = ripple;
 
             // Vertical Beacon Laser Beam
-            const beamGeo = new THREE.CylinderGeometry(0.15, 0.15, poi.position[2] * 2, 8);
-            const beamMat = new THREE.MeshBasicMaterial({ color: 0xd500f9, transparent: true, opacity: 0.6 });
+            const beamGeo = new THREE.CylinderGeometry(0.18, 0.18, poi.position[2] * 2, 8);
+            const beamMat = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.65 });
             const beam = new THREE.Mesh(beamGeo, beamMat);
             beam.rotation.x = Math.PI / 2;
             beam.position.z = poi.position[2];
             group.add(beam);
+            group.beam = beam;
 
             // Rotating Diamond Beacon
-            const beaconGeo = new THREE.OctahedronGeometry(1.6);
-            const beaconMat = new THREE.MeshBasicMaterial({ color: 0xd500f9, wireframe: true });
+            const beaconGeo = new THREE.OctahedronGeometry(1.8);
+            const beaconMat = new THREE.MeshBasicMaterial({ color: baseColor, wireframe: true });
             const beacon = new THREE.Mesh(beaconGeo, beaconMat);
             beacon.position.z = poi.position[2];
             group.add(beacon);
@@ -1114,8 +1479,39 @@ function updatePoIs(poisData) {
             poiMeshes.set(poi.id, group);
         }
 
-        if (poi.is_completed && group.beacon) {
-            group.beacon.material.color.setHex(0x00ff66);
+        // Color and animation state transitions
+        if (poi.is_spawned === false) {
+            group.visible = false;
+        } else {
+            group.visible = true;
+            if (poi.is_completed) {
+                if (group.beacon) group.beacon.material.color.setHex(0x00ff66);
+                if (group.ring) group.ring.material.color.setHex(0x00ff66);
+                if (group.ripple) group.ripple.material.color.setHex(0x00ff66);
+                if (group.beam) group.beam.material.color.setHex(0x00ff66);
+            } else if (poi.is_reported) {
+                // Detected and reported within 10s SLA: Cyan
+                if (group.beacon) group.beacon.material.color.setHex(0x00e5ff);
+                if (group.ring) group.ring.material.color.setHex(0x00e5ff);
+                if (group.ripple) group.ripple.material.color.setHex(0x00e5ff);
+            } else if (poi.is_detected) {
+                // Detected by UAV, in transit to report: Yellow
+                if (group.beacon) group.beacon.material.color.setHex(0xffd600);
+                if (group.ring) group.ring.material.color.setHex(0xffd600);
+            } else {
+                // Active undetected target: Red (Challenge) or Magenta (Sector Delta)
+                const col = (currentScenario === "challenge") ? 0xff1744 : 0xd500f9;
+                if (group.beacon) group.beacon.material.color.setHex(col);
+                if (group.ring) group.ring.material.color.setHex(col);
+                if (group.ripple) group.ripple.material.color.setHex(col);
+            }
+
+            // Radar ripple pulsation
+            if (group.ripple) {
+                const s = 1.0 + ((Date.now() * 0.003) % 2.5);
+                group.ripple.scale.set(s, s, 1.0);
+                group.ripple.material.opacity = Math.max(0.05, 0.7 - s * 0.25);
+            }
         }
     });
 
@@ -1133,7 +1529,9 @@ function updateLinks(linksData, routesData, dronesData) {
     dronesData.forEach(d => {
         nodeCoords.set(d.id, new THREE.Vector3(...d.position));
     });
-    nodeCoords.set("GCS", new THREE.Vector3(0, -150, 20));
+    // GCS Base Station Radar Mast Receiver (Sector Delta: 0, -145, 26 | Challenge: -75, 0, 16)
+    const gcsCoords = (currentScenario === "challenge") ? new THREE.Vector3(-75, 0, 16) : new THREE.Vector3(0, -145, 26);
+    nodeCoords.set("GCS", gcsCoords);
 
     const activeRoutePairs = new Set();
     if (routesData) {
@@ -1158,25 +1556,44 @@ function updateLinks(linksData, routesData, dronesData) {
         if (!p1 || !p2) return;
 
         const isRouteEdge = activeRoutePairs.has(`${u}_${v}`);
+        if (!link.viable && !isRouteEdge) return;
+
+        // Clean link style with simple distinct colors:
+        // - Green (#00ff66): Active multi-hop routing paths carrying live packet traffic
+        // - Golden Amber (#ffd600): Long-range LoRa links / high-altitude relay links
+        // - Electric Cyan (#00e5ff): Standard viable 2.4GHz Wi-Fi mesh links
         const isLoRa = (link.band && link.band.includes("LORA")) || (link.distance > 80.0 && link.viable);
-        const linkColor = isRouteEdge ? 0x00ff66 : (isLoRa ? 0xffd600 : (link.viable ? 0x00e5ff : 0xff1744));
+        const linkColor = isRouteEdge ? 0x00ff66 : (isLoRa ? 0xffd600 : 0x00e5ff);
+        const linkOpacity = isRouteEdge ? 1.0 : (isLoRa ? 0.45 : 0.55);
 
         let line = linkMeshes.get(key);
         if (!line) {
             const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
             const mat = new THREE.LineBasicMaterial({
                 color: linkColor,
-                linewidth: isRouteEdge ? 3 : 1,
                 transparent: true,
-                opacity: isRouteEdge ? 0.95 : 0.4,
+                opacity: linkOpacity,
+                depthWrite: false,
             });
             line = new THREE.Line(geo, mat);
+            line.visible = true;
             sceneTheater.add(line);
             linkMeshes.set(key, line);
         } else {
-            line.geometry.setFromPoints([p1, p2]);
+            // Update vertex endpoints dynamically as drones fly
+            const posAttr = line.geometry.attributes.position;
+            const positions = posAttr.array;
+            positions[0] = p1.x;
+            positions[1] = p1.y;
+            positions[2] = p1.z;
+            positions[3] = p2.x;
+            positions[4] = p2.y;
+            positions[5] = p2.z;
+            posAttr.needsUpdate = true;
+            line.geometry.computeBoundingSphere();
             line.material.color.setHex(linkColor);
-            line.material.opacity = isRouteEdge ? 0.95 : 0.35;
+            line.material.opacity = linkOpacity;
+            line.visible = true;
         }
     });
 
@@ -1354,8 +1771,7 @@ function selectDrone(droneId, openPanel = true) {
     // 2. Smoothly center Theater 3D camera target on selected drone
     const targetMesh = droneMeshes.get(droneId);
     if (targetMesh && controlsTheater) {
-        controlsTheater.target.copy(targetMesh.position);
-        controlsTheater.update();
+        smoothPanTo(targetMesh.position);
     }
 
     // 3. Open Telemetry Inspect Panel
@@ -1661,6 +2077,8 @@ function renderFleetList(drones) {
         const pwr = d.power_w !== undefined ? `${d.power_w.toFixed(0)}W` : '---';
         const comText = d.comms_loss ? 'LOST' : 'OK';
         const comClass = d.comms_loss ? 'text-red' : 'text-cyan';
+        const faultBadgeHtml = d.is_fault_injected ? '<span class="fault-badge">⚡ FLAMEOUT</span>' : '';
+        const draftBadgeHtml = d.is_drafting ? `<span class="drafting-badge" title="Drafting wake of ${d.drafting_leader_id}">⚡ +${d.drafting_saving_pct}%</span>` : '';
 
         if (!card) {
             card = document.createElement("div");
@@ -1673,7 +2091,8 @@ function renderFleetList(drones) {
             card.innerHTML = `
                 <div class="drone-header">
                     <span class="drone-id-tag">${d.id} [${d.role}]</span>
-                    <div style="display: flex; align-items: center;">
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <span class="drone-badges-container">${faultBadgeHtml}${draftBadgeHtml}</span>
                         <span class="drone-mode-badge ${modeColor}">${modeLabel}</span>
                         <button class="btn btn-sm btn-outline text-neon-yellow drone-card-rtl-btn" data-drone-id="${d.id}" style="padding: 1px 5px; font-size: 8px; margin-left: 6px; border-color: rgba(255,214,0,0.5); display: ${showRtl ? 'inline-block' : 'none'};" title="Command Drone to Return-to-Launch">RTL</button>
                     </div>
@@ -1698,6 +2117,12 @@ function renderFleetList(drones) {
             const idSpan = card.querySelector(".drone-id-tag");
             if (idSpan && idSpan.textContent !== `${d.id} [${d.role}]`) {
                 idSpan.textContent = `${d.id} [${d.role}]`;
+            }
+
+            const badgesContainer = card.querySelector(".drone-badges-container");
+            const newBadges = `${faultBadgeHtml}${draftBadgeHtml}`;
+            if (badgesContainer && badgesContainer.innerHTML !== newBadges) {
+                badgesContainer.innerHTML = newBadges;
             }
 
             const modeSpan = card.querySelector(".drone-mode-badge");
@@ -1798,6 +2223,88 @@ function renderPoiList(poiItems) {
     }
 }
 
+let latestDebriefData = null;
+let lastSeenCommsTimestamp = -1;
+let commsTickerTimeout = null;
+
+function updateTacticalComms(events) {
+    if (!events || events.length === 0) return;
+    const newest = events[events.length - 1];
+    if (newest.timestamp > lastSeenCommsTimestamp) {
+        lastSeenCommsTimestamp = newest.timestamp;
+        const ticker = document.getElementById("hud-comms-ticker");
+        const tickerBadge = document.getElementById("ticker-badge");
+        const tickerMsg = document.getElementById("ticker-msg");
+        if (ticker && tickerBadge && tickerMsg) {
+            tickerBadge.textContent = `[${newest.callsign} ${newest.category}]`;
+            tickerBadge.className = `ticker-badge comms-badge-${newest.level}`;
+            tickerMsg.textContent = newest.message;
+            ticker.classList.remove("hidden");
+            if (commsTickerTimeout) clearTimeout(commsTickerTimeout);
+            commsTickerTimeout = setTimeout(() => {
+                ticker.classList.add("hidden");
+            }, 4500);
+        }
+    }
+    const logList = document.getElementById("comms-log-list");
+    if (logList) {
+        let html = "";
+        for (let i = events.length - 1; i >= 0; i--) {
+            const e = events[i];
+            const mins = Math.floor(e.timestamp / 60);
+            const secs = (e.timestamp % 60).toFixed(1);
+            const tStr = `${String(mins).padStart(2, '0')}:${String(secs).padStart(4, '0')}`;
+            html += `
+                <div class="comms-entry ${e.level}">
+                    <div class="comms-entry-header">
+                        <span class="comms-entry-callsign">[${e.callsign}] (${e.category})</span>
+                        <span class="comms-entry-time">${tStr}</span>
+                    </div>
+                    <div class="comms-entry-body">${e.message}</div>
+                </div>
+            `;
+        }
+        logList.innerHTML = html;
+    }
+}
+
+async function exportMissionDebrief() {
+    try {
+        const res = await fetch("/api/export_debrief");
+        if (!res.ok) throw new Error("Failed to fetch debrief");
+        const debrief = await res.json();
+        latestDebriefData = debrief;
+        const modal = document.getElementById("debrief-modal");
+        const body = document.getElementById("debrief-modal-body");
+        if (modal && body) {
+            const survList = (debrief.search_and_rescue_summary.discovered_survivors || []);
+            const survHtml = survList.length > 0
+                ? survList.map(s => `&bull; <strong>${s.id}</strong> at ${s.poi_id} (IR Body Heat: ${s.heat_c}&deg;C, Confidence: ${Math.round(s.confidence * 100)}%)`).join("<br>")
+                : "Scanning disaster sites for thermal signatures...";
+
+            body.innerHTML = `
+                <div class="debrief-kpi-grid">
+                    <div class="debrief-kpi"><span class="lbl">MISSION DURATION</span><span class="val text-neon-green">${debrief.mission_duration_s}s / ${debrief.mission_time_budget_s}s</span></div>
+                    <div class="debrief-kpi"><span class="lbl">SITES CLEARED</span><span class="val text-purple">${debrief.disaster_sites_summary.cleared_sites} / ${debrief.disaster_sites_summary.total_sites} (${debrief.disaster_sites_summary.completion_pct}%)</span></div>
+                    <div class="debrief-kpi"><span class="lbl">SURVIVORS LOCATED</span><span class="val text-neon-green">${debrief.search_and_rescue_summary.survivors_located} / ${debrief.search_and_rescue_summary.total_survivors_estimated}</span></div>
+                    <div class="debrief-kpi"><span class="lbl">TOTAL ENERGY</span><span class="val text-neon-yellow">${debrief.fleet_and_energy_summary.total_energy_consumed_wh} Wh</span></div>
+                    <div class="debrief-kpi"><span class="lbl">NETWORK PDR</span><span class="val text-cyan">${(debrief.network_and_telemetry_summary.packet_delivery_ratio * 100).toFixed(1)}%</span></div>
+                    <div class="debrief-kpi"><span class="lbl">BUDGET STATUS</span><span class="val text-neon-green">${debrief.budget_compliance}</span></div>
+                </div>
+                <div class="debrief-section-title">PRIORITY SURVEY SITES CLEARED</div>
+                <p>CRITICAL: <strong>${debrief.disaster_sites_summary.priority_breakdown.critical}</strong> | HIGH: <strong>${debrief.disaster_sites_summary.priority_breakdown.high}</strong> | MEDIUM: <strong>${debrief.disaster_sites_summary.priority_breakdown.medium}</strong> | LOW: <strong>${debrief.disaster_sites_summary.priority_breakdown.low}</strong></p>
+                <div class="debrief-section-title">SEARCH & RESCUE (SAR) THERMAL LOCATIONS</div>
+                <p style="line-height:1.6;">${survHtml}</p>
+                <div class="debrief-section-title">RADIO COMMS RECORD</div>
+                <p>Total recorded radio events: <strong>${debrief.tactical_comms_log.length}</strong> transmissions captured in audit log.</p>
+            `;
+            modal.classList.remove("hidden");
+        }
+    } catch (err) {
+        console.error("Debrief error:", err);
+    }
+}
+
 function updateHUD(telemetry) {
     if (!telemetry) return;
     latestTelemetry = telemetry;
@@ -1842,6 +2349,36 @@ function updateHUD(telemetry) {
     const pois = telemetry.pois || [];
     const completedCount = pois.filter(p => p.is_completed).length;
     document.getElementById("metric-pois").textContent = `${completedCount} / ${pois.length}`;
+
+    // Survivors Located (Thermal SAR)
+    const elSurvivors = document.getElementById("metric-survivors");
+    if (elSurvivors && telemetry.survivors) {
+        const s = telemetry.survivors;
+        elSurvivors.textContent = `${s.located_count || 0} / ${s.total_count || 0}`;
+        if ((s.located_count || 0) > 0) {
+            elSurvivors.className = "metric-val text-neon-green";
+        }
+    }
+
+    // Atmospheric Wind & Turbulence
+    const elWind = document.getElementById("metric-wind");
+    if (elWind && telemetry.weather) {
+        const w = telemetry.weather;
+        const spd = w.current_speed_mps !== undefined ? w.current_speed_mps : (w.mean_speed_mps || 0);
+        const dir = Math.round(w.direction_deg || 0);
+        const gustTxt = w.gust_active ? " [GUST]" : "";
+        elWind.textContent = `${spd.toFixed(1)}m/s ${dir}°${gustTxt}`;
+        if (w.gust_active) {
+            elWind.className = "metric-val text-neon-yellow";
+        } else {
+            elWind.className = "metric-val text-cyan";
+        }
+    }
+
+    // Tactical Visual Comms Chatter Feed
+    if (telemetry.tactical_comms && Array.isArray(telemetry.tactical_comms)) {
+        updateTacticalComms(telemetry.tactical_comms);
+    }
 
     const drones = telemetry.drones || [];
     const badgeNet = document.getElementById("badge-network");
@@ -1896,6 +2433,31 @@ function updateHUD(telemetry) {
         } else {
             badgeGpu.textContent = activeGpu.cleanName;
         }
+    }
+
+    // MeitY / IIT Bombay / IISER Bhopal Challenge Compliance Tracking
+    const cardChallenge = document.getElementById("metric-card-challenge");
+    const badgeChallenge = document.getElementById("badge-challenge-status");
+    if (telemetry.challenge_constraints) {
+        if (cardChallenge) cardChallenge.style.display = "flex";
+        const cc = telemetry.challenge_constraints;
+        if (badgeChallenge) {
+            if (cc.is_fully_compliant) {
+                badgeChallenge.textContent = "COMPLIANT (11/11)";
+                badgeChallenge.style.color = "#00ff88";
+                badgeChallenge.style.borderColor = "#00ff88";
+                badgeChallenge.style.background = "rgba(0, 255, 136, 0.12)";
+            } else {
+                const viols = cc.violations || {};
+                const nonZero = Object.entries(viols).filter(([_, v]) => v > 0).map(([k]) => k.toUpperCase());
+                badgeChallenge.textContent = `VIOLATION: ${nonZero.join(",") || "NON-COMPLIANT"}`;
+                badgeChallenge.style.color = "#ff3333";
+                badgeChallenge.style.borderColor = "#ff3333";
+                badgeChallenge.style.background = "rgba(255, 51, 51, 0.15)";
+            }
+        }
+    } else if (cardChallenge && currentScenario !== "challenge") {
+        cardChallenge.style.display = "none";
     }
 
     // 1. Throttled Fleet & Priority Queue Lists (10 Hz throttling for rock-solid UI stability)
@@ -2299,6 +2861,9 @@ function connectWebSocket() {
     socket.onmessage = (event) => {
         try {
             const telemetry = JSON.parse(event.data);
+            if (telemetry.scenario && telemetry.scenario !== currentScenario) {
+                applyScenarioUI(telemetry.scenario);
+            }
             if (telemetry.drones) updateDrones(telemetry.drones);
             if (telemetry.obstacles) updateObstacles(telemetry.obstacles);
             if (telemetry.pois) updatePoIs(telemetry.pois);
@@ -2362,6 +2927,218 @@ window.triggerFleetRetreat = triggerFleetRetreat;
 window.triggerDroneRTL = triggerDroneRTL;
 
 // ============================================================================
+// 5 New Tactical Upgrades: Chaos, Night Ops, PLY Export, FPV, Drafting
+// ============================================================================
+
+function toggleNightOps() {
+    isNightOps = !isNightOps;
+    const btnNight = document.getElementById("btn-night");
+    if (btnNight) {
+        btnNight.classList.toggle("active", isNightOps);
+        btnNight.textContent = isNightOps ? "NIGHT: ON" : "NIGHT";
+    }
+
+    if (ambientLightTheater && dirLightTheater && sceneTheater) {
+        if (isNightOps) {
+            ambientLightTheater.intensity = 0.15;
+            ambientLightTheater.color.setHex(0x1a2638);
+            dirLightTheater.intensity = 0.20;
+            dirLightTheater.color.setHex(0x336699);
+            if (fillLightTheater) fillLightTheater.intensity = 0.05;
+            if (activeCamMode !== "flir") {
+                sceneTheater.background = new THREE.Color(0x020408);
+                sceneTheater.fog.color.setHex(0x020408);
+            }
+            droneSearchlights.forEach(sl => { sl.intensity = 3.5; });
+        } else {
+            ambientLightTheater.intensity = 0.85;
+            ambientLightTheater.color.setHex(0xe4f2ff);
+            dirLightTheater.intensity = 1.35;
+            dirLightTheater.color.setHex(0xfffaee);
+            if (fillLightTheater) fillLightTheater.intensity = 0.35;
+            if (activeCamMode !== "flir") {
+                if (theaterSkyTex) {
+                    sceneTheater.background = theaterSkyTex;
+                } else {
+                    sceneTheater.background = new THREE.Color(0x060a12);
+                }
+                sceneTheater.fog.color.setHex(0x95c7f2);
+            }
+            droneSearchlights.forEach(sl => { sl.intensity = 0.0; });
+        }
+    }
+}
+window.toggleNightOps = toggleNightOps;
+
+function triggerChaosFault() {
+    playTacticalSound("alarm");
+    const payload = { command: "chaos_fault", cmd: "chaos_fault", drone_id: selectedDroneId };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+    fetch("/api/chaos_fault", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drone_id: selectedDroneId })
+    })
+    .then(r => r.json())
+    .then(data => {
+        const victim = data.victim_id || selectedDroneId;
+        const btnChaos = document.getElementById("btn-chaos");
+        if (btnChaos) {
+            const orig = btnChaos.textContent;
+            btnChaos.textContent = `⚡ FAULT: ${victim}`;
+            setTimeout(() => { btnChaos.textContent = orig; }, 3500);
+        }
+    })
+    .catch(() => {});
+}
+window.triggerChaosFault = triggerChaosFault;
+
+function exportPointCloudPLY() {
+    playTacticalSound("radar_ping");
+    const btn = document.getElementById("btn-export-ply");
+    if (btn) btn.textContent = "SAVING...";
+
+    fetch("/api/export_point_cloud")
+        .then(res => res.blob())
+        .then(blob => {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.style.display = "none";
+            a.href = url;
+            a.download = "UAVX_Disaster_PointCloud.ply";
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            a.remove();
+            if (btn) btn.textContent = "PLY SAVED!";
+            setTimeout(() => { if (btn) btn.textContent = "PLY"; }, 2500);
+        })
+        .catch(err => {
+            console.error("PLY export error", err);
+            if (btn) btn.textContent = "PLY ERR";
+            setTimeout(() => { if (btn) btn.textContent = "PLY"; }, 2000);
+        });
+}
+window.exportPointCloudPLY = exportPointCloudPLY;
+
+function toggleManualControl() {
+    isManualControlActive = !isManualControlActive;
+    const btnManual = document.getElementById("btn-manual");
+    if (btnManual) {
+        btnManual.classList.toggle("btn-manual-active", isManualControlActive);
+        btnManual.textContent = isManualControlActive ? "FPV: MANUAL" : "FPV: AUTO";
+    }
+
+    if (!isManualControlActive) {
+        sendManualVelocity(0, 0, 0, 0, false);
+    }
+}
+window.toggleManualControl = toggleManualControl;
+
+function sendManualVelocity(vx, vy, vz, yawRate, enabled = true) {
+    const payload = {
+        command: "manual_control",
+        drone_id: selectedDroneId,
+        vx: vx,
+        vy: vy,
+        vz: vz,
+        yaw_rate: yawRate,
+        enabled: enabled
+    };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    } else {
+        fetch("/api/manual_control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).catch(() => {});
+    }
+}
+
+function handleManualFPVInput() {
+    if (!isManualControlActive) return;
+
+    const now = performance.now();
+    if (now - lastManualSendTime < 45) return; // ~20 Hz rate limit
+
+    let vx = 0.0, vy = 0.0, vz = 0.0, yawRate = 0.0;
+
+    // 1. Keyboard Controls (WASD horizontal, QE yaw, ArrowUp/ArrowDown altitude)
+    const maxSpeed = 10.0;
+    const maxClimb = 3.0;
+    const maxYaw = 1.5;
+
+    if (activeKeys["KeyW"]) vy += maxSpeed;
+    if (activeKeys["KeyS"]) vy -= maxSpeed;
+    if (activeKeys["KeyA"]) vx -= maxSpeed;
+    if (activeKeys["KeyD"]) vx += maxSpeed;
+    if (activeKeys["KeyQ"]) yawRate -= maxYaw;
+    if (activeKeys["KeyE"]) yawRate += maxYaw;
+    if (activeKeys["ArrowUp"] || activeKeys["KeyR"]) vz += maxClimb;
+    if (activeKeys["ArrowDown"] || activeKeys["KeyF"]) vz -= maxClimb;
+
+    // 2. HTML5 Gamepad API Support (Xbox / PlayStation controller)
+    if (navigator.getGamepads) {
+        const gamepads = navigator.getGamepads();
+        for (const gp of gamepads) {
+            if (gp && gp.connected) {
+                const deadzone = 0.15;
+                const applyDeadzone = (v) => Math.abs(v) > deadzone ? v : 0.0;
+
+                // Left stick: pitch / roll
+                if (gp.axes.length >= 2) {
+                    const stickX = applyDeadzone(gp.axes[0]);
+                    const stickY = applyDeadzone(gp.axes[1]);
+                    if (stickX !== 0) vx = stickX * maxSpeed;
+                    if (stickY !== 0) vy = -stickY * maxSpeed;
+                }
+                // Right stick: yaw / throttle
+                if (gp.axes.length >= 4) {
+                    const stickRX = applyDeadzone(gp.axes[2]);
+                    const stickRY = applyDeadzone(gp.axes[3]);
+                    if (stickRX !== 0) yawRate = stickRX * maxYaw;
+                    if (stickRY !== 0) vz = -stickRY * maxClimb;
+                }
+                // Triggers: RT = climb, LT = descent
+                if (gp.buttons.length >= 8) {
+                    if (gp.buttons[7].pressed) vz += maxClimb * (gp.buttons[7].value || 1.0);
+                    if (gp.buttons[6].pressed) vz -= maxClimb * (gp.buttons[6].value || 1.0);
+                }
+                break;
+            }
+        }
+    }
+
+    sendManualVelocity(vx, vy, vz, yawRate, true);
+    lastManualSendTime = now;
+}
+
+function updateFlirPaletteEffect() {
+    if (activeCamMode !== "flir") {
+        if (rendererTheater && rendererTheater.domElement) {
+            rendererTheater.domElement.style.filter = "none";
+        }
+        return;
+    }
+    const canvasDom = rendererTheater ? rendererTheater.domElement : null;
+    if (!canvasDom) return;
+
+    if (activeFlirPalette === "ironbow") {
+        sceneTheater.background = new THREE.Color(0x12031a);
+        canvasDom.style.filter = "contrast(1.4) saturate(2.4) hue-rotate(20deg)";
+    } else if (activeFlirPalette === "whitehot") {
+        sceneTheater.background = new THREE.Color(0x060606);
+        canvasDom.style.filter = "grayscale(1.0) contrast(2.2) brightness(1.15)";
+    } else if (activeFlirPalette === "blackhot") {
+        sceneTheater.background = new THREE.Color(0xdadada);
+        canvasDom.style.filter = "grayscale(1.0) invert(1) contrast(1.9) brightness(1.05)";
+    }
+}
+
+// ============================================================================
 // UI Event Handlers & View Modes
 // ============================================================================
 
@@ -2374,6 +3151,81 @@ function initUIControls() {
             const mode = e.target.getAttribute("data-mode");
             setViewportMode(mode);
         });
+    });
+
+    // MeitY / IIT Bombay / IISER Bhopal 1000m Challenge Mode Toggle
+    const btnChallenge = document.getElementById("btn-challenge");
+    if (btnChallenge) {
+        btnChallenge.addEventListener("click", () => {
+            const nextScen = (currentScenario === "challenge") ? "sector_delta" : "challenge";
+            fetch("/api/scenario", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ scenario: nextScen })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === "ok") {
+                    applyScenarioUI(data.scenario);
+                }
+            })
+            .catch(err => console.error("Error toggling scenario:", err));
+        });
+    }
+
+    // Tactical Night Operations Toggle
+    const btnNight = document.getElementById("btn-night");
+    if (btnNight) {
+        btnNight.addEventListener("click", () => {
+            toggleNightOps();
+        });
+    }
+
+    // Dynamic Swarm Chaos Fault Injection
+    const btnChaos = document.getElementById("btn-chaos");
+    if (btnChaos) {
+        btnChaos.addEventListener("click", () => {
+            triggerChaosFault();
+        });
+    }
+
+    // 1-Click 3D Point Cloud Export (.PLY)
+    const btnExportPly = document.getElementById("btn-export-ply");
+    if (btnExportPly) {
+        btnExportPly.addEventListener("click", () => {
+            exportPointCloudPLY();
+        });
+    }
+
+    // Manual FPV Controller Takeover (WASD / Gamepad)
+    const btnManual = document.getElementById("btn-manual");
+    if (btnManual) {
+        btnManual.addEventListener("click", () => {
+            toggleManualControl();
+        });
+    }
+
+    // Multi-Palette Thermal FLIR Colormaps
+    document.querySelectorAll(".btn-palette").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            document.querySelectorAll(".btn-palette").forEach(b => b.classList.remove("active"));
+            e.target.classList.add("active");
+            activeFlirPalette = e.target.getAttribute("data-palette") || "ironbow";
+            const titleEl = document.getElementById("flir-hud-title");
+            if (titleEl) {
+                titleEl.textContent = `FLIR THERMAL IR • ${activeFlirPalette.toUpperCase()} SENSOR`;
+            }
+            updateFlirPaletteEffect();
+        });
+    });
+
+    // Keyboard Listeners for Manual FPV Control
+    window.addEventListener("keydown", (e) => {
+        if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) return;
+        activeKeys[e.code] = true;
+    });
+    window.addEventListener("keyup", (e) => {
+        activeKeys[e.code] = false;
     });
 
     // Pause / Resume
@@ -2391,6 +3243,13 @@ function initUIControls() {
     btnReset.addEventListener("click", () => {
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ command: "reset" }));
+        }
+        droneMeshes.forEach(mesh => {
+            mesh.hasInitialPose = false;
+        });
+        slamTrajectoryPoints = [];
+        if (slamTrajectoryLine) {
+            slamTrajectoryLine.geometry.setFromPoints([]);
         }
     });
 
@@ -2423,6 +3282,62 @@ function initUIControls() {
     if (btnCloseAnalytics && drawerAnalytics) {
         btnCloseAnalytics.addEventListener("click", () => {
             drawerAnalytics.classList.add("hidden");
+        });
+    }
+
+    // Tactical Comms Drawer Toggle
+    const btnToggleComms = document.getElementById("btn-toggle-comms");
+    const drawerComms = document.getElementById("tactical-comms-panel");
+    const btnCloseComms = document.getElementById("btn-close-comms");
+    if (btnToggleComms && drawerComms) {
+        btnToggleComms.addEventListener("click", () => {
+            drawerComms.classList.toggle("hidden");
+        });
+    }
+    if (btnCloseComms && drawerComms) {
+        btnCloseComms.addEventListener("click", () => {
+            drawerComms.classList.add("hidden");
+        });
+    }
+
+    // Executive Mission Debrief Exporter Modal
+    const btnExportDebrief = document.getElementById("btn-export-debrief");
+    const modalDebrief = document.getElementById("debrief-modal");
+    const btnCloseDebrief = document.getElementById("btn-close-debrief");
+    const btnDismissDebrief = document.getElementById("btn-dismiss-debrief");
+    const btnDownloadDebriefJson = document.getElementById("btn-download-debrief-json");
+    const btnDownloadFlightCsv = document.getElementById("btn-download-flight-csv");
+
+    if (btnExportDebrief) {
+        btnExportDebrief.addEventListener("click", () => {
+            exportMissionDebrief();
+        });
+    }
+    if (btnCloseDebrief && modalDebrief) {
+        btnCloseDebrief.addEventListener("click", () => {
+            modalDebrief.classList.add("hidden");
+        });
+    }
+    if (btnDismissDebrief && modalDebrief) {
+        btnDismissDebrief.addEventListener("click", () => {
+            modalDebrief.classList.add("hidden");
+        });
+    }
+    if (btnDownloadDebriefJson) {
+        btnDownloadDebriefJson.addEventListener("click", () => {
+            if (!latestDebriefData) return;
+            const str = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(latestDebriefData, null, 2));
+            const dlAnchor = document.createElement('a');
+            dlAnchor.setAttribute("href", str);
+            dlAnchor.setAttribute("download", "UAVX_Mission_Debrief.json");
+            document.body.appendChild(dlAnchor);
+            dlAnchor.click();
+            dlAnchor.remove();
+        });
+    }
+    if (btnDownloadFlightCsv) {
+        btnDownloadFlightCsv.addEventListener("click", () => {
+            window.location.href = "/api/export_telemetry";
         });
     }
 
@@ -2512,24 +3427,56 @@ function initUIControls() {
 
             if (mode === "flir") {
                 if (flirOverlay) flirOverlay.classList.remove("hidden");
-                sceneTheater.background = new THREE.Color(0x021008);
+                updateFlirPaletteEffect();
             } else {
                 if (flirOverlay) flirOverlay.classList.add("hidden");
-                sceneTheater.background = new THREE.Color(0x060a12);
+                if (rendererTheater && rendererTheater.domElement) {
+                    rendererTheater.domElement.style.filter = "none";
+                }
+                if (isNightOps) {
+                    sceneTheater.background = new THREE.Color(0x020408);
+                } else if (theaterSkyTex) {
+                    sceneTheater.background = theaterSkyTex;
+                } else {
+                    sceneTheater.background = new THREE.Color(0x060a12);
+                }
             }
 
             if (mode === "top") {
-                cameraTheater.position.set(0, 0, 480);
-                controlsTheater.target.set(0, 0, 0);
+                if (currentScenario === "challenge") {
+                    cameraTheater.position.set(450, 0, 1150);
+                    controlsTheater.target.set(450, 0, 0);
+                } else {
+                    cameraTheater.position.set(0, -45, 520);
+                    controlsTheater.target.set(0, -45, 0);
+                }
             } else if (mode === "orbit") {
-                cameraTheater.position.set(0, -380, 240);
-                controlsTheater.target.set(0, 0, 20);
+                if (currentScenario === "challenge") {
+                    cameraTheater.position.set(450, -850, 550);
+                    controlsTheater.target.set(450, 0, 0);
+                } else {
+                    cameraTheater.position.set(135, -345, 215);
+                    controlsTheater.target.set(0, -45, 25);
+                }
             } else if (mode === "gcs") {
-                cameraTheater.position.set(0, -250, 25);
-                controlsTheater.target.set(0, 0, 35);
+                if (currentScenario === "challenge") {
+                    cameraTheater.position.set(-75, -50, 22);
+                    controlsTheater.target.set(-75, 0, 10);
+                } else {
+                    cameraTheater.position.set(0, -145, 26);
+                    controlsTheater.target.set(0, 0, 35);
+                }
             }
         });
     });
+
+    // Map Drag / Pan Toggle Button
+    const btnTogglePan = document.getElementById("btn-toggle-pan");
+    if (btnTogglePan) {
+        btnTogglePan.addEventListener("click", () => {
+            setPanMode(!isPanMode);
+        });
+    }
 
     // Close inspect panel
     const btnCloseInspect = document.getElementById("btn-close-inspect");
@@ -2618,9 +3565,26 @@ function initUIControls() {
         poiContainer.addEventListener("click", handlePoiSelect);
     }
 
-    // Keyboard Drone Quick-Select Hotkeys (1-8 for UAV_1..8, 9 for RELAY_1, 0 for SCOUT_1, '[' and ']' for cycle)
+    // Keyboard Drone Quick-Select Hotkeys & Map Pan Nav Keys
     window.addEventListener("keydown", (e) => {
         if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) return;
+
+        const k = e.key.toLowerCase();
+        pressedNavKeys[k] = true;
+        if (e.key.startsWith("Arrow")) {
+            pressedNavKeys[e.key] = true;
+            e.preventDefault();
+        }
+        if (e.key === "Shift") {
+            isShiftHeld = true;
+            if (controlsTheater && !isPanMode) {
+                controlsTheater.mouseButtons.LEFT = THREE.MOUSE.PAN;
+            }
+            updateCanvasCursor();
+        }
+        if (k === "p" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            setPanMode(!isPanMode);
+        }
 
         if (e.key >= "1" && e.key <= "8") {
             const targetId = `UAV_${e.key}`;
@@ -2650,7 +3614,31 @@ function initUIControls() {
         }
     });
 
+    window.addEventListener("keyup", (e) => {
+        const k = e.key.toLowerCase();
+        pressedNavKeys[k] = false;
+        if (e.key.startsWith("Arrow")) {
+            pressedNavKeys[e.key] = false;
+        }
+        if (e.key === "Shift") {
+            isShiftHeld = false;
+            if (controlsTheater && !isPanMode) {
+                controlsTheater.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+            }
+            updateCanvasCursor();
+        }
+    });
+
     window.addEventListener("resize", onWindowResize);
+
+    // Deep-link initial camera perspective if specified via ?cam= (e.g. ?cam=top)
+    const urlParams = new URLSearchParams(window.location.search);
+    const camParam = urlParams.get("cam");
+    if (camParam) {
+        const btnCam = document.querySelector(`.btn-cam[data-cam="${camParam}"]`);
+        if (btnCam) btnCam.click();
+    }
+
     animate();
 }
 
@@ -2692,6 +3680,59 @@ function onWindowResize() {
 
 function animate() {
     requestAnimationFrame(animate);
+
+    // High-precision delta time for frame-rate independent interpolation
+    const now = performance.now();
+    const dt = Math.min((now - lastAnimateTime) * 0.001, 0.1);
+    lastAnimateTime = now;
+
+    // Smooth Frame-Rate Independent Drone Motion Interpolation (LERP & SLERP)
+    // Eliminates discrete telemetry step stutter and produces silky-smooth 60-144 FPS continuous flight
+    const lerpFactor = 1.0 - Math.exp(-22.0 * dt);
+    droneMeshes.forEach((mesh, id) => {
+        if (mesh.targetPosition) {
+            mesh.position.lerp(mesh.targetPosition, lerpFactor);
+        }
+        if (mesh.targetQuaternion) {
+            mesh.quaternion.slerp(mesh.targetQuaternion, lerpFactor);
+        }
+
+        // Keep altitude drop laser line & ground projection reticle in sync with interpolated position
+        if (mesh.altLine && mesh.reticle && id === selectedDroneId) {
+            const pz = mesh.position.z;
+            if (pz > 1.2) {
+                mesh.altLine.visible = true;
+                mesh.reticle.visible = true;
+                const localGroundZ = -pz;
+                mesh.altLine.geometry.setFromPoints([
+                    new THREE.Vector3(0, 0, 0),
+                    new THREE.Vector3(0, 0, localGroundZ)
+                ]);
+                mesh.altLine.computeLineDistances();
+                mesh.reticle.position.set(0, 0, localGroundZ + 0.05);
+            } else {
+                mesh.altLine.visible = false;
+                mesh.reticle.visible = false;
+            }
+        }
+    });
+
+    // Synchronize SLAM Drone Mesh with smoothly interpolated focus drone
+    const activeSelectedMesh = droneMeshes.get(selectedDroneId);
+    if (activeSelectedMesh && slamDroneMesh) {
+        slamDroneMesh.position.copy(activeSelectedMesh.position);
+        slamDroneMesh.quaternion.copy(activeSelectedMesh.quaternion);
+    }
+
+    // Update Sector Delta Sparkling Photon Particle Streams
+    if (typeof SectorDelta !== "undefined") {
+        SectorDelta.animate(0.016);
+    }
+
+    // Handle Manual FPV Controller Input (WASD / Gamepad)
+    if (isManualControlActive) {
+        handleManualFPVInput();
+    }
 
     // Spin Propeller Rotors and Blurred Discs
     rotorMeshes.forEach(rotor => {
@@ -2769,7 +3810,7 @@ function animate() {
                 controlsTheater.target.lerp(targetMesh.position.clone().add(forward.clone().multiplyScalar(10)), 0.12);
             }
         } else if (activeCamMode === "gcs") {
-            cameraTheater.position.set(0, -150, 22);
+            cameraTheater.position.set(0, -145, 26);
             const focusMesh = droneMeshes.get(selectedDroneId) || droneMeshes.get("UAV_1");
             if (focusMesh) {
                 controlsTheater.target.lerp(focusMesh.position, 0.05);
@@ -2784,6 +3825,40 @@ function animate() {
         cameraSLAM.position.lerp(desiredPos, 0.06);
         controlsSLAM.target.lerp(slamDroneMesh.position, 0.1);
         controlsSLAM.update();
+    }
+
+    // Smooth camera panning transition
+    if (smoothPanProgress < 1.0 && smoothPanTarget && smoothPanStartTarget && controlsTheater && cameraTheater) {
+        const elapsed = performance.now() - smoothPanStartTime;
+        smoothPanProgress = Math.min(1.0, elapsed / smoothPanDuration);
+        const ease = 1 - Math.pow(1 - smoothPanProgress, 3);
+        const delta = smoothPanTarget.clone().sub(smoothPanStartTarget);
+        controlsTheater.target.copy(smoothPanStartTarget.clone().add(delta.clone().multiplyScalar(ease)));
+        cameraTheater.position.copy(smoothPanStartCam.clone().add(delta.clone().multiplyScalar(ease)));
+    }
+
+    // Keyboard WASD / Arrow keys map panning
+    if (controlsTheater && cameraTheater && (activeCamMode === "orbit" || activeCamMode === "top")) {
+        const forward = new THREE.Vector3();
+        cameraTheater.getWorldDirection(forward);
+        forward.z = 0;
+        if (forward.lengthSq() > 0.001) {
+            forward.normalize();
+            const right = new THREE.Vector3().crossVectors(forward, cameraTheater.up).normalize();
+            const moveVec = new THREE.Vector3();
+            const panSpeed = (pressedNavKeys["shift"] ? 4.5 : 2.0);
+
+            if (pressedNavKeys["w"] || pressedNavKeys["arrowup"]) moveVec.add(forward);
+            if (pressedNavKeys["s"] || pressedNavKeys["arrowdown"]) moveVec.sub(forward);
+            if (pressedNavKeys["d"] || pressedNavKeys["arrowright"]) moveVec.add(right);
+            if (pressedNavKeys["a"] || pressedNavKeys["arrowleft"]) moveVec.sub(right);
+
+            if (moveVec.lengthSq() > 0) {
+                moveVec.normalize().multiplyScalar(panSpeed);
+                controlsTheater.target.add(moveVec);
+                cameraTheater.position.add(moveVec);
+            }
+        }
     }
 
     if (controlsTheater) controlsTheater.update();

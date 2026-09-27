@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>UAV-X: Resilient Multi-Hop Aerial Swarm Network & SLAM Autonomy Cockpit</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=2.2.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.5.0">
     <!-- Three.js and OrbitControls -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -20,6 +20,10 @@
                 <span class="pulse-dot green"></span>
                 <span class="v-title">VIEWPORT 1: EXTERNAL THEATER (GROUND TRUTH REALITY)</span>
                 <span class="v-sub">OPTICAL 3D SENSING &bull; 16-UAV FLEET &bull; RF TUBES</span>
+            </div>
+            <div class="theater-nav-hint" id="theater-nav-hint">
+                <span class="pulse-dot cyan" style="width:5px;height:5px;"></span>
+                <span><b>NAVIGATION:</b> Left-Click to Rotate &bull; <b>Right-Click Drag</b> (or <span class="hint-pill">&#9995; DRAG</span>) to Move Screen &bull; <b>Double-Click</b> to Center &bull; <b>WASD / Arrows</b> to Pan</span>
             </div>
             <div id="canvas-theater-container" class="canvas-holder"></div>
             <!-- Military Aerospace Heads-Up Display (MIL-STD-1787D) Overlay Layer -->
@@ -61,8 +65,11 @@
                 <div class="metric-card" id="metric-card-latency"><span class="metric-label">LAT</span><span class="metric-val text-cyan" id="metric-latency">8.5 ms</span></div>
                 <div class="metric-card" id="metric-card-ekf"><span class="metric-label">EKF</span><span class="metric-val text-neon-yellow" id="metric-ekf-err">0.08 m</span></div>
                 <div class="metric-card" id="metric-card-pois"><span class="metric-label">POIS</span><span class="metric-val text-purple" id="metric-pois">0 / 8</span></div>
+                <div class="metric-card" id="metric-card-survivors" title="Trapped Survivors Discovered (Thermal SAR)"><span class="metric-label">SURVIVORS</span><span class="metric-val text-neon-green" id="metric-survivors">0 / 0</span></div>
+                <div class="metric-card" id="metric-card-wind" title="Dryden Atmospheric Wind &amp; Gusts"><span class="metric-label">WIND</span><span class="metric-val text-cyan" id="metric-wind">5.5 m/s ↗</span></div>
                 <div class="metric-card" id="metric-card-rate"><span class="metric-label">SURVEY</span><span class="metric-val text-neon-green" id="metric-survey-rate">14.2k m&sup2;/m</span></div>
                 <div class="metric-card" id="metric-card-recovery"><span class="metric-label">RECOVERY</span><span class="badge badge-active" id="badge-recovery">FLEET ACTIVE</span></div>
+                <div class="metric-card" id="metric-card-challenge" style="display:none;" title="MeitY / IIT Bombay / IISER Bhopal Challenge Compliance"><span class="metric-label">IIT-B SLA</span><span class="badge badge-active" id="badge-challenge-status" style="color:#00ff88;border-color:#00ff88;">COMPLIANT (11/11)</span></div>
                 <div class="metric-card" id="metric-card-mesh"><span class="metric-label">MESH</span><span class="badge badge-active" id="badge-network">16 NODES</span></div>
                 <div class="metric-card" id="metric-card-gpu"><span class="metric-label">GPU</span><span class="badge badge-active" id="badge-gpu-hw" style="color:#76b900;border-color:#76b900;background:rgba(118,185,0,0.12);">RTX 4050</span></div>
             </div>
@@ -70,9 +77,15 @@
         <!-- ROW 2: Controls (always fully visible) -->
         <div class="hud-header-row2">
             <button id="btn-investor" class="btn btn-investor" title="Launch 4-Phase Executive Swarm Demonstration">&#9733; DEMO</button>
+            
+            <button id="btn-night" class="btn btn-outline text-neon-yellow" title="Toggle Tactical Night Operations & Searchlights">NIGHT</button>
+            <button id="btn-chaos" class="btn btn-outline btn-chaos" title="Dynamic Fault Injection: Swarm Self-Healing Test">⚡ CHAOS</button>
+            <button id="btn-export-ply" class="btn btn-outline text-purple" title="1-Click 3D Point Cloud Export (.PLY for CloudCompare/Blender)">PLY</button>
+            <button id="btn-manual" class="btn btn-outline text-cyan" title="Manual FPV Controller Mode (WASD / Gamepad)">FPV: AUTO</button>
             <button id="btn-toggle-hud" class="btn btn-outline text-dim" title="Toggle Military HUD (H)">HUD: OFF</button>
+            <button id="btn-toggle-comms" class="btn btn-outline text-cyan" title="Toggle Tactical Radio Comms Feed">COMMS</button>
+            <button id="btn-export-debrief" class="btn btn-outline text-neon-green" title="Export Executive Mission Debrief Report (JSON &amp; Summary)">DEBRIEF</button>
             <button id="btn-toggle-telemetry" class="btn btn-outline text-cyan" title="Toggle Drone Telemetry">TELEM</button>
-            <button id="btn-audio" class="btn btn-outline text-cyan" title="Toggle Spatial Audio">&#128263; AUDIO</button>
             <button id="btn-snapshot" class="btn btn-outline text-neon-green" title="Capture Snapshot">&#128247; SNAP</button>
             <button id="btn-toggle-analytics" class="btn btn-outline text-purple" title="Toggle Analytics Dashboard">CHARTS</button>
             <div class="view-mode-group">
@@ -96,7 +109,14 @@
     <!-- FLIR Thermal HUD Overlay -->
     <div id="flir-overlay" class="flir-overlay hidden">
         <div class="flir-scanlines"></div>
-        <div class="flir-hud-tag">FLIR THERMAL IR &bull; WHITE-HOT SENSOR</div>
+        <div class="flir-hud-tag">
+            <span id="flir-hud-title">FLIR THERMAL IR &bull; IRONBOW SENSOR</span>
+            <div class="flir-palette-selector">
+                <button class="btn-palette active" data-palette="ironbow">IRONBOW</button>
+                <button class="btn-palette" data-palette="whitehot">WHITE-HOT</button>
+                <button class="btn-palette" data-palette="blackhot">BLACK-HOT</button>
+            </div>
+        </div>
     </div>
 
     <!-- Cinematic Lower-Third Presentation Bar (Non-Obtrusive Broadcast Design) -->
@@ -155,6 +175,39 @@
             <div class="inspect-stat"><span class="lbl">ATTITUDE:</span> <span id="inspect-attitude" class="val text-cyan">R:0° P:0° Y:0°</span></div>
             <div class="inspect-stat"><span class="lbl">APF NET FORCE:</span> <span id="inspect-apf-net" class="val text-neon-yellow">0.0 N</span></div>
             <div class="inspect-stat"><span class="lbl">ASSIGNED POI:</span> <span id="inspect-target" class="val">POI_SURVIVORS</span></div>
+        </div>
+    </div>
+
+    <!-- Tactical Visual Comms Chatter Floating Banner (No Audio Voice) -->
+    <div id="hud-comms-ticker" class="hud-comms-ticker hidden">
+        <span class="ticker-badge" id="ticker-badge">[GCS COMMS]</span>
+        <span class="ticker-text" id="ticker-msg">Tactical radio network synchronized.</span>
+    </div>
+
+    <!-- Tactical Radio Comms Feed Drawer -->
+    <div id="tactical-comms-panel" class="tactical-comms-panel glass-panel hidden">
+        <div class="panel-header">
+            <h3><span class="pulse-dot green"></span> TACTICAL RADIO COMMS • LIVE FEED</h3>
+            <button id="btn-close-comms" class="btn-close">&times;</button>
+        </div>
+        <div id="comms-log-list" class="comms-log-list">
+            <!-- Dynamically populated comms events -->
+        </div>
+    </div>
+
+    <!-- Executive Mission Debrief Modal -->
+    <div id="debrief-modal" class="debrief-modal glass-panel hidden">
+        <div class="modal-header">
+            <h3>★ UAV-X EXECUTIVE MISSION DEBRIEF REPORT ★</h3>
+            <button id="btn-close-debrief" class="btn-close">&times;</button>
+        </div>
+        <div class="modal-body" id="debrief-modal-body">
+            <!-- Dynamically populated debrief report -->
+        </div>
+        <div class="modal-footer">
+            <button id="btn-download-debrief-json" class="btn btn-outline text-neon-green">DOWNLOAD JSON</button>
+            <button id="btn-download-flight-csv" class="btn btn-outline text-neon-yellow">DOWNLOAD FLIGHT RECORDER CSV</button>
+            <button id="btn-dismiss-debrief" class="btn btn-outline">CLOSE</button>
         </div>
     </div>
 
@@ -254,6 +307,7 @@
                 <button class="btn btn-sm btn-cam" data-cam="fpv">FPV CHASE</button>
                 <button class="btn btn-sm btn-cam" data-cam="gcs">GCS MAST</button>
                 <button class="btn btn-sm btn-cam" data-cam="flir">FLIR THERMAL</button>
+                <button class="btn btn-sm btn-drag-mode" id="btn-toggle-pan" title="Toggle Drag/Pan: Click to switch Left-Click between Move Map (Drag) and Rotate. (You can also use Right-Click Drag, WASD keys, or Double-Click anywhere).">&#9995; DRAG: OFF</button>
             </div>
         </div>
         <div id="poi-list" class="poi-grid">
@@ -261,6 +315,7 @@
         </div>
     </footer>
 
-    <script src="/static/js/cockpit.js?v=2.2.0"></script>
+    <script src="/static/js/sector_delta_diorama.js?v=2.5.0"></script>
+    <script src="/static/js/cockpit.js?v=2.5.0"></script>
 </body>
 </html>

@@ -131,6 +131,7 @@ def find_free_port(preferred_port: int = 8000) -> int:
     for port in range(preferred_port, preferred_port + 50):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind(("127.0.0.1", port))
                 return port
             except OSError:
@@ -148,6 +149,7 @@ def main() -> None:
     parser.add_argument("--hud", action="store_true", help="Launch native desktop military HUD (no web browser)")
     parser.add_argument("--no-browser", action="store_true", help="Do not auto-open web browser")
     parser.add_argument("--weather", action="store_true", help="Enable Dryden atmospheric wind & turbulence")
+    parser.add_argument("--challenge", action="store_true", help="Launch MeitY / IIT Bombay / IISER Bhopal 1000m Challenge scenario")
     args = parser.parse_args()
 
     # Enforce NVIDIA GeForce RTX 4050 high-performance GPU binding
@@ -183,7 +185,11 @@ def main() -> None:
         )
     else:
         import uvicorn
-        from vis.server import app
+        from vis.server import app, server_manager
+
+        if args.challenge:
+            server_manager.reset(scenario="challenge")
+            print("[+] Initialized MeitY / IIT Bombay / IISER Bhopal 1000m Challenge Scenario.")
 
         active_port = find_free_port(args.port)
         if active_port != args.port:
