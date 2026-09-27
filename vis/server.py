@@ -253,6 +253,7 @@ class SimulationServer:
     async def broadcast_loop(self) -> None:
         """Asynchronous simulation execution, LiDAR perception, and telemetry broadcast loop."""
         while True:
+            step_start = time.perf_counter()
             try:
                 if self.is_running:
                     self.step_count += 1
@@ -305,7 +306,7 @@ class SimulationServer:
                             "target": [round(float(c), 2) for c in focus_drone.target_position] if focus_drone.target_position is not None else None,
                         }
 
-                    # Swarm Collaborative SLAM: Scan 3 active peer drones each tick in round-robin
+                    # Swarm Collaborative SLAM: Scan 1 active peer drone each tick in round-robin to maintain steady 30+ FPS
                     active_peers = [
                         d for d in self.sim.drones.values()
                         if d.id != (focus_drone.id if focus_drone else "")
@@ -313,18 +314,16 @@ class SimulationServer:
                         and float(d.position[2]) > 2.0
                     ]
                     if active_peers:
-                        batch_k = min(3, len(active_peers))
-                        offset = (self.step_count * batch_k) % len(active_peers)
-                        sweep_batch = (active_peers + active_peers)[offset : offset + batch_k]
-                        for peer in sweep_batch:
-                            p_scan = self.lidar.scan(
-                                drone_id=peer.id,
-                                position=peer.position,
-                                attitude=peer.attitude,
-                                obstacles=self.sim.obstacles,
-                                sim_time=snapshot.sim_time,
-                            )
-                            self.voxel_map.insert_scan(p_scan)
+                        peer_idx = self.step_count % len(active_peers)
+                        peer = active_peers[peer_idx]
+                        p_scan = self.lidar.scan(
+                            drone_id=peer.id,
+                            position=peer.position,
+                            attitude=peer.attitude,
+                            obstacles=self.sim.obstacles,
+                            sim_time=snapshot.sim_time,
+                        )
+                        self.voxel_map.insert_scan(p_scan)
 
                     # 3. Stream 3D Occupied Voxels & SLAM Metrics
                     data["occupied_voxels"] = self.voxel_map.get_occupied_voxels(max_count=250)
@@ -385,7 +384,10 @@ class SimulationServer:
                 print(f"[!] Simulation broadcast loop error: {e}")
                 traceback.print_exc()
 
-            await asyncio.sleep(self.step_delay / max(0.1, self.sim_speed))
+            target_interval = self.step_delay / max(0.1, self.sim_speed)
+            elapsed = time.perf_counter() - step_start
+            sleep_time = max(0.001, target_interval - elapsed)
+            await asyncio.sleep(sleep_time)
 
 
 server_manager = SimulationServer()

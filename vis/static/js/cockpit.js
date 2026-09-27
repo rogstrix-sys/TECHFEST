@@ -85,6 +85,7 @@ let audioContext = null;
 let isAudioMuted = true;
 let lastSurveyedCount = 0;
 let lastFleetRenderTime = 0;
+let lastAnimateTime = performance.now();
 
 // Scientific Charts (Chart.js)
 let chartEKF = null;
@@ -187,8 +188,8 @@ function initTheaterViewport() {
     const sunLight = new THREE.DirectionalLight(0xfffaee, 1.35);
     sunLight.position.set(240, -190, 320); // Front-right sun casting crisp soft shadows
     sunLight.castShadow = true;
-    sunLight.shadow.mapSize.width = 4096;
-    sunLight.shadow.mapSize.height = 4096;
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
     sunLight.shadow.camera.near = 10;
     sunLight.shadow.camera.far = 1200;
     const d = 260;
@@ -222,6 +223,8 @@ function initTheaterViewport() {
     const outerGround = new THREE.Mesh(outerGroundGeo, outerGroundMat);
     outerGround.position.set(0, 0, -10.5);
     outerGround.receiveShadow = true;
+    outerGround.matrixAutoUpdate = false;
+    outerGround.updateMatrix();
     sceneTheater.add(outerGround);
 
     // 7. GCS Base Station Compound on Sector Delta Diorama Tray at (0, -145, 0.1)
@@ -984,6 +987,11 @@ function createQuadcopterMesh(role) {
     droneGroup.searchLight = searchLight;
     droneSearchlights.push(searchLight);
 
+    // Dynamic Motion Interpolation Targets (60-144 FPS smooth animation)
+    droneGroup.targetPosition = new THREE.Vector3();
+    droneGroup.targetQuaternion = new THREE.Quaternion();
+    droneGroup.hasInitialPose = false;
+
     return droneGroup;
 }
 
@@ -1214,37 +1222,29 @@ function updateDrones(dronesData) {
             droneMeshes.set(drone.id, mesh);
         }
 
-        mesh.position.set(drone.position[0], drone.position[1], drone.position[2]);
+        if (!mesh.targetPosition) {
+            mesh.targetPosition = new THREE.Vector3();
+            mesh.targetQuaternion = new THREE.Quaternion();
+            mesh.hasInitialPose = false;
+        }
+
+        // Store new target position & attitude quaternion from telemetry packet
+        mesh.targetPosition.set(drone.position[0], drone.position[1], drone.position[2]);
         if (drone.attitude) {
-            mesh.rotation.set(drone.attitude[0], drone.attitude[1], drone.attitude[2]);
+            const euler = new THREE.Euler(drone.attitude[0], drone.attitude[1], drone.attitude[2], 'XYZ');
+            mesh.targetQuaternion.setFromEuler(euler);
         }
 
-        // Update altitude drop laser line & ground projection reticle (only for active selected drone)
-        const pz = drone.position[2];
-        if (mesh.altLine && mesh.reticle) {
-            if (drone.id === selectedDroneId && pz > 1.2) {
-                mesh.altLine.visible = true;
-                mesh.reticle.visible = true;
-                const localGroundZ = -pz / 1.2;
-                mesh.altLine.geometry.setFromPoints([
-                    new THREE.Vector3(0, 0, 0),
-                    new THREE.Vector3(0, 0, localGroundZ)
-                ]);
-                mesh.altLine.computeLineDistances();
-                mesh.reticle.position.set(0, 0, localGroundZ + 0.05);
-            } else {
-                mesh.altLine.visible = false;
-                mesh.reticle.visible = false;
-            }
+        // Snap to initial pose on first packet to avoid flying in from origin
+        if (!mesh.hasInitialPose) {
+            mesh.position.copy(mesh.targetPosition);
+            mesh.quaternion.copy(mesh.targetQuaternion);
+            mesh.hasInitialPose = true;
         }
 
-        // Sync focused drone in SLAM Viewport
-        if (drone.id === selectedDroneId && slamDroneMesh) {
-            slamDroneMesh.position.copy(mesh.position);
-            slamDroneMesh.rotation.copy(mesh.rotation);
-
-            // Record trajectory point
-            slamTrajectoryPoints.push(mesh.position.clone());
+        // Record trajectory point for focused drone at telemetry sample rate
+        if (drone.id === selectedDroneId) {
+            slamTrajectoryPoints.push(new THREE.Vector3(drone.position[0], drone.position[1], drone.position[2]));
             if (slamTrajectoryPoints.length > maxTrajectoryPoints) {
                 slamTrajectoryPoints.shift();
             }
@@ -3523,6 +3523,49 @@ function onWindowResize() {
 
 function animate() {
     requestAnimationFrame(animate);
+
+    // High-precision delta time for frame-rate independent interpolation
+    const now = performance.now();
+    const dt = Math.min((now - lastAnimateTime) * 0.001, 0.1);
+    lastAnimateTime = now;
+
+    // Smooth Frame-Rate Independent Drone Motion Interpolation (LERP & SLERP)
+    // Eliminates discrete telemetry step stutter and produces silky-smooth 60-144 FPS continuous flight
+    const lerpFactor = 1.0 - Math.exp(-22.0 * dt);
+    droneMeshes.forEach((mesh, id) => {
+        if (mesh.targetPosition) {
+            mesh.position.lerp(mesh.targetPosition, lerpFactor);
+        }
+        if (mesh.targetQuaternion) {
+            mesh.quaternion.slerp(mesh.targetQuaternion, lerpFactor);
+        }
+
+        // Keep altitude drop laser line & ground projection reticle in sync with interpolated position
+        if (mesh.altLine && mesh.reticle && id === selectedDroneId) {
+            const pz = mesh.position.z;
+            if (pz > 1.2) {
+                mesh.altLine.visible = true;
+                mesh.reticle.visible = true;
+                const localGroundZ = -pz;
+                mesh.altLine.geometry.setFromPoints([
+                    new THREE.Vector3(0, 0, 0),
+                    new THREE.Vector3(0, 0, localGroundZ)
+                ]);
+                mesh.altLine.computeLineDistances();
+                mesh.reticle.position.set(0, 0, localGroundZ + 0.05);
+            } else {
+                mesh.altLine.visible = false;
+                mesh.reticle.visible = false;
+            }
+        }
+    });
+
+    // Synchronize SLAM Drone Mesh with smoothly interpolated focus drone
+    const activeSelectedMesh = droneMeshes.get(selectedDroneId);
+    if (activeSelectedMesh && slamDroneMesh) {
+        slamDroneMesh.position.copy(activeSelectedMesh.position);
+        slamDroneMesh.quaternion.copy(activeSelectedMesh.quaternion);
+    }
 
     // Update Sector Delta Sparkling Photon Particle Streams
     if (typeof SectorDelta !== "undefined") {

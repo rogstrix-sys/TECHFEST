@@ -1595,6 +1595,16 @@ const SectorDelta = (() => {
             // 4. Architectural Skyscraper City Cluster & Low-Rise Village
             createArchitecturalCity(dioramaGroup);
 
+            // Optimize render performance: static diorama elements never move
+            dioramaGroup.traverse(child => {
+                if (child.isMesh) {
+                    child.matrixAutoUpdate = false;
+                    child.updateMatrix();
+                }
+            });
+            dioramaGroup.matrixAutoUpdate = false;
+            dioramaGroup.updateMatrix();
+
             console.log("[SectorDelta] Diorama initialized with 3D buildings, plinth, overpasses, and trees.");
         },
 
