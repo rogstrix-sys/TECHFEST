@@ -738,10 +738,12 @@ function initParticleSystems() {
     const smokeSpeeds = new Float32Array(smokeCount);
 
     const origins = [
-        new THREE.Vector3(-85, -60, 2),   // POI_COLLAPSE (West Village Rubble)
-        new THREE.Vector3(-20, 95, 2),    // POI_HAZARD (North Park Industrial Sector)
-        new THREE.Vector3(40, -95, 2),    // POI_BRIDGE (Overpass Bridge Site)
-        new THREE.Vector3(25, -55, 2),    // POI_SURVIVORS (East Courtyard Plaza)
+        new THREE.Vector3(-85, -60, 2),   // POI_COLLAPSE (West Collapsed Apartment Complex)
+        new THREE.Vector3(-20, 95, 2),    // POI_HAZARD (North Chemical Processing Plant & Hazard Silos)
+        new THREE.Vector3(40, -95, 2),    // POI_BRIDGE (Elevated Highway Overpass Viaduct Fracture)
+        new THREE.Vector3(25, -55, 2),    // POI_SURVIVORS (Downtown Central Plaza Skybridge Rubble)
+        new THREE.Vector3(115, -40, 2),   // POI_SUBSTATION (East Regional Power Substation)
+        new THREE.Vector3(-60, 25, 2),    // POI_HOSPITAL (St. Jude Medical Center Trauma Helipad)
     ];
 
     for (let i = 0; i < smokeCount; i++) {
@@ -1235,8 +1237,8 @@ function updateDrones(dronesData) {
             mesh.targetQuaternion.setFromEuler(euler);
         }
 
-        // Snap to initial pose on first packet to avoid flying in from origin
-        if (!mesh.hasInitialPose) {
+        // Snap to initial pose on first packet or when sitting on ground launch pad
+        if (!mesh.hasInitialPose || drone.flight_mode === "IDLE" || drone.flight_mode === "LANDED" || (drone.position && drone.position[2] <= 0.55)) {
             mesh.position.copy(mesh.targetPosition);
             mesh.quaternion.copy(mesh.targetQuaternion);
             mesh.hasInitialPose = true;
@@ -3108,6 +3110,13 @@ function initUIControls() {
     btnReset.addEventListener("click", () => {
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ command: "reset" }));
+        }
+        droneMeshes.forEach(mesh => {
+            mesh.hasInitialPose = false;
+        });
+        slamTrajectoryPoints = [];
+        if (slamTrajectoryLine) {
+            slamTrajectoryLine.geometry.setFromPoints([]);
         }
     });
 

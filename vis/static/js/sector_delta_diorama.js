@@ -580,6 +580,40 @@ const SectorDelta = (() => {
             ctx.fillRect(zw1X + k, zw1Y - 14, 2.5, 28);
         }
 
+        // North Tech District Avenue spur (connecting from central ring up to North Megatower & Hazard Plant)
+        ctx.beginPath();
+        const [na1x, na1y] = toC(0, 40);
+        const [na2x, na2y] = toC(25, 95);
+        const [na3x, na3y] = toC(30, 135);
+        ctx.moveTo(na1x, na1y);
+        ctx.lineTo(na2x, na2y);
+        ctx.lineTo(na3x, na3y);
+        ctx.strokeStyle = "#1e252d";
+        ctx.lineWidth = toLen(12.0);
+        ctx.stroke();
+        ctx.strokeStyle = "#ffd600";
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([12, 10]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // East Power & Logistics Avenue spur (connecting from central ring to Substation & East Horizon)
+        ctx.beginPath();
+        const [ea1x, ea1y] = toC(45, 0);
+        const [ea2x, ea2y] = toC(105, -30);
+        const [ea3x, ea3y] = toC(145, -50);
+        ctx.moveTo(ea1x, ea1y);
+        ctx.lineTo(ea2x, ea2y);
+        ctx.lineTo(ea3x, ea3y);
+        ctx.strokeStyle = "#1e252d";
+        ctx.lineWidth = toLen(12.0);
+        ctx.stroke();
+        ctx.strokeStyle = "#ffd600";
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([12, 10]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
         // 8. Tactical GCS Flight Apron & 16-UAV Launch Markings
         // Positioned cleanly from x = -88 to +88, y = -130 to -165 (depth 35m)
         const [apronX, apronY] = toC(-88, -130);
@@ -1571,6 +1605,308 @@ const SectorDelta = (() => {
 
             group.add(vGroup);
         });
+
+        // --------------------------------------------------------------------
+        // EXPANDED CITY BUILDINGS & DISASTER COMPLEXES
+        // --------------------------------------------------------------------
+        const redCrossMat = new THREE.MeshBasicMaterial({ color: 0xff1744 });
+        const hazardYellowMat = new THREE.MeshStandardMaterial({ color: 0xffcc00, roughness: 0.4, metalness: 0.3 });
+        const rubbleMat = new THREE.MeshStandardMaterial({ color: 0x5a6068, roughness: 0.9, metalness: 0.1 });
+
+        // TOWER 8: North Telecom Megatower (center: 30, 110)
+        const t8Group = new THREE.Group();
+        t8Group.position.set(30, 110, 0);
+        const t8Base = new THREE.Mesh(new THREE.BoxGeometry(36, 36, 90), glassMat);
+        t8Base.position.z = 45;
+        t8Base.castShadow = true;
+        t8Group.add(t8Base);
+        const t8Setback = new THREE.Mesh(new THREE.BoxGeometry(28, 28, 30), slateMat);
+        t8Setback.position.z = 90 + 15;
+        t8Setback.castShadow = true;
+        t8Group.add(t8Setback);
+        const t8Spire = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 1.2, 28, 8), slateMat);
+        t8Spire.rotation.x = Math.PI / 2;
+        t8Spire.position.z = 120 + 14;
+        t8Group.add(t8Spire);
+        const t8Beacon = new THREE.Mesh(new THREE.SphereGeometry(1.2, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff1744 }));
+        t8Beacon.position.z = 135;
+        t8Group.add(t8Beacon);
+        group.add(t8Group);
+        rooftopRelayNodes.push(new THREE.Vector3(30, 110, 122));
+
+        // TOWER 9: Northwest Cyan High-Rise (center: -70, 115)
+        const t9Group = new THREE.Group();
+        t9Group.position.set(-70, 115, 0);
+        const t9Mesh = new THREE.Mesh(new THREE.BoxGeometry(32, 34, 98), glassMat);
+        t9Mesh.position.z = 49;
+        t9Mesh.castShadow = true;
+        t9Group.add(t9Mesh);
+        group.add(t9Group);
+        rooftopRelayNodes.push(new THREE.Vector3(-70, 115, 100));
+
+        // TOWER 10: North Commerce Center (center: 85, 95)
+        const t10Group = new THREE.Group();
+        t10Group.position.set(85, 95, 0);
+        const t10Mesh = new THREE.Mesh(new THREE.BoxGeometry(34, 32, 88), beigeMat);
+        t10Mesh.position.z = 44;
+        t10Mesh.castShadow = true;
+        t10Group.add(t10Mesh);
+        group.add(t10Group);
+        rooftopRelayNodes.push(new THREE.Vector3(85, 95, 90));
+
+        // TOWER 11: Stepped Tech High-Rise (center: 120, 110)
+        const t11Group = new THREE.Group();
+        t11Group.position.set(120, 110, 0);
+        const t11_1 = new THREE.Mesh(new THREE.BoxGeometry(30, 30, 52), glassMat);
+        t11_1.position.z = 26;
+        t11_1.castShadow = true;
+        t11Group.add(t11_1);
+        const t11_2 = new THREE.Mesh(new THREE.BoxGeometry(22, 22, 26), slateMat);
+        t11_2.position.z = 52 + 13;
+        t11_2.castShadow = true;
+        t11Group.add(t11_2);
+        group.add(t11Group);
+
+        // ST. JUDE METROPOLITAN TRAUMA HOSPITAL (enclosing POI_HOSPITAL at -60, 25)
+        const hospGroup = new THREE.Group();
+        hospGroup.position.set(-60, 25, 0);
+        const hospMain = new THREE.Mesh(new THREE.BoxGeometry(48, 44, 28), creamWallMat);
+        hospMain.position.z = 14;
+        hospMain.castShadow = true;
+        hospGroup.add(hospMain);
+        // Rooftop Helipad Pad & Red Cross
+        const hospPad = new THREE.Mesh(new THREE.CylinderGeometry(8.5, 9.0, 1.2, 24), slateMat);
+        hospPad.rotation.x = Math.PI / 2;
+        hospPad.position.z = 28.6;
+        hospGroup.add(hospPad);
+        const hospCrossH = new THREE.Mesh(new THREE.BoxGeometry(6, 2, 0.1), redCrossMat);
+        hospCrossH.position.z = 29.3;
+        hospGroup.add(hospCrossH);
+        const hospCrossV = new THREE.Mesh(new THREE.BoxGeometry(2, 6, 0.1), redCrossMat);
+        hospCrossV.position.z = 29.3;
+        hospGroup.add(hospCrossV);
+        const hospPadRing = new THREE.Mesh(new THREE.RingGeometry(7.5, 8.5, 24), new THREE.MeshBasicMaterial({ color: 0x00ff66, side: THREE.DoubleSide }));
+        hospPadRing.position.z = 29.3;
+        hospGroup.add(hospPadRing);
+        group.add(hospGroup);
+        rooftopRelayNodes.push(new THREE.Vector3(-60, 25, 31));
+
+        // NORTH CHEMICAL FACILITY & HAZARD STORAGE SILOS (enclosing POI_HAZARD at -20, 95)
+        const chemGroup = new THREE.Group();
+        chemGroup.position.set(-20, 95, 0);
+        const chemPlant = new THREE.Mesh(new THREE.BoxGeometry(36, 24, 18), slateMat);
+        chemPlant.position.z = 9;
+        chemPlant.castShadow = true;
+        chemGroup.add(chemPlant);
+        [-12, 12].forEach(sx => {
+            const silo = new THREE.Mesh(new THREE.CylinderGeometry(5.5, 5.5, 22, 16), slateMat);
+            silo.rotation.x = Math.PI / 2;
+            silo.position.set(sx, 0, 11);
+            silo.castShadow = true;
+            chemGroup.add(silo);
+            const band = new THREE.Mesh(new THREE.CylinderGeometry(5.6, 5.6, 2.5, 16), hazardYellowMat);
+            band.rotation.x = Math.PI / 2;
+            band.position.set(sx, 0, 14);
+            chemGroup.add(band);
+        });
+        group.add(chemGroup);
+
+        // EAST REGIONAL POWER SUBSTATION (enclosing POI_SUBSTATION at 115, -40)
+        const subGroup = new THREE.Group();
+        subGroup.position.set(115, -40, 0);
+        const subBuilding = new THREE.Mesh(new THREE.BoxGeometry(26, 24, 16), slateMat);
+        subBuilding.position.z = 8;
+        subBuilding.castShadow = true;
+        subGroup.add(subBuilding);
+        [[-8, -6], [-8, 6], [8, -6], [8, 6]].forEach(([tx, ty]) => {
+            const tr = new THREE.Mesh(new THREE.BoxGeometry(5, 5, 7), hazardYellowMat);
+            tr.position.set(tx, ty, 3.5);
+            subGroup.add(tr);
+        });
+        const subPylon = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.9, 24, 4), slateMat);
+        subPylon.rotation.x = Math.PI / 2;
+        subPylon.position.set(0, 0, 24);
+        subGroup.add(subPylon);
+        group.add(subGroup);
+
+        // COLLAPSED 4-STORY APARTMENT BLOCK & RUBBLE (enclosing POI_COLLAPSE at -85, -60)
+        const colGroup = new THREE.Group();
+        colGroup.position.set(-85, -60, 0);
+        const colBase = new THREE.Mesh(new THREE.BoxGeometry(32, 22, 12), rubbleMat);
+        colBase.position.z = 6;
+        colBase.castShadow = true;
+        colGroup.add(colBase);
+        const colTilted = new THREE.Mesh(new THREE.BoxGeometry(28, 20, 4), rubbleMat);
+        colTilted.position.set(2, 1, 13);
+        colTilted.rotation.set(0.12, -0.15, 0.08);
+        colTilted.castShadow = true;
+        colGroup.add(colTilted);
+        // Concrete debris chunks scattered around
+        for (let i = 0; i < 8; i++) {
+            const chunk = new THREE.Mesh(new THREE.BoxGeometry(2 + Math.random() * 2, 2 + Math.random() * 2, 1.5), rubbleMat);
+            const ang = (i / 8) * Math.PI * 2;
+            chunk.position.set(Math.cos(ang) * 16, Math.sin(ang) * 12, 0.8);
+            chunk.rotation.set(Math.random(), Math.random(), Math.random());
+            colGroup.add(chunk);
+        }
+        group.add(colGroup);
+
+        // METRO CIVIC EMERGENCY SHELTER (enclosing POI_SHELTER at -50, -85)
+        const shelterGroup = new THREE.Group();
+        shelterGroup.position.set(-50, -85, 0);
+        const shelterPavilion = new THREE.Mesh(new THREE.BoxGeometry(26, 18, 10), creamWallMat);
+        shelterPavilion.position.z = 5;
+        shelterPavilion.castShadow = true;
+        shelterGroup.add(shelterPavilion);
+        // Emergency Response Medical Tents
+        [-10, 10].forEach(tx => {
+            const tent = new THREE.Mesh(new THREE.ConeGeometry(3.5, 4.5, 4), new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.8 }));
+            tent.rotation.y = Math.PI / 4;
+            tent.rotation.x = Math.PI / 2;
+            tent.position.set(tx, 14, 2.25);
+            shelterGroup.add(tent);
+        });
+        group.add(shelterGroup);
+
+        // TOWER 12: Bio-Research High-Rise (center: -110, 50)
+        const t12Group = new THREE.Group();
+        t12Group.position.set(-110, 50, 0);
+        const t12Mesh = new THREE.Mesh(new THREE.BoxGeometry(28, 28, 70), slateMat);
+        t12Mesh.position.z = 35;
+        t12Mesh.castShadow = true;
+        t12Group.add(t12Mesh);
+        group.add(t12Group);
+
+        // TOWER 13: Northwest Twin High-Rise (center: -135, 20)
+        const t13Group = new THREE.Group();
+        t13Group.position.set(-135, 20, 0);
+        const t13Mesh = new THREE.Mesh(new THREE.BoxGeometry(26, 28, 68), beigeMat);
+        t13Mesh.position.z = 34;
+        t13Mesh.castShadow = true;
+        t13Group.add(t13Mesh);
+        group.add(t13Group);
+
+        // TOWER 14: East Horizon Corporate Spire (center: 145, 45)
+        const t14Group = new THREE.Group();
+        t14Group.position.set(145, 45, 0);
+        const t14Mesh = new THREE.Mesh(new THREE.BoxGeometry(32, 30, 84), glassMat);
+        t14Mesh.position.z = 42;
+        t14Mesh.castShadow = true;
+        t14Group.add(t14Mesh);
+        const t14Spire = new THREE.Mesh(new THREE.ConeGeometry(8, 20, 4), slateMat);
+        t14Spire.rotation.x = Math.PI / 2;
+        t14Spire.position.z = 84 + 10;
+        t14Group.add(t14Spire);
+        group.add(t14Group);
+        rooftopRelayNodes.push(new THREE.Vector3(145, 45, 86));
+
+        // EAST LOGISTICS HUB (center: 145, -70)
+        const logGroup = new THREE.Group();
+        logGroup.position.set(145, -70, 0);
+        const logMesh = new THREE.Mesh(new THREE.BoxGeometry(30, 30, 24), slateMat);
+        logMesh.position.z = 12;
+        logMesh.castShadow = true;
+        logGroup.add(logMesh);
+        group.add(logGroup);
+
+        // WEST RESIDENTIAL HIGH-RISE (center: -115, -75)
+        const westRes = new THREE.Mesh(new THREE.BoxGeometry(26, 24, 24), beigeMat);
+        westRes.position.set(-115, -75, 12);
+        westRes.castShadow = true;
+        group.add(westRes);
+
+        // CENTRAL PLAZA COLLAPSED SKYBRIDGE (around POI_SURVIVORS at 25, -55)
+        const plazaRubble = new THREE.Mesh(new THREE.BoxGeometry(24, 5, 3), rubbleMat);
+        plazaRubble.position.set(25, -55, 1.5);
+        plazaRubble.rotation.z = 0.25;
+        plazaRubble.castShadow = true;
+        group.add(plazaRubble);
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. Dedicated 3D Physical Launch Pads on GCS Apron
+    // ------------------------------------------------------------------------
+    function create3DLaunchPads(group) {
+        const padsGroup = new THREE.Group();
+
+        const padBaseGeo = new THREE.CylinderGeometry(4.2, 4.4, 0.25, 6);
+        const padBaseMat = new THREE.MeshStandardMaterial({
+            color: 0x141a24,
+            metalness: 0.85,
+            roughness: 0.25,
+        });
+
+        const crossGeoH = new THREE.BoxGeometry(3.6, 0.8, 0.05);
+        const crossGeoV = new THREE.BoxGeometry(0.8, 3.6, 0.05);
+
+        const padsConfig = [
+            // Surveyors (UAV_1 to UAV_8) along y = -145
+            ...[-70, -50, -30, -10, 10, 30, 50, 70].map((x, i) => ({
+                id: `UAV_${i + 1}`,
+                x, y: -145,
+                color: 0x00e5ff,
+            })),
+            // Relays (RELAY_1 to RELAY_4) along y = -136
+            ...[-45, -15, 15, 45].map((x, i) => ({
+                id: `RELAY_${i + 1}`,
+                x, y: -136,
+                color: 0xffd600,
+            })),
+            // Scouts (SCOUT_1 to SCOUT_4) along y = -153
+            ...[-45, -15, 15, 45].map((x, i) => ({
+                id: `SCOUT_${i + 1}`,
+                x, y: -153,
+                color: 0x00ff66,
+            })),
+        ];
+
+        padsConfig.forEach(cfg => {
+            const pGroup = new THREE.Group();
+            pGroup.position.set(cfg.x, cfg.y, 0);
+
+            // 1. Raised hexagonal carbon base slab
+            const baseMesh = new THREE.Mesh(padBaseGeo, padBaseMat);
+            baseMesh.rotation.x = Math.PI / 2;
+            baseMesh.position.z = 0.125;
+            baseMesh.receiveShadow = true;
+            pGroup.add(baseMesh);
+
+            // 2. Glowing perimeter LED accent ring
+            const ringGeo = new THREE.RingGeometry(3.6, 4.1, 6);
+            const ringMat = new THREE.MeshBasicMaterial({
+                color: cfg.color,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.9,
+            });
+            const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+            ringMesh.position.z = 0.26;
+            pGroup.add(ringMesh);
+
+            // 3. Central landing cross
+            const crossMat = new THREE.MeshBasicMaterial({ color: cfg.color, transparent: true, opacity: 0.75 });
+            const ch = new THREE.Mesh(crossGeoH, crossMat);
+            ch.position.z = 0.26;
+            pGroup.add(ch);
+            const cv = new THREE.Mesh(crossGeoV, crossMat);
+            cv.position.z = 0.26;
+            pGroup.add(cv);
+
+            // 4. Perimeter safety navigation corner LED pucks
+            const puckGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.15, 8);
+            const puckMat = new THREE.MeshBasicMaterial({ color: cfg.color });
+            for (let k = 0; k < 6; k++) {
+                const angle = (k / 6) * Math.PI * 2;
+                const puck = new THREE.Mesh(puckGeo, puckMat);
+                puck.rotation.x = Math.PI / 2;
+                puck.position.set(Math.cos(angle) * 3.8, Math.sin(angle) * 3.8, 0.28);
+                pGroup.add(puck);
+            }
+
+            padsGroup.add(pGroup);
+        });
+
+        group.add(padsGroup);
     }
 
     // ------------------------------------------------------------------------
@@ -1594,6 +1930,9 @@ const SectorDelta = (() => {
 
             // 4. Architectural Skyscraper City Cluster & Low-Rise Village
             createArchitecturalCity(dioramaGroup);
+
+            // 5. Dedicated 3D Physical Launch Pads on GCS Apron
+            create3DLaunchPads(dioramaGroup);
 
             // Optimize render performance: static diorama elements never move
             dioramaGroup.traverse(child => {

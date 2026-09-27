@@ -87,7 +87,8 @@ def create_default_simulation() -> SwarmSimulationCore:
 
     # 1. Add architectural obstacles matching Sector Delta visual 3D buildings
     sector_delta_obstacles = [
-        # Tower 1: Iconic Faceted Glass Skyscraper with Angled Crown (center: -60, 20)
+        # --- CENTRAL DISTRICT ---
+        # Tower 1: Iconic Faceted Glass Skyscraper (center: -60, 20)
         ObstacleAABB(
             id="OBS_TOWER_GLASS",
             name="Faceted Glass Skyscraper",
@@ -168,6 +169,136 @@ def create_default_simulation() -> SwarmSimulationCore:
             material="reinforced_concrete",
             base_attenuation_db=18.0,
         ),
+        # --- EXPANDED NORTH & TECH DISTRICT ---
+        # Tower 8: Glass Telecom Megatower (center: 30, 110)
+        ObstacleAABB(
+            id="OBS_TOWER_MEGATOWER",
+            name="North Telecom Megatower",
+            min_pt=np.array([12.0, 92.0, 0.0]),
+            max_pt=np.array([48.0, 128.0, 120.0]),
+            material="steel_concrete",
+            base_attenuation_db=28.0,
+        ),
+        # Tower 9: Cyan High-Rise (center: -70, 115)
+        ObstacleAABB(
+            id="OBS_TOWER_CYAN",
+            name="Northwest Cyan Tower",
+            min_pt=np.array([-86.0, 98.0, 0.0]),
+            max_pt=np.array([-54.0, 132.0, 98.0]),
+            material="steel_concrete",
+            base_attenuation_db=24.0,
+        ),
+        # Tower 10: North Commerce Center (center: 85, 95)
+        ObstacleAABB(
+            id="OBS_TOWER_COMMERCE",
+            name="North Commerce Center",
+            min_pt=np.array([68.0, 79.0, 0.0]),
+            max_pt=np.array([102.0, 111.0, 88.0]),
+            material="reinforced_concrete",
+            base_attenuation_db=22.0,
+        ),
+        # Tower 11: Stepped Tech High-Rise (center: 120, 110)
+        ObstacleAABB(
+            id="OBS_TOWER_TECH",
+            name="Stepped Tech Tower",
+            min_pt=np.array([105.0, 95.0, 0.0]),
+            max_pt=np.array([135.0, 125.0, 78.0]),
+            material="steel_concrete",
+            base_attenuation_db=22.0,
+        ),
+        # North Chemical Facility & Hazard Tanks (enclosing POI_HAZARD at -20, 95)
+        ObstacleAABB(
+            id="OBS_FACILITY_HAZARD",
+            name="North Chemical Processing Plant",
+            min_pt=np.array([-38.0, 82.0, 0.0]),
+            max_pt=np.array([-2.0, 108.0, 24.0]),
+            material="heavy_concrete",
+            base_attenuation_db=25.0,
+        ),
+        # --- EXPANDED WEST & NORTHWEST MEDICAL/CIVIC DISTRICT ---
+        # St. Jude Medical Center Complex (enclosing POI_HOSPITAL at -60, 25)
+        ObstacleAABB(
+            id="OBS_HOSPITAL_COMPLEX",
+            name="Metropolitan Trauma Hospital",
+            min_pt=np.array([-84.0, 3.0, 0.0]),
+            max_pt=np.array([-36.0, 47.0, 34.0]),
+            material="reinforced_concrete",
+            base_attenuation_db=24.0,
+        ),
+        # Tower 12: Northwest Research Tower (center: -110, 50)
+        ObstacleAABB(
+            id="OBS_TOWER_RESEARCH",
+            name="Bio-Research High-Rise",
+            min_pt=np.array([-124.0, 36.0, 0.0]),
+            max_pt=np.array([-96.0, 64.0, 70.0]),
+            material="steel_concrete",
+            base_attenuation_db=22.0,
+        ),
+        # Tower 13: Northwest Twin Tower (center: -135, 20)
+        ObstacleAABB(
+            id="OBS_TOWER_NW_TWIN",
+            name="Northwest Twin Tower",
+            min_pt=np.array([-148.0, 6.0, 0.0]),
+            max_pt=np.array([-122.0, 34.0, 68.0]),
+            material="reinforced_concrete",
+            base_attenuation_db=22.0,
+        ),
+        # --- EXPANDED EAST POWER & LOGISTICS DISTRICT ---
+        # East Power Substation Building (enclosing POI_SUBSTATION at 115, -40)
+        ObstacleAABB(
+            id="OBS_POWER_SUBSTATION",
+            name="Regional Power Substation",
+            min_pt=np.array([102.0, -52.0, 0.0]),
+            max_pt=np.array([128.0, -28.0, 22.0]),
+            material="heavy_concrete",
+            base_attenuation_db=26.0,
+        ),
+        # Tower 14: East Horizon Corporate Spire (center: 145, 45)
+        ObstacleAABB(
+            id="OBS_TOWER_EAST_HORIZON",
+            name="East Horizon Corporate Spire",
+            min_pt=np.array([129.0, 30.0, 0.0]),
+            max_pt=np.array([161.0, 60.0, 84.0]),
+            material="steel_concrete",
+            base_attenuation_db=24.0,
+        ),
+        # East Logistics Hub (center: 145, -70)
+        ObstacleAABB(
+            id="OBS_LOGISTICS_HUB",
+            name="East Logistics Hub",
+            min_pt=np.array([130.0, -85.0, 0.0]),
+            max_pt=np.array([160.0, -55.0, 28.0]),
+            material="steel_concrete",
+            base_attenuation_db=20.0,
+        ),
+        # --- EXPANDED SOUTHWEST RESIDENTIAL & COLLAPSE DISTRICT ---
+        # Collapsed 4-Story Apartment Block (enclosing POI_COLLAPSE at -85, -60)
+        ObstacleAABB(
+            id="OBS_COLLAPSE_BLOCK",
+            name="Collapsed Apartment Complex",
+            min_pt=np.array([-101.0, -71.0, 0.0]),
+            max_pt=np.array([-69.0, -49.0, 16.0]),
+            material="concrete_debris",
+            base_attenuation_db=22.0,
+        ),
+        # Metro Civic Shelter Station (enclosing POI_SHELTER at -50, -85)
+        ObstacleAABB(
+            id="OBS_CIVIC_SHELTER",
+            name="Metro Civic Emergency Shelter",
+            min_pt=np.array([-63.0, -95.0, 0.0]),
+            max_pt=np.array([-37.0, -75.0, 14.0]),
+            material="reinforced_concrete",
+            base_attenuation_db=20.0,
+        ),
+        # West Residential Block (center: -115, -75)
+        ObstacleAABB(
+            id="OBS_WEST_RESIDENTIAL",
+            name="West Residential High-Rise",
+            min_pt=np.array([-128.0, -87.0, 0.0]),
+            max_pt=np.array([-102.0, -63.0, 24.0]),
+            material="reinforced_concrete",
+            base_attenuation_db=18.0,
+        ),
     ]
     for obs in sector_delta_obstacles:
         sim.add_obstacle(obs)
@@ -182,30 +313,41 @@ def create_default_simulation() -> SwarmSimulationCore:
     sim.add_poi("POI_SUBSTATION", position=[115.0, -40.0, 24.0], priority="HIGH", required_dwell_time=10.0)
     sim.add_poi("POI_HIGHWAY", position=[-100.0, -100.0, 14.0], priority="MEDIUM", required_dwell_time=8.0)
 
-    # 3. Add heterogeneous fleet of 16 UAVs spawning on the GCS launch apron on the diorama board
+    # 3. Add heterogeneous fleet of 16 UAVs spawning on their designated launch pads on the GCS Apron
     fleet_init = [
         # Heavy Disaster Surveyors (Front row along tactical apron y = -145)
-        ("UAV_1", DroneRole.SURVEY, [-70.0, -145.0, 0.2]),
-        ("UAV_2", DroneRole.SURVEY, [-50.0, -145.0, 0.2]),
-        ("UAV_3", DroneRole.SURVEY, [-30.0, -145.0, 0.2]),
-        ("UAV_4", DroneRole.SURVEY, [-10.0, -145.0, 0.2]),
-        ("UAV_5", DroneRole.SURVEY, [10.0, -145.0, 0.2]),
-        ("UAV_6", DroneRole.SURVEY, [30.0, -145.0, 0.2]),
-        ("UAV_7", DroneRole.SURVEY, [50.0, -145.0, 0.2]),
-        ("UAV_8", DroneRole.SURVEY, [70.0, -145.0, 0.2]),
+        ("UAV_1", DroneRole.SURVEY, [-70.0, -145.0, 0.45]),
+        ("UAV_2", DroneRole.SURVEY, [-50.0, -145.0, 0.45]),
+        ("UAV_3", DroneRole.SURVEY, [-30.0, -145.0, 0.45]),
+        ("UAV_4", DroneRole.SURVEY, [-10.0, -145.0, 0.45]),
+        ("UAV_5", DroneRole.SURVEY, [10.0, -145.0, 0.45]),
+        ("UAV_6", DroneRole.SURVEY, [30.0, -145.0, 0.45]),
+        ("UAV_7", DroneRole.SURVEY, [50.0, -145.0, 0.45]),
+        ("UAV_8", DroneRole.SURVEY, [70.0, -145.0, 0.45]),
         # Elevated High-Altitude Multi-Hop Relays (Relay pad row y = -136)
-        ("RELAY_1", DroneRole.RELAY, [-45.0, -136.0, 0.2]),
-        ("RELAY_2", DroneRole.RELAY, [-15.0, -136.0, 0.2]),
-        ("RELAY_3", DroneRole.RELAY, [15.0, -136.0, 0.2]),
-        ("RELAY_4", DroneRole.RELAY, [45.0, -136.0, 0.2]),
+        ("RELAY_1", DroneRole.RELAY, [-45.0, -136.0, 0.45]),
+        ("RELAY_2", DroneRole.RELAY, [-15.0, -136.0, 0.45]),
+        ("RELAY_3", DroneRole.RELAY, [15.0, -136.0, 0.45]),
+        ("RELAY_4", DroneRole.RELAY, [45.0, -136.0, 0.45]),
         # Rapid Reconnaissance Scouts (Scout pad row y = -153)
-        ("SCOUT_1", DroneRole.SURVEY, [-45.0, -153.0, 0.2]),
-        ("SCOUT_2", DroneRole.SURVEY, [-15.0, -153.0, 0.2]),
-        ("SCOUT_3", DroneRole.SURVEY, [15.0, -153.0, 0.2]),
-        ("SCOUT_4", DroneRole.SURVEY, [45.0, -153.0, 0.2]),
+        ("SCOUT_1", DroneRole.SURVEY, [-45.0, -153.0, 0.45]),
+        ("SCOUT_2", DroneRole.SURVEY, [-15.0, -153.0, 0.45]),
+        ("SCOUT_3", DroneRole.SURVEY, [15.0, -153.0, 0.45]),
+        ("SCOUT_4", DroneRole.SURVEY, [45.0, -153.0, 0.45]),
     ]
     for d_id, role, pos in fleet_init:
         drone = Drone(d_id, role=role, initial_pos=np.array(pos, dtype=np.float64))
+        # Staggered tactical takeoff delays: Scouts launch first, then Relays, then Surveyors in pairs
+        if "SCOUT" in d_id:
+            drone.takeoff_delay = 1.0
+        elif "RELAY" in d_id:
+            drone.takeoff_delay = 2.4
+        else:
+            try:
+                pair_idx = int(d_id.split("_")[1])
+            except Exception:
+                pair_idx = 1
+            drone.takeoff_delay = 3.6 + ((pair_idx - 1) // 2) * 1.0
         sim.add_drone(drone)
 
     # 4. Attach subsystems with extended mission budget and generous comms timeout

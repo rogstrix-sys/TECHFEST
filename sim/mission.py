@@ -900,9 +900,13 @@ class DisasterMissionManager:
         # ---------------------------------------------------------------------
         # 3. Role-Specific Mission Logic
         # ---------------------------------------------------------------------
+        takeoff_delay = getattr(drone, "takeoff_delay", 0.0)
+
         # Relay drone mission logic
         if drone.role == DroneRole.RELAY:
             if drone.flight_mode in (FlightMode.IDLE, FlightMode.LANDED):
+                if self.total_mission_time < takeoff_delay:
+                    return
                 drone.set_flight_mode(FlightMode.TAKEOFF)
                 drone.set_target_waypoint(drone.position + np.array([0.0, 0.0, 30.0]))
             elif drone.flight_mode == FlightMode.TAKEOFF and drone.position[2] >= 30.0:
@@ -912,6 +916,8 @@ class DisasterMissionManager:
         # Survey drone mission logic
         if drone.role == DroneRole.SURVEY:
             if drone.flight_mode in (FlightMode.IDLE, FlightMode.LANDED):
+                if self.total_mission_time < takeoff_delay:
+                    return
                 drone.set_flight_mode(FlightMode.TAKEOFF)
                 drone.set_target_waypoint(drone.position + np.array([0.0, 0.0, 30.0]))
 
