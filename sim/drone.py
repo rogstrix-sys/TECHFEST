@@ -351,8 +351,8 @@ class Drone:
         f_coh = np.zeros(3, dtype=np.float64)
 
         neighbors: List[Drone] = []
-        r_percept = 12.0
         r_sep_static = self.limits.separation_radius
+        r_percept = max(12.0, r_sep_static * 1.5)
         m = self.limits.mass_kg
 
         for peer in peers:
@@ -374,11 +374,17 @@ class Drone:
             if dist < r_sep_dyn:
                 d_eff = max(dist - 1.8, 0.1)
                 r_eff = max(r_sep_dyn - 1.8, 0.2)
-                mag_apf = 45.0 * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
                 mag_damp = 12.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m
-                mag_barrier = 80.0 * ((2.2 / max(dist, 0.1)) ** 3) if dist < 2.5 else 0.0
-
-                mag_total = min(mag_apf + mag_damp + mag_barrier, 250.0)
+                if r_sep_static > 6.0:
+                    scale = max(1.0, (r_sep_dyn / 6.0) ** 2)
+                    mag_apf = 45.0 * scale * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
+                    barrier_dist = r_sep_static * 0.95
+                    mag_barrier = 120.0 * ((barrier_dist / max(dist, 0.1)) ** 3) if dist < barrier_dist else 0.0
+                    mag_total = min(mag_apf + mag_damp + mag_barrier, 400.0)
+                else:
+                    mag_apf = 45.0 * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
+                    mag_barrier = 80.0 * ((2.2 / max(dist, 0.1)) ** 3) if dist < 2.5 else 0.0
+                    mag_total = min(mag_apf + mag_damp + mag_barrier, 250.0)
                 f_sep += mag_total * r_hat
 
             if dist < r_percept:
@@ -631,6 +637,12 @@ class Drone:
 
         # Vertical climb / descent clamp
         self.velocity[2] = max(-self.limits.max_speed_z_down, min(self.limits.max_speed_z_up, self.velocity[2]))
+
+        # Optional strict 3D speed clamp (for competition constraint max speed 5 m/s)
+        if getattr(self.limits, "clamp_3d_speed", False):
+            v_3d = float(np.linalg.norm(self.velocity))
+            if v_3d > self.limits.max_speed_xy:
+                self.velocity = (self.velocity / v_3d) * self.limits.max_speed_xy
 
         # 4. Position Integration & Ground Surface Constraint
         self.position += self.velocity * dt

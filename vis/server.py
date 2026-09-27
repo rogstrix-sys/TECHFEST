@@ -365,8 +365,15 @@ def create_default_simulation() -> SwarmSimulationCore:
 class SimulationServer:
     """Manages the simulation step loop, LiDAR perception, and WebSocket broadcasting."""
 
-    def __init__(self) -> None:
-        self.sim: SwarmSimulationCore = create_default_simulation()
+    def __init__(self, scenario: str = "sector_delta") -> None:
+        self.scenario: str = scenario
+        if self.scenario == "challenge":
+            from sim.challenge import create_challenge_simulation
+            self.sim, self.spawner, self.monitor = create_challenge_simulation()
+            self.voxel_map = OccupancyGridMap3D(voxel_size_m=10.0)
+        else:
+            self.sim = create_default_simulation()
+            self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
         self.clients: Set[WebSocket] = set()
         self.is_running: bool = True
         self.sim_speed: float = 1.0
@@ -383,13 +390,19 @@ class SimulationServer:
             vertical_channels=16,            # 16 elevation rings (960 rays total)
             range_noise_std_m=0.03
         )
-        self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
         self.latest_payload: Optional[str] = None
 
-    def reset(self) -> None:
+    def reset(self, scenario: Optional[str] = None) -> None:
         """Reset simulation and SLAM occupancy grid to initial disaster scenario."""
-        self.sim = create_default_simulation()
-        self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
+        if scenario is not None:
+            self.scenario = scenario
+        if self.scenario == "challenge":
+            from sim.challenge import create_challenge_simulation
+            self.sim, self.spawner, self.monitor = create_challenge_simulation()
+            self.voxel_map = OccupancyGridMap3D(voxel_size_m=10.0)
+        else:
+            self.sim = create_default_simulation()
+            self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
         self.step_count = 0
 
     async def broadcast_loop(self) -> None:
@@ -402,6 +415,7 @@ class SimulationServer:
                     # Step simulation
                     snapshot = self.sim.step()
                     data = snapshot.to_dict()
+                    data["scenario"] = self.scenario
 
                     # 1. Enrich with real-time EKF estimation metrics & attitude Euler angles
                     for d_dict in data.get("drones", []):
@@ -573,7 +587,32 @@ async def get_index():
 @app.get("/api/telemetry")
 async def get_telemetry():
     """Return latest simulation telemetry frame."""
-    return JSONResponse(server_manager.sim.to_dict())
+    data = server_manager.sim.to_dict()
+    data["scenario"] = server_manager.scenario
+    return JSONResponse(data)
+
+
+@app.get("/api/scenario")
+async def get_scenario():
+    """Return currently active simulation scenario."""
+    return JSONResponse({
+        "scenario": server_manager.scenario,
+        "supported": ["sector_delta", "challenge"]
+    })
+
+
+@app.post("/api/scenario")
+async def set_scenario(payload: Dict[str, Any]):
+    """Switch active simulation scenario ('sector_delta' or 'challenge')."""
+    scen = payload.get("scenario", "sector_delta").lower()
+    if scen not in ("sector_delta", "challenge"):
+        return JSONResponse({"status": "error", "message": f"Unsupported scenario: {scen}"}, status_code=400)
+    server_manager.reset(scenario=scen)
+    return JSONResponse({
+        "status": "ok",
+        "scenario": server_manager.scenario,
+        "message": f"Switched to {scen} scenario successfully."
+    })
 
 
 @app.get("/api/gpu")
@@ -767,6 +806,11 @@ async def post_control(payload: Dict[str, Any]):
         drone_id = payload.get("drone_id")
         victim = server_manager.sim.trigger_chaos_fault(drone_id)
         return JSONResponse({"status": "ok", "victim_id": victim})
+    elif cmd in ("switch_scenario", "scenario"):
+        scen = (payload.get("scenario") or payload.get("value") or "sector_delta").lower()
+        if scen in ("sector_delta", "challenge"):
+            server_manager.reset(scenario=scen)
+            return JSONResponse({"status": "ok", "scenario": server_manager.scenario})
     elif cmd == "manual_control":
         drone_id = payload.get("drone_id") or server_manager.focus_drone_id
         vx = float(payload.get("vx", 0.0))

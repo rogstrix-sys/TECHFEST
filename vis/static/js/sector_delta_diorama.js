@@ -13,6 +13,7 @@
 
 const SectorDelta = (() => {
     let dioramaGroup = null;
+    let challengeGroup = null;
     let arcStreams = []; // Array of active parabolic arc streams
     let rooftopRelayNodes = []; // Key rooftop relay coordinates
 
@@ -1910,6 +1911,272 @@ const SectorDelta = (() => {
     }
 
     // ------------------------------------------------------------------------
+    // Challenge Arena: 1000m x 1000m Operational Area + 75m West Operational Center
+    // ------------------------------------------------------------------------
+    function createChallengeArena(scene) {
+        challengeGroup = new THREE.Group();
+        challengeGroup.name = "challenge_arena";
+        challengeGroup.visible = false; // Default inactive, toggled via setScenario
+        scene.add(challengeGroup);
+
+        // 1. Terrain Canvas: 1200m x 1100m tactical arena grid
+        const c = document.createElement("canvas");
+        c.width = 1024;
+        c.height = 1024;
+        const ctx = c.getContext("2d");
+
+        // Dark tactical surface background
+        ctx.fillStyle = "#101826";
+        ctx.fillRect(0, 0, 1024, 1024);
+
+        // Map dimensions: arena [0, 1000] x [-500, 500] plus Operational Center at X = -75
+        function toCanv(x, y) {
+            const cx = ((x - (-150)) / 1200) * 1024;
+            const cy = ((550 - y) / 1100) * 1024;
+            return [cx, cy];
+        }
+
+        // Minor grid lines every 50m
+        ctx.strokeStyle = "rgba(40, 75, 110, 0.35)";
+        ctx.lineWidth = 1;
+        for (let gx = -150; gx <= 1050; gx += 50) {
+            const [x1, y1] = toCanv(gx, -550);
+            const [x2, y2] = toCanv(gx, 550);
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+        }
+        for (let gy = -550; gy <= 550; gy += 50) {
+            const [x1, y1] = toCanv(-150, gy);
+            const [x2, y2] = toCanv(1050, gy);
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+        }
+
+        // Major grid lines every 100m inside 1000m x 1000m Arena
+        ctx.strokeStyle = "rgba(0, 229, 255, 0.4)";
+        ctx.lineWidth = 1.5;
+        for (let gx = 0; gx <= 1000; gx += 100) {
+            const [x1, y1] = toCanv(gx, -500);
+            const [x2, y2] = toCanv(gx, 500);
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+            // Label
+            ctx.font = "bold 10px 'Consolas', monospace";
+            ctx.fillStyle = "rgba(0, 229, 255, 0.7)";
+            ctx.fillText(`${gx}m`, x1 + 2, y1 - 4);
+        }
+        for (let gy = -500; gy <= 500; gy += 100) {
+            const [x1, y1] = toCanv(0, gy);
+            const [x2, y2] = toCanv(1000, gy);
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+            // Label
+            ctx.font = "bold 10px 'Consolas', monospace";
+            ctx.fillStyle = "rgba(0, 229, 255, 0.7)";
+            ctx.fillText(`${gy > 0 ? '+' : ''}${gy}m`, x1 + 4, y1 - 2);
+        }
+
+        // Operational Center Apron background at X = -75, Y in [-160, 160]
+        const [apx1, apy1] = toCanv(-120, 160);
+        const [apx2, apy2] = toCanv(-20, -160);
+        ctx.fillStyle = "#1e293b";
+        ctx.fillRect(apx1, apy1, apx2 - apx1, apy2 - apy1);
+        ctx.strokeStyle = "#ffd600";
+        ctx.lineWidth = 2.5;
+        ctx.strokeRect(apx1, apy1, apx2 - apx1, apy2 - apy1);
+
+        // Operational Center Header Stencil
+        ctx.font = "bold 12px 'Consolas', monospace";
+        ctx.fillStyle = "#ffd600";
+        ctx.fillText("OPERATIONAL CENTER (75m WEST OF ARENA)", apx1 + 8, apy1 + 20);
+        ctx.font = "bold 10px 'Consolas', monospace";
+        ctx.fillStyle = "#00e5ff";
+        ctx.fillText("MEITY / IIT BOMBAY / IISER BHOPAL SWARM CHALLENGE", apx1 + 8, apy1 + 36);
+
+        // 1000m x 1000m Operational Arena Boundary Border
+        const [bx1, by1] = toCanv(0, 500);
+        const [bx2, by2] = toCanv(1000, -500);
+        ctx.strokeStyle = "#00e5ff";
+        ctx.lineWidth = 4;
+        ctx.strokeRect(bx1, by1, bx2 - bx1, by2 - by1);
+
+        // Hazard corner hatches
+        ctx.strokeStyle = "#ffd600";
+        ctx.lineWidth = 2;
+        [[0, 500], [1000, 500], [1000, -500], [0, -500]].forEach(([cx, cy]) => {
+            const [px, py] = toCanv(cx, cy);
+            ctx.strokeRect(px - 14, py - 14, 28, 28);
+        });
+
+        // Main Arena Center Title
+        const [tcx, tcy] = toCanv(500, 0);
+        ctx.save();
+        ctx.font = "bold 24px 'Consolas', monospace";
+        ctx.fillStyle = "rgba(0, 229, 255, 0.4)";
+        ctx.textAlign = "center";
+        ctx.fillText("1000m x 1000m OPERATIONAL ARENA", tcx, tcy - 12);
+        ctx.font = "bold 13px 'Consolas', monospace";
+        ctx.fillStyle = "rgba(255, 214, 0, 0.5)";
+        ctx.fillText("MAX ALTITUDE: 100m | MAX SPEED: 5 m/s | MIN SEPARATION: 20m | COMM RANGE: 100m", tcx, tcy + 16);
+        ctx.restore();
+
+        const terrainTex = new THREE.CanvasTexture(c);
+        const groundMat = new THREE.MeshStandardMaterial({
+            map: terrainTex,
+            roughness: 0.8,
+            metalness: 0.15,
+        });
+
+        // Ground mesh: centered at (450, 0, 0) covering [-150, 1050] x [-550, 550]
+        const groundGeo = new THREE.PlaneGeometry(1200, 1100);
+        const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+        groundMesh.position.set(450, 0, -0.05);
+        groundMesh.receiveShadow = true;
+        challengeGroup.add(groundMesh);
+
+        // 2. 3D Glowing Perimeter Ribbon around the 1000m x 1000m Arena
+        const fenceMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.85 });
+        const yellowFenceMat = new THREE.MeshBasicMaterial({ color: 0xffd600, transparent: true, opacity: 0.85 });
+
+        // 4 boundary wall segments
+        const sWall = new THREE.Mesh(new THREE.BoxGeometry(1000, 1.5, 1.5), fenceMat);
+        sWall.position.set(500, -500, 0.75);
+        challengeGroup.add(sWall);
+
+        const nWall = new THREE.Mesh(new THREE.BoxGeometry(1000, 1.5, 1.5), fenceMat);
+        nWall.position.set(500, 500, 0.75);
+        challengeGroup.add(nWall);
+
+        const eWall = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1000, 1.5), fenceMat);
+        eWall.position.set(1000, 0, 0.75);
+        challengeGroup.add(eWall);
+
+        const wWall = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1000, 1.5), yellowFenceMat);
+        wWall.position.set(0, 0, 0.75);
+        challengeGroup.add(wWall);
+
+        // 3. Four 25m Tall Boundary Pylon Towers at Arena Corners
+        const pylonGeo = new THREE.CylinderGeometry(0.8, 1.6, 25, 8);
+        const pylonMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
+        const beaconGeo = new THREE.SphereGeometry(1.2, 12, 12);
+        const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff1744 });
+
+        [[0, -500], [1000, -500], [1000, 500], [0, 500]].forEach(([cx, cy]) => {
+            const pylon = new THREE.Mesh(pylonGeo, pylonMat);
+            pylon.rotation.x = Math.PI / 2;
+            pylon.position.set(cx, cy, 12.5);
+            challengeGroup.add(pylon);
+
+            const b = new THREE.Mesh(beaconGeo, beaconMat);
+            b.position.set(cx, cy, 25.5);
+            challengeGroup.add(b);
+        });
+
+        // 4. Operational Center Base Command Complex at X = -75.0
+        const commandBuilding = new THREE.Mesh(
+            new THREE.BoxGeometry(32, 45, 14),
+            new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.6, roughness: 0.4 })
+        );
+        commandBuilding.position.set(-135, 0, 7);
+        commandBuilding.castShadow = true;
+        challengeGroup.add(commandBuilding);
+
+        // Radome on Command Building roof
+        const radome = new THREE.Mesh(
+            new THREE.SphereGeometry(5, 16, 16),
+            new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.2 })
+        );
+        radome.position.set(-135, 0, 18);
+        challengeGroup.add(radome);
+
+        // Communication Mast with Dish Antenna at GCS node coordinate (-75, 0)
+        const mast = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.5, 0.9, 22, 8),
+            new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.85 })
+        );
+        mast.rotation.x = Math.PI / 2;
+        mast.position.set(-75, 0, 11);
+        challengeGroup.add(mast);
+
+        const dish = new THREE.Mesh(
+            new THREE.CylinderGeometry(3.0, 0.4, 0.8, 16),
+            new THREE.MeshStandardMaterial({ color: 0x00e5ff, metalness: 0.8 })
+        );
+        dish.rotation.z = Math.PI / 3;
+        dish.position.set(-75, 0, 20);
+        challengeGroup.add(dish);
+
+        // 5. 16 Physical 3D Launch Pads at Operational Center (>20m separation guaranteed)
+        const fleetPads = [
+            // Surveyors (Column X = -65, Y spaced by 50m)
+            { id: "UAV_1", label: "UAV-1", pos: [-65, -125, 0.2], col: 0x00e5ff },
+            { id: "UAV_2", label: "UAV-2", pos: [-65, -75, 0.2], col: 0x00e5ff },
+            { id: "UAV_3", label: "UAV-3", pos: [-65, -25, 0.2], col: 0x00e5ff },
+            { id: "UAV_4", label: "UAV-4", pos: [-65, 25, 0.2], col: 0x00e5ff },
+            { id: "UAV_5", label: "UAV-5", pos: [-65, 75, 0.2], col: 0x00e5ff },
+            { id: "UAV_6", label: "UAV-6", pos: [-65, 125, 0.2], col: 0x00e5ff },
+            // Relays (Column X = -95, Y spaced by 50m)
+            { id: "RELAY_1", label: "REL-1", pos: [-95, -125, 0.2], col: 0xffd600 },
+            { id: "RELAY_2", label: "REL-2", pos: [-95, -75, 0.2], col: 0xffd600 },
+            { id: "RELAY_3", label: "REL-3", pos: [-95, -25, 0.2], col: 0xffd600 },
+            { id: "RELAY_4", label: "REL-4", pos: [-95, 25, 0.2], col: 0xffd600 },
+            { id: "RELAY_5", label: "REL-5", pos: [-95, 75, 0.2], col: 0xffd600 },
+            { id: "RELAY_6", label: "REL-6", pos: [-95, 125, 0.2], col: 0xffd600 },
+            // Scouts (Column X = -35, Y spaced by 50m)
+            { id: "SCOUT_1", label: "SCT-1", pos: [-35, -75, 0.2], col: 0x00ff88 },
+            { id: "SCOUT_2", label: "SCT-2", pos: [-35, -25, 0.2], col: 0x00ff88 },
+            { id: "SCOUT_3", label: "SCT-3", pos: [-35, 25, 0.2], col: 0x00ff88 },
+            { id: "SCOUT_4", label: "SCT-4", pos: [-35, 75, 0.2], col: 0x00ff88 },
+        ];
+
+        fleetPads.forEach(pad => {
+            const padGroup = new THREE.Group();
+            padGroup.position.set(pad.pos[0], pad.pos[1], pad.pos[2]);
+
+            // Octagonal platform base
+            const plat = new THREE.Mesh(
+                new THREE.CylinderGeometry(6.5, 7.0, 0.4, 8),
+                new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.6 })
+            );
+            plat.rotation.x = Math.PI / 2;
+            padGroup.add(plat);
+
+            // Glowing target ring
+            const rMat = new THREE.MeshBasicMaterial({ color: pad.col, transparent: true, opacity: 0.85, side: THREE.DoubleSide });
+            const rMesh = new THREE.Mesh(new THREE.RingGeometry(4.2, 5.0, 24), rMat);
+            rMesh.position.z = 0.22;
+            padGroup.add(rMesh);
+
+            // Crosshair
+            const crossMat = new THREE.MeshBasicMaterial({ color: pad.col, transparent: true, opacity: 0.7 });
+            const ch = new THREE.Mesh(new THREE.PlaneGeometry(8.0, 0.6), crossMat);
+            ch.position.z = 0.23;
+            padGroup.add(ch);
+            const cv = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 8.0), crossMat);
+            cv.position.z = 0.23;
+            padGroup.add(cv);
+
+            challengeGroup.add(padGroup);
+        });
+
+        // 6. 100m Altitude Ceiling Virtual Wireframe
+        const ceilingLines = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.BoxGeometry(1000, 1000, 0.1)),
+            new THREE.LineBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.25 })
+        );
+        ceilingLines.position.set(500, 0, 100);
+        challengeGroup.add(ceilingLines);
+    }
+
+    // ------------------------------------------------------------------------
     // Public API
     // ------------------------------------------------------------------------
     return {
@@ -1934,6 +2201,9 @@ const SectorDelta = (() => {
             // 5. Dedicated 3D Physical Launch Pads on GCS Apron
             create3DLaunchPads(dioramaGroup);
 
+            // 6. Initialize MeitY / IIT Bombay / IISER Bhopal 1000m Challenge Arena
+            createChallengeArena(sceneTheater);
+
             // Optimize render performance: static diorama elements never move
             dioramaGroup.traverse(child => {
                 if (child.isMesh) {
@@ -1945,6 +2215,14 @@ const SectorDelta = (() => {
             dioramaGroup.updateMatrix();
 
             console.log("[SectorDelta] Diorama initialized with 3D buildings, plinth, overpasses, and trees.");
+        },
+
+        // Switch visual environment between Sector Delta diorama and 1000m Challenge Arena
+        setScenario(scenarioName) {
+            const isChallenge = (scenarioName === "challenge");
+            if (dioramaGroup) dioramaGroup.visible = !isChallenge;
+            if (challengeGroup) challengeGroup.visible = isChallenge;
+            console.log(`[SectorDelta] Visual scenario active: ${scenarioName}`);
         },
 
         // Links are rendered as simple clean colored lines in cockpit.js
@@ -1959,3 +2237,4 @@ const SectorDelta = (() => {
         }
     };
 })();
+window.SectorDelta = SectorDelta;

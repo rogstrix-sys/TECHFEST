@@ -96,6 +96,45 @@ let chartHistoryTime = [];
 let chartHistoryEKF = [];
 let chartHistoryPDR = [];
 let chartHistoryThroughput = [];
+let currentScenario = "sector_delta";
+let outerGroundMesh = null;
+let gcsBaseGroup = null;
+
+function applyScenarioUI(scen) {
+    if (!scen) return;
+    currentScenario = scen;
+    const isChallenge = (scen === "challenge");
+    const btn = document.getElementById("btn-challenge");
+    if (btn) {
+        btn.classList.toggle("active", isChallenge);
+        btn.textContent = isChallenge ? "IIT-B 1000m: ON" : "IIT-B 1000m";
+    }
+    const card = document.getElementById("metric-card-challenge");
+    if (card) {
+        card.style.display = isChallenge ? "flex" : "none";
+    }
+    if (window.SectorDelta && typeof window.SectorDelta.setScenario === "function") {
+        window.SectorDelta.setScenario(scen);
+    }
+    if (outerGroundMesh) outerGroundMesh.visible = !isChallenge;
+    if (gcsBaseGroup) gcsBaseGroup.visible = !isChallenge;
+
+    // Reposition camera if switching to challenge mode to view 1000m arena
+    if (isChallenge && cameraTheater && controlsTheater) {
+        smoothPanProgress = 1.0;
+        controlsTheater.maxDistance = 3000;
+        cameraTheater.position.set(450, -850, 550);
+        controlsTheater.target.set(450, 0, 0);
+        controlsTheater.update();
+    } else if (!isChallenge && cameraTheater && controlsTheater) {
+        smoothPanProgress = 1.0;
+        controlsTheater.maxDistance = 1600;
+        cameraTheater.position.set(135, -345, 215);
+        controlsTheater.target.set(0, -45, 25);
+        controlsTheater.update();
+    }
+}
+window.applyScenarioUI = applyScenarioUI;
 
 // Initialize on DOM ready
 document.addEventListener("DOMContentLoaded", () => {
@@ -105,6 +144,15 @@ document.addEventListener("DOMContentLoaded", () => {
     try { initUIControls(); } catch (e) { console.error("initUIControls error:", e); }
     try { initScientificCharts(); } catch (e) { console.error("initScientificCharts error:", e); }
     try { setViewportMode("theater"); } catch (e) { console.error("setViewportMode error:", e); }
+    // Fetch initial active scenario from server to guarantee sync
+    fetch("/api/scenario")
+        .then(r => r.json())
+        .then(data => {
+            if (data && data.scenario && data.scenario !== currentScenario) {
+                applyScenarioUI(data.scenario);
+            }
+        })
+        .catch(err => console.warn("[Scenario] fetch error:", err));
 });
 
 // ============================================================================
@@ -225,6 +273,7 @@ function initTheaterViewport() {
     outerGround.receiveShadow = true;
     outerGround.matrixAutoUpdate = false;
     outerGround.updateMatrix();
+    outerGroundMesh = outerGround;
     sceneTheater.add(outerGround);
 
     // 7. GCS Base Station Compound on Sector Delta Diorama Tray at (0, -145, 0.1)
@@ -244,6 +293,11 @@ function initTheaterViewport() {
         isMouseDownOnTheater = false;
         updateCanvasCursor();
     });
+
+    // Synchronize initial scenario visuals and camera if challenge mode was pre-set
+    if (currentScenario === "challenge") {
+        applyScenarioUI("challenge");
+    }
 }
 
 function createTheaterTerrain() {
@@ -627,6 +681,7 @@ function createTheaterTerrain() {
 function createGCSBase(x, y, z) {
     const group = new THREE.Group();
     group.position.set(x, y, z);
+    gcsBaseGroup = group;
 
     // 1. Reinforced Hexagonal Apron Plinth
     const bunkerGeo = new THREE.CylinderGeometry(8.5, 9.8, 2.2, 8);
@@ -1400,23 +1455,36 @@ function updatePoIs(poisData) {
             group = new THREE.Group();
             group.position.set(poi.position[0], poi.position[1], 0);
 
+            const isChallenge = (currentScenario === "challenge");
+            const baseColor = isChallenge ? 0xff1744 : 0xd500f9;
+
             // Ground Target Ring
-            const ringGeo = new THREE.RingGeometry(4, 5.5, 24);
-            const ringMat = new THREE.MeshBasicMaterial({ color: 0xd500f9, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+            const ringGeo = new THREE.RingGeometry(3.5, 5.0, 24);
+            const ringMat = new THREE.MeshBasicMaterial({ color: baseColor, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
             const ring = new THREE.Mesh(ringGeo, ringMat);
             group.add(ring);
+            group.ring = ring;
+
+            // Concentric Radar Ripple Beacon Ring (matching Challenge problem statement graphic!)
+            const rippleGeo = new THREE.RingGeometry(1.0, 2.2, 24);
+            const rippleMat = new THREE.MeshBasicMaterial({ color: baseColor, side: THREE.DoubleSide, transparent: true, opacity: 0.6 });
+            const ripple = new THREE.Mesh(rippleGeo, rippleMat);
+            ripple.position.z = 0.1;
+            group.add(ripple);
+            group.ripple = ripple;
 
             // Vertical Beacon Laser Beam
-            const beamGeo = new THREE.CylinderGeometry(0.15, 0.15, poi.position[2] * 2, 8);
-            const beamMat = new THREE.MeshBasicMaterial({ color: 0xd500f9, transparent: true, opacity: 0.6 });
+            const beamGeo = new THREE.CylinderGeometry(0.18, 0.18, poi.position[2] * 2, 8);
+            const beamMat = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.65 });
             const beam = new THREE.Mesh(beamGeo, beamMat);
             beam.rotation.x = Math.PI / 2;
             beam.position.z = poi.position[2];
             group.add(beam);
+            group.beam = beam;
 
             // Rotating Diamond Beacon
-            const beaconGeo = new THREE.OctahedronGeometry(1.6);
-            const beaconMat = new THREE.MeshBasicMaterial({ color: 0xd500f9, wireframe: true });
+            const beaconGeo = new THREE.OctahedronGeometry(1.8);
+            const beaconMat = new THREE.MeshBasicMaterial({ color: baseColor, wireframe: true });
             const beacon = new THREE.Mesh(beaconGeo, beaconMat);
             beacon.position.z = poi.position[2];
             group.add(beacon);
@@ -1426,8 +1494,39 @@ function updatePoIs(poisData) {
             poiMeshes.set(poi.id, group);
         }
 
-        if (poi.is_completed && group.beacon) {
-            group.beacon.material.color.setHex(0x00ff66);
+        // Color and animation state transitions
+        if (poi.is_spawned === false) {
+            group.visible = false;
+        } else {
+            group.visible = true;
+            if (poi.is_completed) {
+                if (group.beacon) group.beacon.material.color.setHex(0x00ff66);
+                if (group.ring) group.ring.material.color.setHex(0x00ff66);
+                if (group.ripple) group.ripple.material.color.setHex(0x00ff66);
+                if (group.beam) group.beam.material.color.setHex(0x00ff66);
+            } else if (poi.is_reported) {
+                // Detected and reported within 10s SLA: Cyan
+                if (group.beacon) group.beacon.material.color.setHex(0x00e5ff);
+                if (group.ring) group.ring.material.color.setHex(0x00e5ff);
+                if (group.ripple) group.ripple.material.color.setHex(0x00e5ff);
+            } else if (poi.is_detected) {
+                // Detected by UAV, in transit to report: Yellow
+                if (group.beacon) group.beacon.material.color.setHex(0xffd600);
+                if (group.ring) group.ring.material.color.setHex(0xffd600);
+            } else {
+                // Active undetected target: Red (Challenge) or Magenta (Sector Delta)
+                const col = (currentScenario === "challenge") ? 0xff1744 : 0xd500f9;
+                if (group.beacon) group.beacon.material.color.setHex(col);
+                if (group.ring) group.ring.material.color.setHex(col);
+                if (group.ripple) group.ripple.material.color.setHex(col);
+            }
+
+            // Radar ripple pulsation
+            if (group.ripple) {
+                const s = 1.0 + ((Date.now() * 0.003) % 2.5);
+                group.ripple.scale.set(s, s, 1.0);
+                group.ripple.material.opacity = Math.max(0.05, 0.7 - s * 0.25);
+            }
         }
     });
 
@@ -1445,8 +1544,9 @@ function updateLinks(linksData, routesData, dronesData) {
     dronesData.forEach(d => {
         nodeCoords.set(d.id, new THREE.Vector3(...d.position));
     });
-    // GCS Base Station Radar Mast Receiver on Sector Delta tray
-    nodeCoords.set("GCS", new THREE.Vector3(0, -145, 26));
+    // GCS Base Station Radar Mast Receiver (Sector Delta: 0, -145, 26 | Challenge: -75, 0, 16)
+    const gcsCoords = (currentScenario === "challenge") ? new THREE.Vector3(-75, 0, 16) : new THREE.Vector3(0, -145, 26);
+    nodeCoords.set("GCS", gcsCoords);
 
     const activeRoutePairs = new Set();
     if (routesData) {
@@ -2350,6 +2450,31 @@ function updateHUD(telemetry) {
         }
     }
 
+    // MeitY / IIT Bombay / IISER Bhopal Challenge Compliance Tracking
+    const cardChallenge = document.getElementById("metric-card-challenge");
+    const badgeChallenge = document.getElementById("badge-challenge-status");
+    if (telemetry.challenge_constraints) {
+        if (cardChallenge) cardChallenge.style.display = "flex";
+        const cc = telemetry.challenge_constraints;
+        if (badgeChallenge) {
+            if (cc.is_fully_compliant) {
+                badgeChallenge.textContent = "COMPLIANT (11/11)";
+                badgeChallenge.style.color = "#00ff88";
+                badgeChallenge.style.borderColor = "#00ff88";
+                badgeChallenge.style.background = "rgba(0, 255, 136, 0.12)";
+            } else {
+                const viols = cc.violations || {};
+                const nonZero = Object.entries(viols).filter(([_, v]) => v > 0).map(([k]) => k.toUpperCase());
+                badgeChallenge.textContent = `VIOLATION: ${nonZero.join(",") || "NON-COMPLIANT"}`;
+                badgeChallenge.style.color = "#ff3333";
+                badgeChallenge.style.borderColor = "#ff3333";
+                badgeChallenge.style.background = "rgba(255, 51, 51, 0.15)";
+            }
+        }
+    } else if (cardChallenge && currentScenario !== "challenge") {
+        cardChallenge.style.display = "none";
+    }
+
     // 1. Throttled Fleet & Priority Queue Lists (10 Hz throttling for rock-solid UI stability)
     const now = performance.now();
     if (now - lastFleetRenderTime >= 100) {
@@ -2751,6 +2876,9 @@ function connectWebSocket() {
     socket.onmessage = (event) => {
         try {
             const telemetry = JSON.parse(event.data);
+            if (telemetry.scenario && telemetry.scenario !== currentScenario) {
+                applyScenarioUI(telemetry.scenario);
+            }
             if (telemetry.drones) updateDrones(telemetry.drones);
             if (telemetry.obstacles) updateObstacles(telemetry.obstacles);
             if (telemetry.pois) updatePoIs(telemetry.pois);
@@ -3040,6 +3168,26 @@ function initUIControls() {
         });
     });
 
+    // MeitY / IIT Bombay / IISER Bhopal 1000m Challenge Mode Toggle
+    const btnChallenge = document.getElementById("btn-challenge");
+    if (btnChallenge) {
+        btnChallenge.addEventListener("click", () => {
+            const nextScen = (currentScenario === "challenge") ? "sector_delta" : "challenge";
+            fetch("/api/scenario", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ scenario: nextScen })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === "ok") {
+                    applyScenarioUI(data.scenario);
+                }
+            })
+            .catch(err => console.error("Error toggling scenario:", err));
+        });
+    }
+
     // Tactical Night Operations Toggle
     const btnNight = document.getElementById("btn-night");
     if (btnNight) {
@@ -3310,14 +3458,29 @@ function initUIControls() {
             }
 
             if (mode === "top") {
-                cameraTheater.position.set(0, -45, 520);
-                controlsTheater.target.set(0, -45, 0);
+                if (currentScenario === "challenge") {
+                    cameraTheater.position.set(450, 0, 1150);
+                    controlsTheater.target.set(450, 0, 0);
+                } else {
+                    cameraTheater.position.set(0, -45, 520);
+                    controlsTheater.target.set(0, -45, 0);
+                }
             } else if (mode === "orbit") {
-                cameraTheater.position.set(135, -345, 215);
-                controlsTheater.target.set(0, -45, 25);
+                if (currentScenario === "challenge") {
+                    cameraTheater.position.set(450, -850, 550);
+                    controlsTheater.target.set(450, 0, 0);
+                } else {
+                    cameraTheater.position.set(135, -345, 215);
+                    controlsTheater.target.set(0, -45, 25);
+                }
             } else if (mode === "gcs") {
-                cameraTheater.position.set(0, -145, 26);
-                controlsTheater.target.set(0, 0, 35);
+                if (currentScenario === "challenge") {
+                    cameraTheater.position.set(-75, -50, 22);
+                    controlsTheater.target.set(-75, 0, 10);
+                } else {
+                    cameraTheater.position.set(0, -145, 26);
+                    controlsTheater.target.set(0, 0, 35);
+                }
             }
         });
     });

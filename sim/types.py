@@ -99,6 +99,7 @@ class DroneLimits:
     collision_radius: float = 1.0       # Physical airframe safety radius for collision test (m)
     drag_coeff_xy: float = 0.15         # Linear drag coefficient in horizontal plane (N*s/m)
     drag_coeff_z: float = 0.25          # Linear drag coefficient in vertical direction (N*s/m)
+    clamp_3d_speed: bool = False        # When True, clamps total 3D speed to max_speed_xy
 
 
 @dataclass
@@ -373,6 +374,7 @@ class TelemetrySnapshot:
     survivors: Optional[Dict[str, Any]] = None
     tactical_comms: Optional[List[Dict[str, Any]]] = None
     charging_pads: Optional[List[Dict[str, Any]]] = None
+    challenge_constraints: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes snapshot to dictionary with Three.js cockpit compatible aliases."""
@@ -399,6 +401,8 @@ class TelemetrySnapshot:
             d["tactical_comms"] = self.tactical_comms
         if self.charging_pads is not None:
             d["charging_pads"] = self.charging_pads
+        if self.challenge_constraints is not None:
+            d["challenge_constraints"] = self.challenge_constraints
         return TelemetryDict(d)
 
 

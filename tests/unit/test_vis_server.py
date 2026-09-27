@@ -79,3 +79,32 @@ def test_server_websocket(client: TestClient):
         time.sleep(0.05)
         # Verify server handled command
         assert server_manager.sim_speed == 1.5
+
+
+def test_server_scenario_endpoints(client: TestClient):
+    """Verify GET and POST /api/scenario for MeitY / IIT Bombay Challenge and Sector Delta."""
+    # 1. Check default scenario is sector_delta
+    resp = client.get("/api/scenario")
+    assert resp.status_code == 200
+    assert resp.json()["scenario"] in ("sector_delta", "challenge")
+
+    # 2. Switch to challenge scenario
+    resp_ch = client.post("/api/scenario", json={"scenario": "challenge"})
+    assert resp_ch.status_code == 200
+    assert resp_ch.json()["status"] == "ok"
+    assert resp_ch.json()["scenario"] == "challenge"
+    assert server_manager.scenario == "challenge"
+    assert server_manager.sim.config.gcs_position[0] == -75.0
+
+    # Verify telemetry snapshot includes challenge constraints
+    telem = client.get("/api/telemetry").json()
+    assert "challenge_constraints" in telem
+    assert telem["challenge_constraints"] is not None
+    assert telem["challenge_constraints"]["is_fully_compliant"] is True
+
+    # 3. Switch back to sector_delta
+    resp_sd = client.post("/api/scenario", json={"scenario": "sector_delta"})
+    assert resp_sd.status_code == 200
+    assert resp_sd.json()["scenario"] == "sector_delta"
+    assert server_manager.scenario == "sector_delta"
+

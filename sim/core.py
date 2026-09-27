@@ -171,15 +171,19 @@ class SwarmSimulationCore:
                 f_att = err * k_att
 
         # Prioritized Safety Attenuation: Attenuate attractive force along blocked paths
+        r_sep_limit = getattr(drone.limits, "separation_radius", 6.0)
+        atten_horizon = max(8.0, r_sep_limit * 1.5)
+        atten_barrier = max(2.2, r_sep_limit * 1.1)
+
         for other_id in sorted(self.drones.keys()):
             if other_id == drone.id:
                 continue
             other = self.drones[other_id]
             delta = pos_i - other.position
             d_peer = float(np.linalg.norm(delta))
-            if 0.0 < d_peer < 8.0:
+            if 0.0 < d_peer < atten_horizon:
                 r_hat = delta / d_peer
-                gamma = 0.0 if d_peer <= 2.2 else ((d_peer - 2.2) / (8.0 - 2.2)) ** 2
+                gamma = 0.0 if d_peer <= atten_barrier else ((d_peer - atten_barrier) / (atten_horizon - atten_barrier)) ** 2
                 proj = max(0.0, float(np.dot(f_att, -r_hat)))
                 f_att -= proj * (1.0 - gamma) * (-r_hat)
 
@@ -217,21 +221,33 @@ class SwarmSimulationCore:
             delta = pos_i - other.position
             dist = float(np.linalg.norm(delta))
 
-            # Dynamic closing velocity repulsive horizon
+            # Dynamic closing velocity repulsive horizon scaled by separation_radius
             if dist > 1e-4:
                 r_hat = delta / dist
                 v_rel = vel_i - other.velocity
                 v_close = max(0.0, float(-np.dot(v_rel, r_hat)))
-                r_sep_dyn = max(6.0, (v_close ** 2) / 6.0 + 0.8 * v_close + 2.5)
-
-                if dist < r_sep_dyn:
-                    d_eff = max(dist - 1.8, 0.1)
-                    r_eff = max(r_sep_dyn - 1.8, 0.2)
-                    mag_apf = 45.0 * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
-                    mag_damp = 12.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m_i
-                    mag_barrier = 80.0 * ((2.2 / max(dist, 0.1)) ** 3) if dist < 2.5 else 0.0
-                    mag_total = min(mag_apf + mag_damp + mag_barrier, 250.0)
-                    f_sep += mag_total * r_hat
+                if r_sep_limit > 6.0:
+                    r_sep_dyn = max(r_sep_limit * 1.35, (v_close ** 2) / 4.0 + 1.2 * v_close + r_sep_limit * 1.1)
+                    if dist < r_sep_dyn:
+                        d_eff = max(dist - (r_sep_limit * 0.4), 0.1)
+                        r_eff = max(r_sep_dyn - (r_sep_limit * 0.4), 0.2)
+                        scale = max(1.0, (r_sep_dyn / 6.0) ** 2)
+                        mag_apf = 60.0 * scale * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
+                        mag_damp = 18.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m_i
+                        barrier_dist = r_sep_limit * 1.15
+                        mag_barrier = 150.0 * ((barrier_dist / max(dist, 0.1)) ** 3) if dist < barrier_dist else 0.0
+                        mag_total = min(mag_apf + mag_damp + mag_barrier, 400.0)
+                        f_sep += mag_total * r_hat
+                else:
+                    r_sep_dyn = max(6.0, (v_close ** 2) / 6.0 + 0.8 * v_close + 2.5)
+                    if dist < r_sep_dyn:
+                        d_eff = max(dist - 1.8, 0.1)
+                        r_eff = max(r_sep_dyn - 1.8, 0.2)
+                        mag_apf = 45.0 * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
+                        mag_damp = 12.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m_i
+                        mag_barrier = 80.0 * ((2.2 / max(dist, 0.1)) ** 3) if dist < 2.5 else 0.0
+                        mag_total = min(mag_apf + mag_damp + mag_barrier, 250.0)
+                        f_sep += mag_total * r_hat
             elif dist <= 1e-4:
                 f_sep += np.array([1.0, 0.0, 0.0], dtype=np.float64) * 80.0
 
@@ -348,7 +364,7 @@ class SwarmSimulationCore:
             east_centroid = np.mean([d.position[:2] for d in east_surveys], axis=0)
             num_west = num_relays // 2
             for idx, relay in enumerate(relay_drones):
-                if relay.flight_mode in (FlightMode.RTL, FlightMode.LANDING, FlightMode.LANDED, FlightMode.EMERGENCY_LAND, FlightMode.COMPLETED):
+                if relay.flight_mode in (FlightMode.IDLE, FlightMode.TAKEOFF, FlightMode.RTL, FlightMode.LANDING, FlightMode.LANDED, FlightMode.EMERGENCY_LAND, FlightMode.COMPLETED):
                     continue
                 if idx < num_west:
                     frac = (idx + 1.0) / (num_west + 1.0)
@@ -361,7 +377,7 @@ class SwarmSimulationCore:
                 relay.set_target_waypoint(np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64))
         else:
             for idx, relay in enumerate(relay_drones):
-                if relay.flight_mode in (FlightMode.RTL, FlightMode.LANDING, FlightMode.LANDED, FlightMode.EMERGENCY_LAND, FlightMode.COMPLETED):
+                if relay.flight_mode in (FlightMode.IDLE, FlightMode.TAKEOFF, FlightMode.RTL, FlightMode.LANDING, FlightMode.LANDED, FlightMode.EMERGENCY_LAND, FlightMode.COMPLETED):
                     continue
                 fraction = (idx + 1.0) / (num_relays + 1.0)
                 target_xy = gcs_xy + fraction * (centroid_xy - gcs_xy)
@@ -442,7 +458,10 @@ class SwarmSimulationCore:
                     drone.assigned_poi_id = None
                     drone.is_transmitting = False
 
-        # Phase 4: Subsystem updates (Network & Mission)
+        # Phase 4: Subsystem updates (Network, Mission & Dynamic POI Spawner)
+        if hasattr(self, "poi_spawner") and self.poi_spawner is not None:
+            self.poi_spawner.update(self.sim_time, self.pois)
+
         if self.network_engine is not None:
             if hasattr(self.network_engine, "update"):
                 self.network_engine.update(
@@ -523,14 +542,25 @@ class SwarmSimulationCore:
             poi = self.pois[poi_id]
             req_time = max(poi["required_dwell_time"], 1e-4)
             progress = round(float(min(1.0, poi["current_dwell_time"] / req_time) * 100.0), 1)
-            pois_list.append({
+            p_dict = {
                 "id": poi["id"],
                 "position": [round(float(c), 2) for c in poi["position"]],
                 "priority": poi["priority"],
                 "progress": progress,
                 "is_completed": poi["is_completed"],
                 "assigned_drone": poi["assigned_drone_id"],
-            })
+            }
+            if "is_spawned" in poi:
+                p_dict["is_spawned"] = poi["is_spawned"]
+            if "is_detected" in poi:
+                p_dict["is_detected"] = poi["is_detected"]
+            if "is_reported" in poi:
+                p_dict["is_reported"] = poi["is_reported"]
+            if "reporting_latency_s" in poi:
+                p_dict["reporting_latency_s"] = poi["reporting_latency_s"]
+            if "is_sla_compliant" in poi:
+                p_dict["is_sla_compliant"] = poi["is_sla_compliant"]
+            pois_list.append(p_dict)
 
         # Network links and routes
         active_routes: List[List[str]] = []
@@ -589,6 +619,16 @@ class SwarmSimulationCore:
         tactical_comms_data = self.mission_manager.get_tactical_comms_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_tactical_comms_telemetry")) else None
         charging_pads_data = self.mission_manager.get_charging_pads_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_charging_pads_telemetry")) else None
 
+        challenge_data = None
+        if hasattr(self, "challenge_monitor") and self.challenge_monitor is not None:
+            challenge_data = self.challenge_monitor.evaluate_step(
+                self.sim_time,
+                self.drones,
+                getattr(self, "poi_spawner", None),
+                links_list,
+                np.array(self.config.gcs_position),
+            )
+
         return TelemetrySnapshot(
             sim_time=round(self.sim_time, 3),
             drones=drones_list,
@@ -604,6 +644,7 @@ class SwarmSimulationCore:
             survivors=survivors_data,
             tactical_comms=tactical_comms_data,
             charging_pads=charging_pads_data,
+            challenge_constraints=challenge_data,
         )
 
     def to_dict(self) -> Dict[str, Any]:

@@ -464,6 +464,13 @@ body {
     box-shadow: 0 0 14px var(--neon-cyan);
 }
 
+#btn-challenge.active {
+    background: var(--neon-green);
+    color: #000;
+    font-weight: 800;
+    box-shadow: 0 0 14px var(--neon-green);
+}
+
 .btn-sm {
     padding: 4px 8px;
     font-size: 10px;
