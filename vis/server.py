@@ -462,7 +462,7 @@ class SimulationServer:
                             "target": [round(float(c), 2) for c in focus_drone.target_position] if focus_drone.target_position is not None else None,
                         }
 
-                    # Swarm Collaborative SLAM: Scan 1 active peer drone each tick in round-robin to maintain steady 30+ FPS
+                    # Swarm Collaborative SLAM: Scan up to 3 active peer drones in round-robin for rapid cooperative mapping
                     active_peers = [
                         d for d in self.sim.drones.values()
                         if d.id != (focus_drone.id if focus_drone else "")
@@ -470,19 +470,21 @@ class SimulationServer:
                         and float(d.position[2]) > 2.0
                     ]
                     if active_peers:
-                        peer_idx = self.step_count % len(active_peers)
-                        peer = active_peers[peer_idx]
-                        p_scan = self.lidar.scan(
-                            drone_id=peer.id,
-                            position=peer.position,
-                            attitude=peer.attitude,
-                            obstacles=self.sim.obstacles,
-                            sim_time=snapshot.sim_time,
-                        )
-                        self.voxel_map.insert_scan(p_scan)
+                        num_to_scan = min(3, len(active_peers))
+                        for offset in range(num_to_scan):
+                            peer_idx = (self.step_count * 2 + offset) % len(active_peers)
+                            peer = active_peers[peer_idx]
+                            p_scan = self.lidar.scan(
+                                drone_id=peer.id,
+                                position=peer.position,
+                                attitude=peer.attitude,
+                                obstacles=self.sim.obstacles,
+                                sim_time=snapshot.sim_time,
+                            )
+                            self.voxel_map.insert_scan(p_scan)
 
                     # 3. Stream 3D Occupied Voxels & SLAM Metrics
-                    data["occupied_voxels"] = self.voxel_map.get_occupied_voxels(max_count=250)
+                    data["occupied_voxels"] = self.voxel_map.get_occupied_voxels(max_count=1200)
                     mapping_metrics = self.voxel_map.compute_metrics()
                     data["mapping_metrics"] = mapping_metrics
 
@@ -830,6 +832,12 @@ async def post_control(payload: Dict[str, Any]):
         if scen in ("sector_delta", "challenge"):
             server_manager.reset(scenario=scen)
             return JSONResponse({"status": "ok", "scenario": server_manager.scenario})
+    elif cmd in ("reset_slam", "clear_slam"):
+        server_manager.voxel_map.voxels.clear()
+        if hasattr(server_manager.voxel_map, "accumulated_hits"):
+            server_manager.voxel_map.accumulated_hits.clear()
+        server_manager.voxel_map.total_surveyed_points = 0
+        return JSONResponse({"status": "ok", "message": "3D SLAM map cleared"})
     elif cmd == "manual_control":
         drone_id = payload.get("drone_id") or server_manager.focus_drone_id
         vx = float(payload.get("vx", 0.0))
@@ -885,6 +893,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         server_manager.sim.trigger_fleet_retreat()
                 elif cmd == "chaos_fault":
                     server_manager.sim.trigger_chaos_fault(data.get("drone_id"))
+                elif cmd in ("reset_slam", "clear_slam"):
+                    server_manager.voxel_map.voxels.clear()
+                    if hasattr(server_manager.voxel_map, "accumulated_hits"):
+                        server_manager.voxel_map.accumulated_hits.clear()
+                    server_manager.voxel_map.total_surveyed_points = 0
                 elif cmd == "manual_control":
                     drone_id = data.get("drone_id") or server_manager.focus_drone_id
                     vx = float(data.get("vx", 0.0))

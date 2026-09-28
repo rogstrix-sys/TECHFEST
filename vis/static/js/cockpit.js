@@ -72,11 +72,21 @@ let isManualControlActive = false;
 const activeKeys = {};
 let lastManualSendTime = 0;
 
-// Viewport 2: Autonomous SLAM Perception
+// Viewport 2: Autonomous SLAM Perception & Dense 3D LiDAR Engine
 let sceneSLAM, cameraSLAM, rendererSLAM, controlsSLAM;
 let slamDroneMesh = null;
 let lidarPointsMesh = null;
+const maxLidarPts = 25000;
+let lidarWriteIndex = 0;
+let lidarTotalStored = 0;
+let activeLidarColormap = "turbo"; // "turbo", "intensity", "cyber"
+let isTheaterLidarActive = true;
+let theaterLidarPointsMesh = null;
 let voxelMeshGroup = null;
+let voxelInstancedMesh = null;
+const maxInstancedVoxels = 1500;
+const voxelDummyMatrix = new THREE.Matrix4();
+const voxelDummyColor = new THREE.Color();
 let apfArrowAtt = null;
 let apfArrowRep = null;
 let apfArrowNet = null;
@@ -271,6 +281,25 @@ function initTheaterViewport() {
 
     // 8. Particle Systems
     initParticleSystems();
+
+    // 8b. 3D LiDAR Point Cloud Overlay in Theater Viewport
+    const theaterLidarGeo = new THREE.BufferGeometry();
+    const theaterLidarPositions = new Float32Array(maxLidarPts * 3);
+    const theaterLidarColors = new Float32Array(maxLidarPts * 3);
+    theaterLidarGeo.setAttribute('position', new THREE.BufferAttribute(theaterLidarPositions, 3));
+    theaterLidarGeo.setAttribute('color', new THREE.BufferAttribute(theaterLidarColors, 3));
+    const theaterLidarMat = new THREE.PointsMaterial({
+        size: 3.6,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.85,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+    });
+    theaterLidarPointsMesh = new THREE.Points(theaterLidarGeo, theaterLidarMat);
+    theaterLidarPointsMesh.geometry.setDrawRange(0, 0);
+    theaterLidarPointsMesh.visible = isTheaterLidarActive;
+    sceneTheater.add(theaterLidarPointsMesh);
 
     // 9. Interactive Raycasting Click-to-Inspect & Double-Click to Center
     rendererTheater.domElement.addEventListener("click", onTheaterCanvasClick);
@@ -1345,8 +1374,7 @@ function initSLAMViewport() {
     slamDroneMesh = createQuadcopterMesh("SURVEY");
     sceneSLAM.add(slamDroneMesh);
 
-    // 7. 3D LiDAR Point Cloud Buffer
-    const maxLidarPts = 1000;
+    // 7. 3D LiDAR Persistent Point Cloud Buffer (25,000 points dense SLAM reconstruction)
     const lidarGeo = new THREE.BufferGeometry();
     const lidarPositions = new Float32Array(maxLidarPts * 3);
     const lidarColors = new Float32Array(maxLidarPts * 3);
@@ -1357,14 +1385,28 @@ function initSLAMViewport() {
         size: 3.5,
         vertexColors: true,
         transparent: true,
-        opacity: 0.9,
+        opacity: 0.92,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
     });
     lidarPointsMesh = new THREE.Points(lidarGeo, lidarMat);
+    lidarPointsMesh.geometry.setDrawRange(0, 0);
     sceneSLAM.add(lidarPointsMesh);
 
-    // 8. 3D Occupancy Voxel Mesh Group
+    // 8. 3D Occupancy Voxel Instanced Mesh (Ultra-Fast 60-144 FPS Hardware Acceleration)
     voxelMeshGroup = new THREE.Group();
     sceneSLAM.add(voxelMeshGroup);
+
+    const voxelGeo = new THREE.BoxGeometry(1.0, 1.0, 1.0);
+    const voxelMat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.42,
+        depthWrite: false,
+    });
+    voxelInstancedMesh = new THREE.InstancedMesh(voxelGeo, voxelMat, maxInstancedVoxels);
+    voxelInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    voxelInstancedMesh.count = 0;
+    voxelMeshGroup.add(voxelInstancedMesh);
 
     // 9. Khatib APF Guidance Vector 3D Arrows
     const dummyDir = new THREE.Vector3(1, 0, 0);
@@ -1842,82 +1884,178 @@ function getTurboRGB(val) {
     return [r, g, b];
 }
 
-// Update 3D LiDAR Point Cloud in SLAM Viewport
+// Update 3D LiDAR Point Cloud in SLAM Viewport & Theater Overlay (Persistent Accumulation)
 function updateLiDAR(scanData) {
     if (!scanData || !lidarPointsMesh) return;
     const pts = scanData.points || [];
+    if (pts.length === 0) return;
+
     const posAttr = lidarPointsMesh.geometry.attributes.position;
     const colAttr = lidarPointsMesh.geometry.attributes.color;
 
-    const count = Math.min(pts.length, posAttr.count);
-    for (let i = 0; i < count; i++) {
+    const theaterPosAttr = theaterLidarPointsMesh ? theaterLidarPointsMesh.geometry.attributes.position : null;
+    const theaterColAttr = theaterLidarPointsMesh ? theaterLidarPointsMesh.geometry.attributes.color : null;
+
+    for (let i = 0; i < pts.length; i++) {
         const p = pts[i];
-        posAttr.array[i * 3] = p[0];
-        posAttr.array[i * 3 + 1] = p[1];
-        posAttr.array[i * 3 + 2] = p[2];
+        const idx = lidarWriteIndex;
 
-        // Scientific Turbo elevation colormap (0m to 50m)
-        const zNorm = Math.min(1.0, Math.max(0.0, p[2] / 50.0));
-        const [r, g, b] = getTurboRGB(zNorm);
+        posAttr.array[idx * 3] = p[0];
+        posAttr.array[idx * 3 + 1] = p[1];
+        posAttr.array[idx * 3 + 2] = p[2];
 
-        colAttr.array[i * 3] = r;
-        colAttr.array[i * 3 + 1] = g;
-        colAttr.array[i * 3 + 2] = b;
+        // Resolve RGB based on active colormap
+        let r = 0.0, g = 0.9, b = 1.0;
+        if (activeLidarColormap === "turbo") {
+            const zNorm = Math.min(1.0, Math.max(0.0, p[2] / 50.0));
+            [r, g, b] = getTurboRGB(zNorm);
+        } else if (activeLidarColormap === "intensity") {
+            const intensity = Math.min(1.0, Math.max(0.0, p[3] !== undefined ? p[3] : 0.6));
+            r = 0.15 + intensity * 0.85;
+            g = 0.95;
+            b = 0.3 + (1.0 - intensity) * 0.7;
+        } else if (activeLidarColormap === "cyber") {
+            const zNorm = Math.min(1.0, Math.max(0.0, p[2] / 50.0));
+            if (zNorm > 0.45) {
+                r = 0.85; g = 0.0; b = 0.95; // High altitude structure: Neon Magenta
+            } else if (zNorm > 0.15) {
+                r = 0.0; g = 0.9; b = 1.0;   // Mid altitude: Electric Cyan
+            } else {
+                r = 0.0; g = 1.0; b = 0.4;   // Ground plane: Neon Green
+            }
+        }
+
+        colAttr.array[idx * 3] = r;
+        colAttr.array[idx * 3 + 1] = g;
+        colAttr.array[idx * 3 + 2] = b;
+
+        if (theaterPosAttr && theaterColAttr) {
+            theaterPosAttr.array[idx * 3] = p[0];
+            theaterPosAttr.array[idx * 3 + 1] = p[1];
+            theaterPosAttr.array[idx * 3 + 2] = p[2];
+            theaterColAttr.array[idx * 3] = r;
+            theaterColAttr.array[idx * 3 + 1] = g;
+            theaterColAttr.array[idx * 3 + 2] = b;
+        }
+
+        lidarWriteIndex = (lidarWriteIndex + 1) % maxLidarPts;
+        lidarTotalStored = Math.min(maxLidarPts, lidarTotalStored + 1);
     }
 
-    lidarPointsMesh.geometry.setDrawRange(0, count);
+    lidarPointsMesh.geometry.setDrawRange(0, lidarTotalStored);
     posAttr.needsUpdate = true;
     colAttr.needsUpdate = true;
 
-    const elPts = document.getElementById("slam-pts-count");
-    if (elPts) elPts.textContent = pts.length;
-}
-
-// Update 3D Occupancy Voxel Grid in SLAM Viewport with Cyber Edge Highlights
-function updateOccupancyVoxels(voxelsData, metricsData) {
-    if (!voxelMeshGroup) return;
-
-    // Clear previous voxels
-    while (voxelMeshGroup.children.length > 0) {
-        const child = voxelMeshGroup.children.pop();
-        if (child.geometry) child.geometry.dispose();
-        if (child.material) child.material.dispose();
+    if (theaterLidarPointsMesh && theaterPosAttr && theaterColAttr) {
+        theaterLidarPointsMesh.geometry.setDrawRange(0, lidarTotalStored);
+        theaterPosAttr.needsUpdate = true;
+        theaterColAttr.needsUpdate = true;
     }
 
-    if (!voxelsData || voxelsData.length === 0) return;
+    const elPts = document.getElementById("slam-pts-count");
+    if (elPts) elPts.textContent = lidarTotalStored.toLocaleString();
+}
 
-    const boxGeo = new THREE.BoxGeometry(4.0, 4.0, 4.0);
-    const edgeGeo = new THREE.EdgesGeometry(boxGeo);
+// Update 3D Occupancy Voxel Grid with InstancedMesh Hardware Acceleration
+function updateOccupancyVoxels(voxelsData, metricsData) {
+    if (!voxelInstancedMesh) return;
+    const vList = voxelsData || [];
+    const count = Math.min(vList.length, maxInstancedVoxels);
 
-    voxelsData.forEach(v => {
+    for (let i = 0; i < count; i++) {
+        const v = vList[i];
+        const scale = (v.size || 4.0) * 0.96;
+        voxelDummyMatrix.makeScale(scale, scale, scale);
+        voxelDummyMatrix.setPosition(v.pos[0], v.pos[1], v.pos[2]);
+        voxelInstancedMesh.setMatrixAt(i, voxelDummyMatrix);
+
         const zNorm = Math.min(1.0, Math.max(0.0, v.pos[2] / 50.0));
-        const hexColor = zNorm > 0.4 ? 0xff3d00 : 0xff9100;
+        const prob = v.prob !== undefined ? v.prob : 0.8;
+        let hexColor;
+        if (prob > 0.85) {
+            hexColor = zNorm > 0.4 ? 0xff1744 : 0xff9100;
+        } else {
+            hexColor = zNorm > 0.3 ? 0xffd600 : 0x00e5ff;
+        }
+        voxelDummyColor.setHex(hexColor);
+        voxelInstancedMesh.setColorAt(i, voxelDummyColor);
+    }
 
-        const boxMat = new THREE.MeshBasicMaterial({
-            color: hexColor,
-            transparent: true,
-            opacity: 0.30,
-        });
-        const mesh = new THREE.Mesh(boxGeo, boxMat);
-        mesh.position.set(v.pos[0], v.pos[1], v.pos[2]);
-
-        const wireMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.70 });
-        const wire = new THREE.LineSegments(edgeGeo, wireMat);
-        mesh.add(wire);
-
-        voxelMeshGroup.add(mesh);
-    });
+    voxelInstancedMesh.count = count;
+    voxelInstancedMesh.instanceMatrix.needsUpdate = true;
+    if (voxelInstancedMesh.instanceColor) {
+        voxelInstancedMesh.instanceColor.needsUpdate = true;
+    }
 
     const elVox = document.getElementById("slam-voxels-count");
-    if (elVox) elVox.textContent = voxelsData.length;
+    if (elVox) elVox.textContent = count.toLocaleString();
 
     if (metricsData) {
         const elVol = document.getElementById("slam-vol-count");
-        if (elVol) elVol.textContent = `${metricsData.mapped_volume_m3 || 0} m³`;
+        if (elVol) elVol.textContent = `${(metricsData.mapped_volume_m3 || 0).toLocaleString()} m³`;
         const elCov = document.getElementById("metric-survey-rate");
         if (elCov) elCov.textContent = `${(metricsData.coverage_pct || 14.2).toFixed(1)}% / min`;
     }
 }
+
+function resetSLAMMap() {
+    lidarWriteIndex = 0;
+    lidarTotalStored = 0;
+    if (lidarPointsMesh) {
+        lidarPointsMesh.geometry.setDrawRange(0, 0);
+    }
+    if (theaterLidarPointsMesh) {
+        theaterLidarPointsMesh.geometry.setDrawRange(0, 0);
+    }
+    if (voxelInstancedMesh) {
+        voxelInstancedMesh.count = 0;
+        voxelInstancedMesh.instanceMatrix.needsUpdate = true;
+    }
+    const elPts = document.getElementById("slam-pts-count");
+    if (elPts) elPts.textContent = "0";
+    const elVox = document.getElementById("slam-voxels-count");
+    if (elVox) elVox.textContent = "0";
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ command: "clear_slam" }));
+    } else {
+        fetch("/api/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command: "clear_slam" })
+        }).catch(() => {});
+    }
+    playTacticalSound("radar_ping");
+}
+window.resetSLAMMap = resetSLAMMap;
+
+function toggleLidarColormap() {
+    const modes = ["turbo", "intensity", "cyber"];
+    const nextIdx = (modes.indexOf(activeLidarColormap) + 1) % modes.length;
+    activeLidarColormap = modes[nextIdx];
+    const btn = document.getElementById("btn-slam-colormap");
+    if (btn) {
+        btn.textContent = `COLOR: ${activeLidarColormap.toUpperCase()}`;
+    }
+    playTacticalSound("radar_ping");
+}
+window.toggleLidarColormap = toggleLidarColormap;
+
+function toggleTheaterLidar() {
+    isTheaterLidarActive = !isTheaterLidarActive;
+    if (theaterLidarPointsMesh) {
+        theaterLidarPointsMesh.visible = isTheaterLidarActive;
+    }
+    const btn = document.getElementById("btn-toggle-lidar");
+    if (btn) {
+        btn.classList.toggle("active", isTheaterLidarActive);
+        btn.textContent = isTheaterLidarActive ? "🌐 LIDAR: ON" : "🌐 LIDAR: OFF";
+        btn.classList.toggle("text-neon-green", isTheaterLidarActive);
+        btn.classList.toggle("text-cyan", !isTheaterLidarActive);
+    }
+    playTacticalSound("radar_ping");
+}
+window.toggleTheaterLidar = toggleTheaterLidar;
 
 // Update Khatib APF Guidance Vectors in SLAM Viewport
 function updateAPFVectors(apfData) {
@@ -3479,6 +3617,30 @@ function initUIControls() {
         }
     });
 
+    // 3D LiDAR Point Cloud Overlay in Theater View Toggle
+    const btnToggleLidar = document.getElementById("btn-toggle-lidar");
+    if (btnToggleLidar) {
+        btnToggleLidar.addEventListener("click", () => {
+            toggleTheaterLidar();
+        });
+    }
+
+    // SLAM Colormap Toggle (Turbo, Intensity, Cyber)
+    const btnSlamColormap = document.getElementById("btn-slam-colormap");
+    if (btnSlamColormap) {
+        btnSlamColormap.addEventListener("click", () => {
+            toggleLidarColormap();
+        });
+    }
+
+    // SLAM Map Reset & Clear
+    const btnSlamClear = document.getElementById("btn-slam-clear");
+    if (btnSlamClear) {
+        btnSlamClear.addEventListener("click", () => {
+            resetSLAMMap();
+        });
+    }
+
     // Reset
     const btnReset = document.getElementById("btn-reset");
     btnReset.addEventListener("click", () => {
@@ -3492,6 +3654,7 @@ function initUIControls() {
         if (slamTrajectoryLine) {
             slamTrajectoryLine.geometry.setFromPoints([]);
         }
+        resetSLAMMap();
     });
 
     // Fleet-Wide Autonomous Retreat (RTL)

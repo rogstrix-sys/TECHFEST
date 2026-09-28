@@ -39,9 +39,13 @@
             </div>
             <div class="slam-stats-overlay">
                 <div class="slam-stat-item"><span class="lbl">FOCUS:</span> <span id="slam-drone-id" class="val text-cyan">UAV_1</span></div>
-                <div class="slam-stat-item"><span class="lbl">LIDAR PTS:</span> <span id="slam-pts-count" class="val text-neon-green">0</span></div>
-                <div class="slam-stat-item"><span class="lbl">OCCUPIED VOXELS:</span> <span id="slam-voxels-count" class="val text-neon-yellow">0</span></div>
+                <div class="slam-stat-item"><span class="lbl">DENSE PTS:</span> <span id="slam-pts-count" class="val text-neon-green">0</span></div>
+                <div class="slam-stat-item"><span class="lbl">OCTOMAP VOXELS:</span> <span id="slam-voxels-count" class="val text-neon-yellow">0</span></div>
                 <div class="slam-stat-item"><span class="lbl">SURVEY VOLUME:</span> <span id="slam-vol-count" class="val text-purple">0 m³</span></div>
+                <div class="slam-actions-group" style="pointer-events: auto; display: flex; gap: 6px; align-items: center;">
+                    <button id="btn-slam-colormap" class="btn btn-sm btn-outline text-cyan" style="padding: 1px 6px; font-size: 8px;" title="Toggle Colormap: Turbo Elevation / Surface Intensity / Cyber Matrix">COLOR: TURBO</button>
+                    <button id="btn-slam-clear" class="btn btn-sm btn-outline text-neon-yellow" style="padding: 1px 6px; font-size: 8px;" title="Reset Accumulated 3D Point Cloud">CLEAR SLAM</button>
+                </div>
             </div>
             <div id="canvas-slam-container" class="canvas-holder"></div>
         </div>
@@ -81,6 +85,7 @@
             <button id="btn-night" class="btn btn-outline text-neon-yellow" title="Toggle Tactical Night Operations & Searchlights">NIGHT</button>
             <button id="btn-chaos" class="btn btn-outline btn-chaos" title="Dynamic Fault Injection: Swarm Self-Healing Test">⚡ CHAOS</button>
             <button id="btn-export-ply" class="btn btn-outline text-purple" title="1-Click 3D Point Cloud Export (.PLY for CloudCompare/Blender)">PLY</button>
+            <button id="btn-toggle-lidar" class="btn btn-outline text-cyan" title="Toggle 3D LiDAR Point Cloud Overlay in Theater View">🌐 LIDAR</button>
             <button id="btn-manual" class="btn btn-outline text-cyan" title="Manual FPV Controller Mode (WASD / Gamepad)">FPV: AUTO</button>
             <button id="btn-toggle-hud" class="btn btn-outline text-dim" title="Toggle Military HUD (H)">HUD: OFF</button>
             <button id="btn-toggle-comms" class="btn btn-outline text-cyan" title="Toggle Tactical Radio Comms Feed">COMMS</button>
