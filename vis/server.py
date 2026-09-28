@@ -524,6 +524,7 @@ class SimulationServer:
 
                     # 6. Add live NVIDIA GPU hardware telemetry
                     data["gpu"] = get_gpu_telemetry()
+                    data["active_formation"] = getattr(self.sim, "active_formation", "AUTONOMOUS")
 
                     # 7. Broadcast to connected WebSockets
                     payload = json.dumps(data)
@@ -796,9 +797,21 @@ async def post_dispatch(payload: Dict[str, Any]):
     })
 
 
+@app.post("/api/formation")
+async def post_formation(payload: Dict[str, Any]):
+    """Set swarm tactical formation (AUTONOMOUS, V_FORMATION, LINE_SWEEP, PERIMETER_ORBIT)."""
+    form = payload.get("formation") or payload.get("mode") or "AUTONOMOUS"
+    success = server_manager.sim.set_swarm_formation(form)
+    return JSONResponse({
+        "status": "ok" if success else "error",
+        "formation": server_manager.sim.active_formation,
+        "message": f"Swarm formation set to {server_manager.sim.active_formation}" if success else "Invalid formation"
+    })
+
+
 @app.post("/api/control")
 async def post_control(payload: Dict[str, Any]):
-    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat, dispatch."""
+    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat, dispatch, formation."""
     cmd = payload.get("command") or payload.get("cmd")
     if cmd == "pause":
         server_manager.is_running = False
@@ -827,6 +840,10 @@ async def post_control(payload: Dict[str, Any]):
         drone_id = payload.get("drone_id")
         victim = server_manager.sim.trigger_chaos_fault(drone_id)
         return JSONResponse({"status": "ok", "victim_id": victim})
+    elif cmd in ("formation", "set_formation"):
+        form = payload.get("formation") or payload.get("value") or "AUTONOMOUS"
+        server_manager.sim.set_swarm_formation(form)
+        return JSONResponse({"status": "ok", "formation": server_manager.sim.active_formation})
     elif cmd in ("switch_scenario", "scenario"):
         scen = (payload.get("scenario") or payload.get("value") or "sector_delta").lower()
         if scen in ("sector_delta", "challenge"):
@@ -893,6 +910,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         server_manager.sim.trigger_fleet_retreat()
                 elif cmd == "chaos_fault":
                     server_manager.sim.trigger_chaos_fault(data.get("drone_id"))
+                elif cmd in ("formation", "set_formation"):
+                    form = data.get("formation") or data.get("value") or "AUTONOMOUS"
+                    server_manager.sim.set_swarm_formation(form)
                 elif cmd in ("reset_slam", "clear_slam"):
                     server_manager.voxel_map.voxels.clear()
                     if hasattr(server_manager.voxel_map, "accumulated_hits"):

@@ -81,6 +81,9 @@ class SwarmSimulationCore:
         self.step_count: int = 0
         self.history: deque = deque(maxlen=self.config.history_buffer_len)
 
+        # Swarm tactical formation state
+        self.active_formation: str = "AUTONOMOUS"
+
         # Event logging
         self.collision_events: List[Dict[str, Any]] = []
         self.flight_events: List[Dict[str, Any]] = []
@@ -386,6 +389,127 @@ class SwarmSimulationCore:
                 target_pos = np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64)
                 relay.set_target_waypoint(target_pos)
 
+    def set_swarm_formation(self, formation_name: str) -> bool:
+        """
+        Switch swarm tactical formation geometry:
+        - 'AUTONOMOUS': Standard distributed autonomous exploration & relay mesh.
+        - 'V_FORMATION': Aerodynamic wedge / chevron with leader at apex and staggered wingmen.
+        - 'LINE_SWEEP': Lateral line-abreast wall sweep across the operational area.
+        - 'PERIMETER_ORBIT': Orbital surveillance ring encircling the disaster core.
+        """
+        valid_formations = {"AUTONOMOUS", "V_FORMATION", "LINE_SWEEP", "PERIMETER_ORBIT"}
+        norm = str(formation_name).strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "V": "V_FORMATION",
+            "V_SHAPE": "V_FORMATION",
+            "CHEVRON": "V_FORMATION",
+            "WEDGE": "V_FORMATION",
+            "LINE": "LINE_SWEEP",
+            "SWEEP": "LINE_SWEEP",
+            "WALL": "LINE_SWEEP",
+            "ORBIT": "PERIMETER_ORBIT",
+            "PERIMETER": "PERIMETER_ORBIT",
+            "RING": "PERIMETER_ORBIT",
+            "AUTO": "AUTONOMOUS",
+        }
+        if norm in aliases:
+            norm = aliases[norm]
+        if norm not in valid_formations:
+            return False
+        self.active_formation = norm
+        if self.mission_manager is not None and hasattr(self.mission_manager, "emit_tactical_comms"):
+            self.mission_manager.emit_tactical_comms(
+                "INFO",
+                "SWARM",
+                f"🛡️ FORMATION RECONFIGURED: Swarm engaged in [{self.active_formation}]",
+                "OPERATIONS"
+            )
+        return True
+
+    def update_formation_setpoints(self) -> None:
+        """
+        Compute coordinated formation setpoints when active_formation != 'AUTONOMOUS'.
+        Applies kinematic offsets relative to the fleet leader or mission center,
+        dynamically feeding attractive APF setpoints while Reynolds separation
+        and obstacle repulsion guarantee collision safety.
+        """
+        if self.active_formation == "AUTONOMOUS":
+            return
+
+        # Select airborne participating drones
+        airborne_drones = [
+            d for d in sorted(self.drones.values(), key=lambda d: d.id)
+            if d.flight_mode in (FlightMode.TAKEOFF, FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.DATA_TX)
+            and not getattr(d, "is_manual_override", False)
+            and not getattr(d, "is_fault_injected", False)
+            and not getattr(d, "is_low_battery_rtb", False)
+        ]
+        if not airborne_drones:
+            return
+
+        leader = airborne_drones[0]
+        pos_lead = leader.position
+        tgt_lead = leader.get_target_waypoint()
+        if tgt_lead is not None and np.linalg.norm(tgt_lead[:2] - pos_lead[:2]) > 2.0:
+            h_dir = tgt_lead[:2] - pos_lead[:2]
+            h_dir = h_dir / np.linalg.norm(h_dir)
+        elif np.linalg.norm(leader.velocity[:2]) > 0.5:
+            h_dir = leader.velocity[:2] / np.linalg.norm(leader.velocity[:2])
+        else:
+            h_dir = np.array([0.0, 1.0], dtype=np.float64)
+
+        # Lateral right vector perpendicular to heading
+        right_dir = np.array([h_dir[1], -h_dir[0]], dtype=np.float64)
+
+        if self.active_formation == "V_FORMATION":
+            # Apex leader stays on course; wingmen stagger in V-shape
+            for idx, drone in enumerate(airborne_drones):
+                if idx == 0:
+                    continue
+                rank = (idx + 1) // 2
+                side = -1.0 if (idx % 2 == 1) else 1.0
+                lateral_dist = side * rank * 16.0
+                long_dist = -rank * 14.0
+                target_xy = pos_lead[:2] + h_dir * long_dist + right_dir * lateral_dist
+                target_z = max(24.0, pos_lead[2] + ((rank - 1) % 3) * 2.5)
+                drone.set_target_waypoint(np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64))
+                if drone.flight_mode in (FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.DATA_TX):
+                    drone.flight_mode = FlightMode.TRANSIT
+                # V-formation wingmen draft in the upwash vortices
+                drone.is_drafting = True
+                drone.drafting_leader_id = leader.id
+                drone.drafting_saving_pct = round(12.0 + (rank % 3) * 4.0, 1)
+
+        elif self.active_formation == "LINE_SWEEP":
+            # Lateral wall sweep perpendicular to heading
+            n_drones = len(airborne_drones)
+            spacing = 18.0
+            mid_pt = pos_lead[:2]
+            for idx, drone in enumerate(airborne_drones):
+                offset_lat = (idx - (n_drones - 1) / 2.0) * spacing
+                target_xy = mid_pt + right_dir * offset_lat
+                target_z = max(25.0, 32.0 + (idx % 3) * 3.0)
+                drone.set_target_waypoint(np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64))
+                if drone.flight_mode in (FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.DATA_TX):
+                    drone.flight_mode = FlightMode.TRANSIT
+                drone.is_drafting = False
+
+        elif self.active_formation == "PERIMETER_ORBIT":
+            # Orbital ring encircling the disaster core at (0, 0)
+            n_drones = len(airborne_drones)
+            radius = 80.0
+            omega = 0.08  # rad/s slow rotation
+            base_angle = self.sim_time * omega
+            for idx, drone in enumerate(airborne_drones):
+                theta = base_angle + (2.0 * math.pi * idx / max(1, n_drones))
+                target_x = radius * math.cos(theta)
+                target_y = radius * math.sin(theta)
+                target_z = 35.0 + (idx % 4) * 4.0
+                drone.set_target_waypoint(np.array([target_x, target_y, target_z], dtype=np.float64))
+                if drone.flight_mode in (FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.DATA_TX):
+                    drone.flight_mode = FlightMode.TRANSIT
+                drone.is_drafting = False
+
     # -------------------------------------------------------------------------
     # Master Step Execution Loop
     # -------------------------------------------------------------------------
@@ -403,8 +527,11 @@ class SwarmSimulationCore:
         self.sim_time += step_dt
         self.step_count += 1
 
-        # Phase 1: Dynamic Relay Positioning (VSM)
-        self.update_vsm_relay_setpoints()
+        # Phase 1: Dynamic Relay Positioning (VSM) or Tactical Swarm Formations
+        if self.active_formation == "AUTONOMOUS":
+            self.update_vsm_relay_setpoints()
+        else:
+            self.update_formation_setpoints()
 
         # Phase 2: Compute steering forces (double-buffered) and advance physics
         forces = {}
@@ -454,9 +581,37 @@ class SwarmSimulationCore:
                     drone.acceleration[:] = 0.0
                     drone.rotor_speeds[:] = 0.0
                     drone.set_flight_mode(FlightMode.LANDED)
+                    drone._landed_for_recharge = True
                     drone.target_position = None
                     drone.assigned_poi_id = None
                     drone.is_transmitting = False
+
+            # GCS Automated Rapid Battery Charging & Continuous Mission Persistence
+            if drone.flight_mode == FlightMode.LANDED and drone.position[2] <= 0.4:
+                if hasattr(drone, "battery") and drone.battery is not None:
+                    if drone.battery.soc < 0.999:
+                        drone.battery.soc = min(1.0, drone.battery.soc + 0.05 * step_dt)
+                        drone._is_charging = True
+                    if drone.battery.soc >= 0.999:
+                        drone._is_charging = False
+                        if getattr(drone, "_landed_for_recharge", False) or getattr(drone, "is_low_battery_rtb", False):
+                            is_retreat = False
+                            if self.mission_manager and getattr(self.mission_manager, "retreat_all_requested", False):
+                                is_retreat = True
+                            if not is_retreat and getattr(drone, "auto_relaunch", True):
+                                drone._landed_for_recharge = False
+                                drone.is_low_battery_rtb = False
+                                drone.is_comms_loss_rtl = False
+                                drone.set_flight_mode(FlightMode.TAKEOFF)
+                                relaunch_target = np.array([drone.position[0], drone.position[1], 35.0], dtype=np.float64)
+                                drone.set_target_waypoint(relaunch_target)
+                                if self.mission_manager and hasattr(self.mission_manager, "emit_tactical_comms"):
+                                    self.mission_manager.emit_tactical_comms(
+                                        "SUCCESS",
+                                        drone.id,
+                                        f"🔋 RECHARGED (100% SoC) — Auto-relaunching to continuous disaster patrol",
+                                        "GCS_CHARGER"
+                                    )
 
         # Phase 4: Subsystem updates (Network, Mission & Dynamic POI Spawner)
         if hasattr(self, "poi_spawner") and self.poi_spawner is not None:
@@ -524,6 +679,8 @@ class SwarmSimulationCore:
                 "drafting_leader_id": st.drafting_leader_id,
                 "drafting_saving_pct": float(st.drafting_saving_pct),
             }
+            if d.flight_mode == FlightMode.LANDED and d.position[2] <= 0.4 and (getattr(d, "_is_charging", False) or d.battery.soc < 0.99):
+                drone_entry["is_charging"] = True
             if getattr(self.config, "include_estimates", False) and st.estimated_position is not None:
                 drone_entry["estimated_position"] = [round(float(c), 3) for c in st.estimated_position]
                 drone_entry["estimated_velocity"] = [round(float(v), 3) for v in st.estimated_velocity] if st.estimated_velocity is not None else None
@@ -645,6 +802,7 @@ class SwarmSimulationCore:
             tactical_comms=tactical_comms_data,
             charging_pads=charging_pads_data,
             challenge_constraints=challenge_data,
+            active_formation=self.active_formation,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -663,6 +821,7 @@ class SwarmSimulationCore:
         """Reset simulation clock and drone states to initial configurations."""
         self.sim_time = 0.0
         self.step_count = 0
+        self.active_formation = "AUTONOMOUS"
         self.history.clear()
         self.collision_events.clear()
         self.flight_events.clear()

@@ -42,6 +42,8 @@ let dispatchBeaconMesh = null;
 let isDispatchMode = false;
 let raycasterTheater = new THREE.Raycaster();
 let mouseTheater = new THREE.Vector2();
+let formationLatticeMesh = null;
+let activeSwarmFormation = "AUTONOMOUS";
 
 // Tactical Night Operations & Dynamic Lighting
 let isNightOps = false;
@@ -300,6 +302,21 @@ function initTheaterViewport() {
     theaterLidarPointsMesh.geometry.setDrawRange(0, 0);
     theaterLidarPointsMesh.visible = isTheaterLidarActive;
     sceneTheater.add(theaterLidarPointsMesh);
+
+    // 8b. Swarm Tactical Formation Lattice Overlay
+    const MAX_FORMATION_SEGMENTS = 64;
+    const formationPositions = new Float32Array(MAX_FORMATION_SEGMENTS * 2 * 3);
+    const formationGeo = new THREE.BufferGeometry();
+    formationGeo.setAttribute('position', new THREE.BufferAttribute(formationPositions, 3));
+    const formationMat = new THREE.LineBasicMaterial({
+        color: 0xffd600,
+        transparent: true,
+        opacity: 0.85,
+        depthWrite: false,
+    });
+    formationLatticeMesh = new THREE.LineSegments(formationGeo, formationMat);
+    formationLatticeMesh.geometry.setDrawRange(0, 0);
+    sceneTheater.add(formationLatticeMesh);
 
     // 9. Interactive Raycasting Click-to-Inspect & Double-Click to Center
     rendererTheater.domElement.addEventListener("click", onTheaterCanvasClick);
@@ -1875,6 +1892,67 @@ function updateLinks(linksData, routesData, dronesData) {
     }
 }
 
+// Tactical Swarm Formation Lattice Overlay in Theater Reality
+function updateFormationLattice(drones, activeFormation) {
+    if (!formationLatticeMesh) return;
+    if (!activeFormation || activeFormation === "AUTONOMOUS" || !drones || drones.length < 2) {
+        formationLatticeMesh.geometry.setDrawRange(0, 0);
+        return;
+    }
+
+    const airborne = drones.filter(d => 
+        ["TAKEOFF", "TRANSIT", "SURVEYING", "RELAY", "HOVER"].includes(d.flight_mode) &&
+        d.position && d.position[2] > 1.5
+    );
+
+    if (airborne.length < 2) {
+        formationLatticeMesh.geometry.setDrawRange(0, 0);
+        return;
+    }
+
+    const posAttr = formationLatticeMesh.geometry.attributes.position;
+    const posArr = posAttr.array;
+    let segCount = 0;
+    const maxSegments = posArr.length / 6;
+
+    const addSeg = (p1, p2) => {
+        if (segCount >= maxSegments) return;
+        const i = segCount * 6;
+        posArr[i] = p1[0];
+        posArr[i + 1] = p1[1];
+        posArr[i + 2] = p1[2];
+        posArr[i + 3] = p2[0];
+        posArr[i + 4] = p2[1];
+        posArr[i + 5] = p2[2];
+        segCount++;
+    };
+
+    if (activeFormation === "V_FORMATION") {
+        const leader = airborne[0];
+        for (let i = 1; i < airborne.length; i++) {
+            const cur = airborne[i];
+            const prev = (i <= 2) ? leader : airborne[i - 2];
+            addSeg(prev.position, cur.position);
+            if (i % 2 === 0 && i - 1 < airborne.length) {
+                addSeg(airborne[i - 1].position, cur.position);
+            }
+        }
+    } else if (activeFormation === "LINE_SWEEP") {
+        for (let i = 0; i < airborne.length - 1; i++) {
+            addSeg(airborne[i].position, airborne[i + 1].position);
+        }
+    } else if (activeFormation === "PERIMETER_ORBIT") {
+        for (let i = 0; i < airborne.length; i++) {
+            const next = airborne[(i + 1) % airborne.length];
+            addSeg(airborne[i].position, next.position);
+        }
+    }
+
+    posAttr.needsUpdate = true;
+    formationLatticeMesh.geometry.setDrawRange(0, segCount * 2);
+    formationLatticeMesh.visible = (segCount > 0);
+}
+
 // Scientific Turbo Colormap approximation for elevation color coding
 function getTurboRGB(val) {
     const x = Math.max(0.0, Math.min(1.0, val));
@@ -2443,6 +2521,8 @@ function renderFleetList(drones) {
         const pwr = d.power_w !== undefined ? `${d.power_w.toFixed(0)}W` : '---';
         const comText = d.comms_loss ? 'LOST' : 'OK';
         const comClass = d.comms_loss ? 'text-red' : 'text-cyan';
+        const isCharging = Boolean(d.is_charging || (isLanded && d.battery_pct < 99.5));
+        const chargeBadgeHtml = isCharging ? '<span class="charging-badge" title="GCS Automated Fast Charger Active">⚡ CHARGING</span>' : '';
         const faultBadgeHtml = d.is_fault_injected ? '<span class="fault-badge">⚡ FLAMEOUT</span>' : '';
         const draftBadgeHtml = d.is_drafting ? `<span class="drafting-badge" title="Drafting wake of ${d.drafting_leader_id}">⚡ +${d.drafting_saving_pct}%</span>` : '';
 
@@ -2458,14 +2538,14 @@ function renderFleetList(drones) {
                 <div class="drone-header">
                     <span class="drone-id-tag">${d.id} [${d.role}]</span>
                     <div style="display: flex; align-items: center; gap: 4px;">
-                        <span class="drone-badges-container">${faultBadgeHtml}${draftBadgeHtml}</span>
+                        <span class="drone-badges-container">${faultBadgeHtml}${draftBadgeHtml}${chargeBadgeHtml}</span>
                         <span class="drone-mode-badge ${modeColor}">${modeLabel}</span>
                         <button class="btn btn-sm btn-outline text-neon-yellow drone-card-rtl-btn" data-drone-id="${d.id}" style="padding: 1px 5px; font-size: 8px; margin-left: 6px; border-color: rgba(255,214,0,0.5); display: ${showRtl ? 'inline-block' : 'none'};" title="Command Drone to Return-to-Launch">RTL</button>
                     </div>
                 </div>
                 <div class="drone-stats">
                     <div>ALT: <span class="stat-alt">${d.position[2].toFixed(1)}m</span></div>
-                    <div>BAT: <span class="stat-bat ${batClass}">${d.battery_pct.toFixed(0)}%</span></div>
+                    <div>BAT: <span class="stat-bat ${batClass}">${d.battery_pct.toFixed(0)}%${isCharging ? ' ⚡' : ''}</span></div>
                     <div>SPD: <span class="stat-spd">${speed} m/s</span></div>
                     <div>POI: <span class="stat-poi">${d.assigned_poi_id || 'NONE'}</span></div>
                     <div>PWR: <span class="stat-pwr text-neon-yellow">${pwr}</span></div>
@@ -2486,7 +2566,7 @@ function renderFleetList(drones) {
             }
 
             const badgesContainer = card.querySelector(".drone-badges-container");
-            const newBadges = `${faultBadgeHtml}${draftBadgeHtml}`;
+            const newBadges = `${faultBadgeHtml}${draftBadgeHtml}${chargeBadgeHtml}`;
             if (badgesContainer && badgesContainer.innerHTML !== newBadges) {
                 badgesContainer.innerHTML = newBadges;
             }
@@ -2512,7 +2592,7 @@ function renderFleetList(drones) {
 
             const batSpan = card.querySelector(".stat-bat");
             if (batSpan) {
-                const batText = `${d.battery_pct.toFixed(0)}%`;
+                const batText = `${d.battery_pct.toFixed(0)}%${isCharging ? ' ⚡' : ''}`;
                 if (batSpan.textContent !== batText) batSpan.textContent = batText;
                 const expectedBatClass = `stat-bat ${batClass}`;
                 if (batSpan.className !== expectedBatClass) batSpan.className = expectedBatClass;
@@ -3234,6 +3314,14 @@ function connectWebSocket() {
             if (telemetry.obstacles) updateObstacles(telemetry.obstacles);
             if (telemetry.pois) updatePoIs(telemetry.pois);
             if (telemetry.links && telemetry.drones) updateLinks(telemetry.links, telemetry.active_routes, telemetry.drones);
+            if (telemetry.drones) updateFormationLattice(telemetry.drones, telemetry.active_formation || activeSwarmFormation);
+            if (telemetry.active_formation) {
+                const selForm = document.getElementById("select-formation");
+                if (selForm && selForm.value !== telemetry.active_formation) {
+                    selForm.value = telemetry.active_formation;
+                    activeSwarmFormation = telemetry.active_formation;
+                }
+            }
             if (telemetry.lidar_scan) updateLiDAR(telemetry.lidar_scan);
             if (telemetry.occupied_voxels) updateOccupancyVoxels(telemetry.occupied_voxels, telemetry.mapping_metrics);
             if (telemetry.apf_vectors) updateAPFVectors(telemetry.apf_vectors);
@@ -3672,6 +3760,23 @@ function initUIControls() {
             socket.send(JSON.stringify({ command: "speed", value: parseFloat(e.target.value) }));
         }
     });
+
+    // Swarm Tactical Formation Selector
+    const selectFormation = document.getElementById("select-formation");
+    if (selectFormation) {
+        selectFormation.addEventListener("change", (e) => {
+            const chosen = e.target.value;
+            activeSwarmFormation = chosen;
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ command: "formation", formation: chosen }));
+            }
+            fetch("/api/formation", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ formation: chosen })
+            }).catch(() => {});
+        });
+    }
 
     // Analytics Drawer Toggle
     const btnAnalytics = document.getElementById("btn-toggle-analytics");

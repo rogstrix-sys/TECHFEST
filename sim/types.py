@@ -66,15 +66,17 @@ class TelemetryDict(dict):
             return super().__getitem__("active_routes")
         if key == "timestamp":
             return super().__getitem__("sim_time")
+        if key in ("formation", "active_formation"):
+            return super().get("active_formation", "AUTONOMOUS")
         return super().__getitem__(key)
 
     def __contains__(self, key: Any) -> bool:
-        if key in ("swarm", "routes", "timestamp"):
+        if key in ("swarm", "routes", "timestamp", "formation", "active_formation"):
             return True
         return super().__contains__(key)
 
     def get(self, key: Any, default: Any = None) -> Any:
-        if key in ("swarm", "routes", "timestamp"):
+        if key in ("swarm", "routes", "timestamp", "formation", "active_formation"):
             return self[key]
         return super().get(key, default)
 
@@ -375,6 +377,7 @@ class TelemetrySnapshot:
     tactical_comms: Optional[List[Dict[str, Any]]] = None
     charging_pads: Optional[List[Dict[str, Any]]] = None
     challenge_constraints: Optional[Dict[str, Any]] = None
+    active_formation: Optional[str] = "AUTONOMOUS"
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes snapshot to dictionary with Three.js cockpit compatible aliases."""
@@ -403,6 +406,8 @@ class TelemetrySnapshot:
             d["charging_pads"] = self.charging_pads
         if self.challenge_constraints is not None:
             d["challenge_constraints"] = self.challenge_constraints
+        if self.active_formation is not None and self.active_formation != "AUTONOMOUS":
+            d["active_formation"] = self.active_formation
         return TelemetryDict(d)
 
 
