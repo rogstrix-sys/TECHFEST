@@ -716,3 +716,37 @@ class SwarmSimulationCore:
         drone.set_manual_control(vx, vy, vz, yaw_rate, enabled=enabled)
         return True
 
+    def dispatch_drone_waypoint(self, drone_id: str, target_pos: Sequence[float]) -> bool:
+        """
+        Interactive 3D Click-to-Dispatch:
+        Directly assign an operational 3D waypoint to any UAV in the fleet.
+        """
+        if drone_id not in self.drones:
+            return False
+        drone = self.drones[drone_id]
+        tgt = np.asarray(target_pos, dtype=np.float64).flatten()
+        if tgt.shape[0] == 2:
+            target = np.array([tgt[0], tgt[1], 35.0], dtype=np.float64)
+        elif tgt.shape[0] >= 3:
+            target = np.array([tgt[0], tgt[1], max(15.0, float(tgt[2]))], dtype=np.float64)
+        else:
+            return False
+
+        drone.set_target_waypoint(target)
+        if drone.flight_mode in (FlightMode.IDLE, FlightMode.LANDED):
+            drone.flight_mode = FlightMode.TAKEOFF
+        elif drone.flight_mode != FlightMode.TAKEOFF:
+            drone.flight_mode = FlightMode.TRANSIT
+        drone.is_manual_override = False
+        drone.manual_vel_cmd = None
+
+        if self.mission_manager is not None and hasattr(self.mission_manager, "emit_tactical_comms"):
+            self.mission_manager.emit_tactical_comms(
+                "INFO",
+                drone.id,
+                f"🎯 TACTICAL DISPATCH: {drone.id} routed to ({target[0]:.0f}, {target[1]:.0f}, {target[2]:.0f}m)",
+                "OPERATOR"
+            )
+        return True
+
+

@@ -34,7 +34,12 @@ let poiMeshes = new Map();
 let linkMeshes = new Map();
 let packetMeshes = [];
 let smokeParticles = null;
+let flameParticles = null;
 let washParticles = null;
+const droneTrails = new Map();
+const targetVectorLines = new Map();
+let dispatchBeaconMesh = null;
+let isDispatchMode = false;
 let raycasterTheater = new THREE.Raycaster();
 let mouseTheater = new THREE.Vector2();
 
@@ -771,12 +776,6 @@ function createGCSBase(x, y, z) {
 }
 
 function initParticleSystems() {
-    // 1. Disaster Smoke & Fire Embers at active disaster PoIs INSIDE Sector Delta
-    const smokeCount = 350;
-    const smokeGeo = new THREE.BufferGeometry();
-    const smokePositions = new Float32Array(smokeCount * 3);
-    const smokeSpeeds = new Float32Array(smokeCount);
-
     const origins = [
         new THREE.Vector3(-85, -60, 2),   // POI_COLLAPSE (West Collapsed Apartment Complex)
         new THREE.Vector3(-20, 95, 2),    // POI_HAZARD (North Chemical Processing Plant & Hazard Silos)
@@ -786,27 +785,60 @@ function initParticleSystems() {
         new THREE.Vector3(-60, 25, 2),    // POI_HOSPITAL (St. Jude Medical Center Trauma Helipad)
     ];
 
+    // 1. Disaster Smoke Plumes (Billowing atmospheric smoke rising and drifting with wind)
+    const smokeCount = 450;
+    const smokeGeo = new THREE.BufferGeometry();
+    const smokePositions = new Float32Array(smokeCount * 3);
+    const smokeSpeeds = new Float32Array(smokeCount);
+
     for (let i = 0; i < smokeCount; i++) {
         const origin = origins[i % origins.length];
-        smokePositions[i * 3] = origin.x + (Math.random() - 0.5) * 14;
-        smokePositions[i * 3 + 1] = origin.y + (Math.random() - 0.5) * 14;
-        smokePositions[i * 3 + 2] = origin.z + Math.random() * 40;
-        smokeSpeeds[i] = 0.22 + Math.random() * 0.40;
+        smokePositions[i * 3] = origin.x + (Math.random() - 0.5) * 16;
+        smokePositions[i * 3 + 1] = origin.y + (Math.random() - 0.5) * 16;
+        smokePositions[i * 3 + 2] = origin.z + Math.random() * 55;
+        smokeSpeeds[i] = 0.18 + Math.random() * 0.35;
     }
     smokeGeo.setAttribute('position', new THREE.BufferAttribute(smokePositions, 3));
     const smokeMat = new THREE.PointsMaterial({
-        color: 0xff6600,
-        size: 3.5,
+        color: 0x4a5568,
+        size: 5.5,
         transparent: true,
-        opacity: 0.72,
-        blending: THREE.AdditiveBlending,
+        opacity: 0.55,
+        depthWrite: false,
     });
     smokeParticles = new THREE.Points(smokeGeo, smokeMat);
     smokeParticles.speeds = smokeSpeeds;
     smokeParticles.origins = origins;
     sceneTheater.add(smokeParticles);
 
-    // 2. Ground Wash Dust Rings for Low-Flying Drones
+    // 2. Disaster Incandescent Flame & Ember System (Turbulent flickering fires at ground zero)
+    const flameCount = 300;
+    const flameGeo = new THREE.BufferGeometry();
+    const flamePositions = new Float32Array(flameCount * 3);
+    const flameSpeeds = new Float32Array(flameCount);
+
+    for (let i = 0; i < flameCount; i++) {
+        const origin = origins[i % origins.length];
+        flamePositions[i * 3] = origin.x + (Math.random() - 0.5) * 8;
+        flamePositions[i * 3 + 1] = origin.y + (Math.random() - 0.5) * 8;
+        flamePositions[i * 3 + 2] = origin.z + Math.random() * 14;
+        flameSpeeds[i] = 0.35 + Math.random() * 0.65;
+    }
+    flameGeo.setAttribute('position', new THREE.BufferAttribute(flamePositions, 3));
+    const flameMat = new THREE.PointsMaterial({
+        color: 0xff5500,
+        size: 3.2,
+        transparent: true,
+        opacity: 0.85,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+    });
+    flameParticles = new THREE.Points(flameGeo, flameMat);
+    flameParticles.speeds = flameSpeeds;
+    flameParticles.origins = origins;
+    sceneTheater.add(flameParticles);
+
+    // 3. Ground Wash Dust Rings for Low-Flying Drones
     const washCount = 200;
     const washGeo = new THREE.BufferGeometry();
     const washPositions = new Float32Array(washCount * 3);
@@ -816,6 +848,7 @@ function initParticleSystems() {
         size: 1.8,
         transparent: true,
         opacity: 0.5,
+        depthWrite: false,
     });
     washParticles = new THREE.Points(washGeo, washMat);
     sceneTheater.add(washParticles);
@@ -1037,6 +1070,95 @@ function createQuadcopterMesh(role) {
     return droneGroup;
 }
 
+function dispatchSelectedDroneTo(x, y, z) {
+    const droneId = selectedDroneId || "UAV_1";
+    const targetAlt = Math.max(15, Math.min(65, z !== undefined ? z : 35));
+    const targetPos = [Number(x.toFixed(1)), Number(y.toFixed(1)), Number(targetAlt.toFixed(1))];
+
+    // Create or update 3D Holographic Dispatch Waypoint Beacon in Theater View
+    if (!dispatchBeaconMesh && sceneTheater) {
+        const beaconGroup = new THREE.Group();
+
+        // 1. Ground Target Outer Base Ring
+        const ringGeo = new THREE.RingGeometry(3.0, 4.5, 32);
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
+        const ring = new THREE.Mesh(ringGeo, ringMat);
+        ring.name = "baseRing";
+        beaconGroup.add(ring);
+
+        // 2. Outer Expanding Pulsing Radar Wave Ring
+        const pulseGeo = new THREE.RingGeometry(1.2, 2.5, 32);
+        const pulseMat = new THREE.MeshBasicMaterial({ color: 0x00ff66, side: THREE.DoubleSide, transparent: true, opacity: 0.65 });
+        const pulse = new THREE.Mesh(pulseGeo, pulseMat);
+        pulse.position.z = 0.08;
+        pulse.name = "pulseRing";
+        beaconGroup.add(pulse);
+
+        // 3. Vertical Cyan Beacon Laser Beam
+        const beamGeo = new THREE.CylinderGeometry(0.18, 0.18, 140, 12);
+        const beamMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.45, depthWrite: false });
+        const beam = new THREE.Mesh(beamGeo, beamMat);
+        beam.rotation.x = Math.PI / 2;
+        beam.position.z = 70;
+        beam.name = "beam";
+        beaconGroup.add(beam);
+
+        // 4. 3D Setpoint Waypoint Marker Diamond
+        const markerGeo = new THREE.OctahedronGeometry(2.4);
+        const markerMat = new THREE.MeshBasicMaterial({ color: 0xffd600, wireframe: true });
+        const marker = new THREE.Mesh(markerGeo, markerMat);
+        marker.name = "marker";
+        beaconGroup.add(marker);
+
+        sceneTheater.add(beaconGroup);
+        dispatchBeaconMesh = beaconGroup;
+    }
+
+    if (dispatchBeaconMesh) {
+        dispatchBeaconMesh.position.set(x, y, 0);
+        const marker = dispatchBeaconMesh.getObjectByName("marker");
+        if (marker) {
+            marker.position.z = targetAlt;
+        }
+        dispatchBeaconMesh.visible = true;
+    }
+
+    // Send dispatch command over WebSocket and REST fallback
+    const payload = {
+        command: "dispatch",
+        cmd: "dispatch",
+        drone_id: droneId,
+        target: targetPos
+    };
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+    fetch("/api/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drone_id: droneId, target: targetPos })
+    }).catch(() => {});
+
+    playTacticalSound("radar_ping");
+
+    // Tactical toast alert
+    const ticker = document.getElementById("hud-comms-ticker");
+    const tickerBadge = document.getElementById("ticker-badge");
+    const tickerMsg = document.getElementById("ticker-msg");
+    if (ticker && tickerBadge && tickerMsg) {
+        tickerBadge.textContent = `[OPERATOR DISPATCH]`;
+        tickerBadge.className = `ticker-badge comms-badge-INFO`;
+        tickerMsg.textContent = `🎯 ${droneId} routed to (${targetPos[0]}m, ${targetPos[1]}m, ${targetPos[2]}m)`;
+        ticker.classList.remove("hidden");
+        if (commsTickerTimeout) clearTimeout(commsTickerTimeout);
+        commsTickerTimeout = setTimeout(() => {
+            ticker.classList.add("hidden");
+        }, 4000);
+    }
+}
+window.dispatchSelectedDroneTo = dispatchSelectedDroneTo;
+
 function onTheaterCanvasClick(event) {
     const rect = rendererTheater.domElement.getBoundingClientRect();
     mouseTheater.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -1044,6 +1166,35 @@ function onTheaterCanvasClick(event) {
 
     raycasterTheater.setFromCamera(mouseTheater, cameraTheater);
 
+    // 1. Shift+Click or Active Dispatch Mode: Click-to-Dispatch 3D Waypoint
+    if (isDispatchMode || event.shiftKey) {
+        const intersects = raycasterTheater.intersectObjects(sceneTheater.children, true);
+        let hitPoint = null;
+
+        for (let i = 0; i < intersects.length; i++) {
+            const obj = intersects[i].object;
+            if (obj && obj.isMesh && obj.visible && !obj.isLine && !obj.droneId && intersects[i].distance > 1) {
+                hitPoint = intersects[i].point.clone();
+                break;
+            }
+        }
+
+        if (!hitPoint) {
+            const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+            const groundHit = new THREE.Vector3();
+            if (raycasterTheater.ray.intersectPlane(groundPlane, groundHit)) {
+                hitPoint = groundHit;
+            }
+        }
+
+        if (hitPoint) {
+            const targetAlt = Math.max(25, (hitPoint.z || 0) + 18);
+            dispatchSelectedDroneTo(hitPoint.x, hitPoint.y, targetAlt);
+            return;
+        }
+    }
+
+    // 2. Standard Click: Drone Selection
     const interactiveObjects = [];
     droneMeshes.forEach((mesh, id) => {
         mesh.traverse(child => {
@@ -1065,7 +1216,9 @@ function onTheaterCanvasClick(event) {
 
 function updateCanvasCursor() {
     if (!rendererTheater || !rendererTheater.domElement) return;
-    if (isPanMode || isShiftHeld) {
+    if (isDispatchMode) {
+        rendererTheater.domElement.style.cursor = "crosshair";
+    } else if (isPanMode || isShiftHeld) {
         rendererTheater.domElement.style.cursor = isMouseDownOnTheater ? "grabbing" : "grab";
     } else {
         rendererTheater.domElement.style.cursor = "";
@@ -1258,6 +1411,10 @@ function updateDrones(dronesData) {
         activeIds.add(drone.id);
         let mesh = droneMeshes.get(drone.id);
 
+        const isRelay = (drone.role === "RELAY");
+        const isScout = (drone.role === "SCOUT");
+        const roleColor = isRelay ? 0xffd600 : (isScout ? 0x00ff66 : 0x00e5ff);
+
         if (!mesh) {
             mesh = createQuadcopterMesh(drone.role);
             sceneTheater.add(mesh);
@@ -1284,7 +1441,68 @@ function updateDrones(dronesData) {
             mesh.hasInitialPose = true;
         }
 
-        // Record trajectory point for focused drone at telemetry sample rate
+        // 1. Multi-UAV 3D Flight Path Trajectory Ribbons
+        let trail = droneTrails.get(drone.id);
+        if (!trail) {
+            const maxTrailPts = 60;
+            const trailGeo = new THREE.BufferGeometry();
+            const trailPositions = new Float32Array(maxTrailPts * 3);
+            trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+            const trailMat = new THREE.LineBasicMaterial({
+                color: roleColor,
+                transparent: true,
+                opacity: 0.55,
+                depthWrite: false,
+            });
+            const trailLine = new THREE.Line(trailGeo, trailMat);
+            trail = { line: trailLine, points: [], maxPoints: maxTrailPts };
+            sceneTheater.add(trailLine);
+            droneTrails.set(drone.id, trail);
+        }
+
+        if (drone.position[2] > 0.8 && drone.flight_mode !== "IDLE" && drone.flight_mode !== "LANDED") {
+            trail.points.push(new THREE.Vector3(drone.position[0], drone.position[1], drone.position[2]));
+            if (trail.points.length > trail.maxPoints) {
+                trail.points.shift();
+            }
+            trail.line.geometry.setFromPoints(trail.points);
+            trail.line.visible = true;
+        } else if (drone.flight_mode === "LANDED" || drone.flight_mode === "IDLE") {
+            trail.points = [];
+            trail.line.visible = false;
+        }
+
+        // 2. 3D Dashed Target Waypoint Projection Vectors
+        let targetLine = targetVectorLines.get(drone.id);
+        if (!targetLine) {
+            const targetGeo = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0),
+                new THREE.Vector3(0, 0, 0)
+            ]);
+            const targetMat = new THREE.LineDashedMaterial({
+                color: roleColor,
+                dashSize: 2.5,
+                gapSize: 1.5,
+                transparent: true,
+                opacity: 0.70,
+                depthWrite: false,
+            });
+            targetLine = new THREE.Line(targetGeo, targetMat);
+            sceneTheater.add(targetLine);
+            targetVectorLines.set(drone.id, targetLine);
+        }
+
+        if (drone.target_position && drone.position[2] > 1.2 && drone.flight_mode !== "IDLE" && drone.flight_mode !== "LANDED") {
+            const p1 = new THREE.Vector3(drone.position[0], drone.position[1], drone.position[2]);
+            const p2 = new THREE.Vector3(drone.target_position[0], drone.target_position[1], drone.target_position[2]);
+            targetLine.geometry.setFromPoints([p1, p2]);
+            targetLine.computeLineDistances();
+            targetLine.visible = true;
+        } else {
+            targetLine.visible = false;
+        }
+
+        // Record trajectory point for focused drone in SLAM view
         if (drone.id === selectedDroneId) {
             slamTrajectoryPoints.push(new THREE.Vector3(drone.position[0], drone.position[1], drone.position[2]));
             if (slamTrajectoryPoints.length > maxTrajectoryPoints) {
@@ -1296,11 +1514,21 @@ function updateDrones(dronesData) {
         }
     });
 
-    // Remove defunct drones
+    // Remove defunct drones & trails
     for (const [id, mesh] of droneMeshes.entries()) {
         if (!activeIds.has(id)) {
             sceneTheater.remove(mesh);
             droneMeshes.delete(id);
+            const trail = droneTrails.get(id);
+            if (trail) {
+                sceneTheater.remove(trail.line);
+                droneTrails.delete(id);
+            }
+            const tgtLine = targetVectorLines.get(id);
+            if (tgtLine) {
+                sceneTheater.remove(tgtLine);
+                targetVectorLines.delete(id);
+            }
         }
     }
 }
@@ -3197,6 +3425,19 @@ function initUIControls() {
         });
     }
 
+    // Interactive 3D Click-to-Dispatch Mode Toggle
+    const btnDispatch = document.getElementById("btn-dispatch");
+    if (btnDispatch) {
+        btnDispatch.addEventListener("click", () => {
+            isDispatchMode = !isDispatchMode;
+            btnDispatch.classList.toggle("active", isDispatchMode);
+            btnDispatch.textContent = isDispatchMode ? "🎯 DISPATCH: ON" : "🎯 DISPATCH";
+            btnDispatch.classList.toggle("text-neon-yellow", isDispatchMode);
+            btnDispatch.classList.toggle("text-cyan", !isDispatchMode);
+            updateCanvasCursor();
+        });
+    }
+
     // Manual FPV Controller Takeover (WASD / Gamepad)
     const btnManual = document.getElementById("btn-manual");
     if (btnManual) {
@@ -3760,23 +4001,68 @@ function animate() {
         lidarSweepLine.rotation.z += 0.08;
     }
 
-    // Update Disaster Smoke Particles
+    // Wind vector calculation from live telemetry weather
+    let windVx = 0.08;
+    let windVy = 0.05;
+    if (latestTelemetry && latestTelemetry.weather) {
+        const spd = latestTelemetry.weather.current_speed_mps !== undefined ? latestTelemetry.weather.current_speed_mps : 2.0;
+        const dirRad = ((latestTelemetry.weather.direction_deg || 45) * Math.PI) / 180;
+        windVx = Math.cos(dirRad) * spd * 0.035;
+        windVy = Math.sin(dirRad) * spd * 0.035;
+    }
+
+    // Update Disaster Smoke Particles (Rising plumes drifting with atmospheric wind)
     if (smokeParticles) {
         const pos = smokeParticles.geometry.attributes.position.array;
         const speeds = smokeParticles.speeds;
         const origins = smokeParticles.origins;
         for (let i = 0; i < speeds.length; i++) {
             pos[i * 3 + 2] += speeds[i];
-            pos[i * 3] += (Math.random() - 0.48) * 0.15;
-            pos[i * 3 + 1] += (Math.random() - 0.48) * 0.15;
-            if (pos[i * 3 + 2] > 55) {
+            pos[i * 3] += windVx + (Math.random() - 0.48) * 0.18;
+            pos[i * 3 + 1] += windVy + (Math.random() - 0.48) * 0.18;
+            if (pos[i * 3 + 2] > 65) {
                 const orig = origins[i % origins.length];
-                pos[i * 3] = orig.x + (Math.random() - 0.5) * 8;
-                pos[i * 3 + 1] = orig.y + (Math.random() - 0.5) * 8;
+                pos[i * 3] = orig.x + (Math.random() - 0.5) * 10;
+                pos[i * 3 + 1] = orig.y + (Math.random() - 0.5) * 10;
                 pos[i * 3 + 2] = orig.z;
             }
         }
         smokeParticles.geometry.attributes.position.needsUpdate = true;
+    }
+
+    // Update Disaster Flame & Ember Particles (Turbulent flickering fires at ground zero)
+    if (flameParticles) {
+        const fPos = flameParticles.geometry.attributes.position.array;
+        const fSpeeds = flameParticles.speeds;
+        const fOrigins = flameParticles.origins;
+        for (let i = 0; i < fSpeeds.length; i++) {
+            fPos[i * 3 + 2] += fSpeeds[i];
+            fPos[i * 3] += (Math.random() - 0.5) * 0.35 + windVx * 0.4;
+            fPos[i * 3 + 1] += (Math.random() - 0.5) * 0.35 + windVy * 0.4;
+            if (fPos[i * 3 + 2] > 16) {
+                const orig = fOrigins[i % fOrigins.length];
+                fPos[i * 3] = orig.x + (Math.random() - 0.5) * 6;
+                fPos[i * 3 + 1] = orig.y + (Math.random() - 0.5) * 6;
+                fPos[i * 3 + 2] = orig.z + Math.random() * 2.0;
+            }
+        }
+        flameParticles.geometry.attributes.position.needsUpdate = true;
+        flameParticles.material.opacity = 0.65 + Math.sin(tSec * 16) * 0.25;
+    }
+
+    // Animate Holographic Click-to-Dispatch Waypoint Beacon
+    if (dispatchBeaconMesh && dispatchBeaconMesh.visible) {
+        const pulseRing = dispatchBeaconMesh.getObjectByName("pulseRing");
+        if (pulseRing) {
+            const s = 1.0 + ((performance.now() * 0.0035) % 2.8);
+            pulseRing.scale.set(s, s, 1.0);
+            pulseRing.material.opacity = Math.max(0.05, 0.75 - s * 0.22);
+        }
+        const marker = dispatchBeaconMesh.getObjectByName("marker");
+        if (marker) {
+            marker.rotation.z += 0.04;
+            marker.rotation.x += 0.02;
+        }
     }
 
     // Update Ground Wash Dust

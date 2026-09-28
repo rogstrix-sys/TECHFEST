@@ -780,9 +780,23 @@ async def post_manual_control(payload: Dict[str, Any]):
     return JSONResponse({"status": "ok" if success else "error", "drone_id": drone_id, "enabled": enabled})
 
 
+@app.post("/api/dispatch")
+async def post_dispatch(payload: Dict[str, Any]):
+    """Interactive 3D Click-to-Dispatch: Assign 3D waypoint setpoint to selected UAV."""
+    drone_id = payload.get("drone_id") or server_manager.focus_drone_id
+    target = payload.get("target") or payload.get("waypoint") or [0.0, 0.0, 35.0]
+    success = server_manager.sim.dispatch_drone_waypoint(drone_id, target)
+    return JSONResponse({
+        "status": "ok" if success else "error",
+        "drone_id": drone_id,
+        "target": target,
+        "message": f"UAV {drone_id} dispatched to waypoint setpoint." if success else "Dispatch failed."
+    })
+
+
 @app.post("/api/control")
 async def post_control(payload: Dict[str, Any]):
-    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat."""
+    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat, dispatch."""
     cmd = payload.get("command") or payload.get("cmd")
     if cmd == "pause":
         server_manager.is_running = False
@@ -796,6 +810,11 @@ async def post_control(payload: Dict[str, Any]):
         drone_id = str(payload.get("drone_id", "UAV_1"))
         if drone_id in server_manager.sim.drones:
             server_manager.focus_drone_id = drone_id
+    elif cmd == "dispatch":
+        drone_id = payload.get("drone_id") or server_manager.focus_drone_id
+        target = payload.get("target") or payload.get("waypoint") or [0.0, 0.0, 35.0]
+        server_manager.sim.dispatch_drone_waypoint(drone_id, target)
+        return JSONResponse({"status": "ok", "drone_id": drone_id, "target": target})
     elif cmd in ("retreat", "rtl"):
         drone_id = payload.get("drone_id")
         if drone_id and drone_id in server_manager.sim.drones:
@@ -854,6 +873,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     drone_id = str(data.get("drone_id", "UAV_1"))
                     if drone_id in server_manager.sim.drones:
                         server_manager.focus_drone_id = drone_id
+                elif cmd == "dispatch":
+                    drone_id = data.get("drone_id") or server_manager.focus_drone_id
+                    target = data.get("target") or data.get("waypoint") or [0.0, 0.0, 35.0]
+                    server_manager.sim.dispatch_drone_waypoint(drone_id, target)
                 elif cmd in ("retreat", "rtl"):
                     drone_id = data.get("drone_id")
                     if drone_id and drone_id in server_manager.sim.drones:
