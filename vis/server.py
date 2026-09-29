@@ -34,39 +34,81 @@ from sim.weather import WindConfig
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-def get_gpu_telemetry() -> Dict[str, Any]:
-    """Fetch live NVIDIA GPU hardware telemetry for Web Cockpit and HUD."""
+_last_gpu_check = 0.0
+_cached_gpu_info: Optional[Dict[str, Any]] = None
+_nvml_initialized = False
+_nvml_handle = None
+
+
+def _get_nvml_handle():
+    global _nvml_initialized, _nvml_handle
+    if _nvml_initialized:
+        return _nvml_handle
     try:
         import pynvml
         pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        name = pynvml.nvmlDeviceGetName(handle)
-        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-        try:
-            power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
-        except Exception:
-            power = 15.0
-        return {
-            "name": name,
-            "temp_c": temp,
-            "gpu_util_pct": util.gpu,
-            "vram_used_mb": int(mem.used / 1024**2),
-            "vram_total_mb": int(mem.total / 1024**2),
-            "power_w": round(power, 1),
-            "accel": "NVIDIA CUDA OpenCL",
-        }
+        _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        _nvml_initialized = True
+        return _nvml_handle
     except Exception:
-        return {
-            "name": "NVIDIA RTX 4050",
-            "temp_c": 48,
-            "gpu_util_pct": 0,
-            "vram_used_mb": 291,
-            "vram_total_mb": 6141,
-            "power_w": 18.0,
-            "accel": "NVIDIA CUDA",
-        }
+        _nvml_initialized = True  # Avoid retrying nvmlInit on every tick
+        _nvml_handle = None
+        return None
+
+
+def _query_gpu_telemetry_sync() -> None:
+    global _cached_gpu_info
+    handle = _get_nvml_handle()
+    if handle is not None:
+        try:
+            import pynvml
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="ignore")
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            try:
+                power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
+            except Exception:
+                power = 15.0
+            _cached_gpu_info = {
+                "name": str(name),
+                "temp_c": int(temp),
+                "gpu_util_pct": int(util.gpu),
+                "vram_used_mb": int(mem.used / 1024**2),
+                "vram_total_mb": int(mem.total / 1024**2),
+                "power_w": round(power, 1),
+                "accel": "NVIDIA CUDA OpenCL",
+            }
+        except Exception:
+            pass
+
+
+async def _gpu_telemetry_loop() -> None:
+    """Async background worker for GPU hardware metrics to guarantee 0ms latency in simulation loop."""
+    while True:
+        try:
+            await asyncio.to_thread(_query_gpu_telemetry_sync)
+        except Exception:
+            pass
+        await asyncio.sleep(2.0)
+
+
+def get_gpu_telemetry() -> Dict[str, Any]:
+    """Fetch live NVIDIA GPU hardware telemetry (zero-latency thread-safe cache)."""
+    global _cached_gpu_info
+    if _cached_gpu_info is not None:
+        return _cached_gpu_info
+    return {
+        "name": "NVIDIA RTX 4050",
+        "temp_c": 48,
+        "gpu_util_pct": 0,
+        "vram_used_mb": 291,
+        "vram_total_mb": 6141,
+        "power_w": 18.0,
+        "accel": "NVIDIA CUDA",
+    }
 
 
 def create_default_simulation() -> SwarmSimulationCore:
@@ -385,9 +427,9 @@ class SimulationServer:
         self.lidar = LiDARScanner(
             max_range_m=75.0,
             horizontal_fov_deg=360.0,
-            horizontal_resolution_deg=6.0,   # 60 azimuth beams per ring
+            horizontal_resolution_deg=4.0,   # 90 azimuth beams per ring
             vertical_fov_deg=(-50.0, 15.0),  # -50 deg downward ground look to +15 deg upward
-            vertical_channels=16,            # 16 elevation rings (960 rays total)
+            vertical_channels=24,            # 24 elevation rings (2,160 rays total)
             range_noise_std_m=0.03
         )
         self.latest_payload: Optional[str] = None
@@ -404,6 +446,9 @@ class SimulationServer:
             self.sim = create_default_simulation()
             self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
         self.step_count = 0
+        self._cached_obs_list = None
+        self._cached_occupied_voxels = None
+        self._cached_mapping_metrics = None
 
     async def broadcast_loop(self) -> None:
         """Asynchronous simulation execution, LiDAR perception, and telemetry broadcast loop."""
@@ -411,11 +456,22 @@ class SimulationServer:
             step_start = time.perf_counter()
             try:
                 if self.is_running:
+                    # Multi-step physics sub-stepping based on sim_speed:
+                    # Adaptive substepping (up to 3 substeps) ensures high-speed physics fidelity
+                    # while maintaining loop execution under 15ms so broadcasts stay locked at 30 Hz.
+                    base_dt = 1.0 / 30.0
+                    substeps = min(3, max(1, int(round(self.sim_speed))))
+                    step_dt = (self.sim_speed * base_dt) / substeps
+                    for _ in range(substeps - 1):
+                        self.step_count += 1
+                        self.sim.step(dt=step_dt)
+
                     self.step_count += 1
                     # Step simulation
-                    snapshot = self.sim.step()
+                    snapshot = self.sim.step(dt=step_dt)
                     data = snapshot.to_dict()
                     data["scenario"] = self.scenario
+                    data["sim_speed"] = self.sim_speed
 
                     # 1. Enrich with real-time EKF estimation metrics & attitude Euler angles
                     for d_dict in data.get("drones", []):
@@ -434,16 +490,20 @@ class SimulationServer:
                             d_dict["yaw_deg"] = round(float(np.degrees(att[2])) % 360.0, 1)
 
                     # 2. Collaborative Multi-UAV Swarm LiDAR Sweep and SLAM Integration
+                    # Each individual drone in the fleet utilizes its own dedicated onboard LiDAR sensor
                     focus_drone = self.sim.drones.get(self.focus_drone_id) or next(iter(self.sim.drones.values()), None)
                     if focus_drone is not None:
-                        # Execute high-resolution LiDAR scan for focus drone
-                        scan = self.lidar.scan(
-                            drone_id=focus_drone.id,
-                            position=focus_drone.position,
-                            attitude=focus_drone.attitude,
-                            obstacles=self.sim.obstacles,
-                            sim_time=snapshot.sim_time,
-                        )
+                        # Focus drone executes its onboard LiDAR scan
+                        if hasattr(focus_drone, "perform_lidar_scan"):
+                            scan = focus_drone.perform_lidar_scan(self.sim.obstacles, sim_time=snapshot.sim_time)
+                        else:
+                            scan = self.lidar.scan(
+                                drone_id=focus_drone.id,
+                                position=focus_drone.position,
+                                attitude=focus_drone.attitude,
+                                obstacles=self.sim.obstacles,
+                                sim_time=snapshot.sim_time,
+                            )
                         self.voxel_map.insert_scan(scan)
                         data["lidar_scan"] = scan.to_dict()
 
@@ -462,18 +522,20 @@ class SimulationServer:
                             "target": [round(float(c), 2) for c in focus_drone.target_position] if focus_drone.target_position is not None else None,
                         }
 
-                    # Swarm Collaborative SLAM: Scan up to 3 active peer drones in round-robin for rapid cooperative mapping
+                    # Swarm Collaborative SLAM: Every individual drone in the fleet scans the city with its onboard LiDAR
+                    # Active airborne drones scan their sector environments in interleaved batches
                     active_peers = [
                         d for d in self.sim.drones.values()
                         if d.id != (focus_drone.id if focus_drone else "")
-                        and d.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.RTL)
-                        and float(d.position[2]) > 2.0
+                        and (d.flight_mode in (FlightMode.TAKEOFF, FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.RTL, FlightMode.DATA_TX, FlightMode.MANUAL) or float(d.position[2]) > 0.8)
                     ]
-                    if active_peers:
-                        num_to_scan = min(3, len(active_peers))
-                        for offset in range(num_to_scan):
-                            peer_idx = (self.step_count * 2 + offset) % len(active_peers)
-                            peer = active_peers[peer_idx]
+                    if self.step_count % 2 == 0 and active_peers:
+                        # Interleaved collaborative scanning: scan 1 active peer on alternate ticks to maintain locked 30 Hz
+                        peer_idx = (self.step_count // 2) % len(active_peers)
+                        peer = active_peers[peer_idx]
+                        if hasattr(peer, "perform_lidar_scan"):
+                            p_scan = peer.perform_lidar_scan(self.sim.obstacles, sim_time=snapshot.sim_time)
+                        else:
                             p_scan = self.lidar.scan(
                                 drone_id=peer.id,
                                 position=peer.position,
@@ -481,11 +543,14 @@ class SimulationServer:
                                 obstacles=self.sim.obstacles,
                                 sim_time=snapshot.sim_time,
                             )
-                            self.voxel_map.insert_scan(p_scan)
+                        self.voxel_map.insert_scan(p_scan)
 
-                    # 3. Stream 3D Occupied Voxels & SLAM Metrics
-                    data["occupied_voxels"] = self.voxel_map.get_occupied_voxels(max_count=1200)
-                    mapping_metrics = self.voxel_map.compute_metrics()
+                    # 3. Stream 3D Occupied Voxels & SLAM Metrics (cached at 10 Hz for fluid 30-60 FPS throughput)
+                    if self.step_count % 3 == 0 or getattr(self, "_cached_occupied_voxels", None) is None:
+                        self._cached_occupied_voxels = self.voxel_map.get_occupied_voxels(max_count=1200)
+                        self._cached_mapping_metrics = self.voxel_map.compute_metrics()
+                    data["occupied_voxels"] = self._cached_occupied_voxels
+                    mapping_metrics = self._cached_mapping_metrics
                     data["mapping_metrics"] = mapping_metrics
 
                     # 4. Stream Scientific Analytical Chart Data
@@ -508,19 +573,22 @@ class SimulationServer:
                         "throughput_kbps": round(float(len(snapshot.packets) * 14.5 + 28.0), 1),
                     }
 
-                    # 5. Add obstacles geometry for client 3D rendering
-                    obs_list = []
-                    for obs in self.sim.obstacles:
-                        min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
-                        max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
-                        if min_p is not None and max_p is not None:
-                            obs_list.append({
-                                "id": getattr(obs, "id", "OBS"),
-                                "name": getattr(obs, "name", "Building"),
-                                "min_pt": [round(float(c), 2) for c in min_p],
-                                "max_pt": [round(float(c), 2) for c in max_p],
-                            })
-                    data["obstacles"] = obs_list
+                    # 5. Add obstacles geometry for client 3D rendering (cached)
+                    if getattr(self, "_cached_obs_list", None) is None:
+                        obs_list = []
+                        for obs in self.sim.obstacles:
+                            min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
+                            max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
+                            if min_p is not None and max_p is not None:
+                                obs_list.append({
+                                    "id": getattr(obs, "id", "OBS"),
+                                    "name": getattr(obs, "name", "Building"),
+                                    "min_pt": [round(float(c), 2) for c in min_p],
+                                    "max_pt": [round(float(c), 2) for c in max_p],
+                                })
+                        self._cached_obs_list = obs_list
+                    if self.step_count <= 2 or self.step_count % 30 == 0:
+                        data["obstacles"] = self._cached_obs_list
 
                     # 6. Add live NVIDIA GPU hardware telemetry
                     data["gpu"] = get_gpu_telemetry()
@@ -543,9 +611,11 @@ class SimulationServer:
                 print(f"[!] Simulation broadcast loop error: {e}")
                 traceback.print_exc()
 
-            target_interval = self.step_delay / max(0.1, self.sim_speed)
+            target_interval = self.step_delay
             elapsed = time.perf_counter() - step_start
             sleep_time = max(0.001, target_interval - elapsed)
+            if self.step_count % 30 == 0:
+                print(f"[Loop #{self.step_count}] elapsed={elapsed*1000:.1f}ms, sleep={sleep_time*1000:.1f}ms, clients={len(self.clients)}", flush=True)
             await asyncio.sleep(sleep_time)
 
 
@@ -592,6 +662,7 @@ async def get_telemetry():
     """Return latest simulation telemetry frame."""
     data = server_manager.sim.to_dict()
     data["scenario"] = server_manager.scenario
+    data["sim_speed"] = server_manager.sim_speed
     return JSONResponse(data)
 
 
@@ -735,26 +806,51 @@ async def export_debrief():
 
 
 @app.get("/api/export_point_cloud")
-async def export_point_cloud(format: str = "ply"):
+async def export_point_cloud(format: str = "ply", drone_id: Optional[str] = None):
     """
     Export reconstructed 3D LiDAR point cloud.
     Formats:
     - 'ply': Stanford ASCII PLY format for CloudCompare, Blender, MeshLab.
     - 'las': ASPRS LAS 1.2 Binary format for CloudCompare, QGIS, ArcGIS, PDAL.
+
+    Combines data from each individual drone into the net 3D point cloud map
+    of the city and structures, or exports a specific drone's individual point cloud.
     """
     fmt = format.lower()
+    drones = server_manager.sim.drones
+
+    # Individual drone export if specific drone_id is specified
+    if drone_id and drone_id.lower() not in ("all", "net", "combined"):
+        target_drone = drones.get(drone_id)
+        if not target_drone:
+            return JSONResponse({"status": "error", "message": f"Drone '{drone_id}' not found."}, status_code=404)
+        if fmt == "las":
+            las_bytes = server_manager.voxel_map.export_point_cloud_las(drones={drone_id: target_drone})
+            return Response(
+                content=las_bytes,
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f"attachment; filename={drone_id}_PointCloud.las"}
+            )
+        ply_content = target_drone.export_point_cloud_ply()
+        return Response(
+            content=ply_content,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename={drone_id}_PointCloud.ply"}
+        )
+
+    # Net Combined 3D Map Fused from all individual drones in the fleet
     if fmt == "las":
-        las_bytes = server_manager.voxel_map.export_point_cloud_las()
+        las_bytes = server_manager.voxel_map.export_point_cloud_las(drones=drones)
         return Response(
             content=las_bytes,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": "attachment; filename=UAVX_Disaster_PointCloud.las"}
+            headers={"Content-Disposition": "attachment; filename=UAVX_Net_Combined_City_PointCloud.las"}
         )
-    ply_content = server_manager.voxel_map.export_point_cloud_ply()
+    ply_content = server_manager.voxel_map.export_point_cloud_ply(drones=drones)
     return Response(
         content=ply_content,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": "attachment; filename=UAVX_Disaster_PointCloud.ply"}
+        headers={"Content-Disposition": "attachment; filename=UAVX_Net_Combined_City_PointCloud.ply"}
     )
 
 
@@ -935,3 +1031,4 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(server_manager.broadcast_loop())
+    asyncio.create_task(_gpu_telemetry_loop())

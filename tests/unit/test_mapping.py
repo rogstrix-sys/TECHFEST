@@ -7,8 +7,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from sim.drone import Drone
 from sim.mapping import LiDARScanner, OccupancyGridMap3D, LiDARPoint, LiDARScan
 from sim.obstacles import ObstacleAABB
+from sim.types import DroneRole
 
 
 @pytest.fixture
@@ -108,3 +110,68 @@ def test_occupancy_grid_map_log_odds_updates(sample_obstacles):
     assert len(occ_list) >= 1
     assert "pos" in occ_list[0]
     assert "prob" in occ_list[0]
+
+
+def test_individual_drone_lidar_sensor(sample_obstacles):
+    """Verify every individual drone possesses its own onboard LiDAR scanner and point cloud buffer."""
+    d1 = Drone("UAV_1", role=DroneRole.SURVEY, initial_pos=np.array([10.0, 30.0, 15.0]))
+    d2 = Drone("UAV_2", role=DroneRole.SURVEY, initial_pos=np.array([10.0, 10.0, 15.0]))
+
+    # Verify each drone has its own individual LiDARScanner instance
+    assert hasattr(d1, "lidar") and isinstance(d1.lidar, LiDARScanner)
+    assert hasattr(d2, "lidar") and isinstance(d2.lidar, LiDARScanner)
+    assert d1.lidar is not d2.lidar  # Separate physical sensor instances
+
+    # Execute scan on d1
+    scan1 = d1.perform_lidar_scan(sample_obstacles, sim_time=1.0)
+    assert isinstance(scan1, LiDARScan)
+    assert scan1.drone_id == "UAV_1"
+    assert len(scan1.points) > 0
+    assert len(d1.scanned_points) == len(scan1.points)
+    assert len(d2.scanned_points) == 0  # d2 hasn't scanned yet
+
+    # Verify individual drone PLY export
+    d1_ply = d1.export_point_cloud_ply()
+    assert d1_ply.startswith("ply\n")
+    assert "comment UAV UAV_1 Onboard LiDAR Point Cloud" in d1_ply
+    assert f"element vertex {len(d1.scanned_points)}" in d1_ply
+
+
+def test_net_combined_ply_export_fused_from_all_drones(sample_obstacles):
+    """Verify net PLY combines point cloud data from each individual drone into unified 3D map."""
+    d1 = Drone("UAV_1", role=DroneRole.SURVEY, initial_pos=np.array([10.0, 30.0, 15.0]))
+    d2 = Drone("UAV_2", role=DroneRole.SURVEY, initial_pos=np.array([30.0, 10.0, 15.0]))
+    r1 = Drone("RELAY_1", role=DroneRole.RELAY, initial_pos=np.array([30.0, 50.0, 25.0]))
+    drones = {d1.id: d1, d2.id: d2, r1.id: r1}
+
+    # Each individual drone scans the environment from its unique perspective
+    s1 = d1.perform_lidar_scan(sample_obstacles, sim_time=1.0)
+    s2 = d2.perform_lidar_scan(sample_obstacles, sim_time=1.0)
+    s3 = r1.perform_lidar_scan(sample_obstacles, sim_time=1.0)
+
+    assert len(d1.scanned_points) > 0
+    assert len(d2.scanned_points) > 0
+    assert len(r1.scanned_points) > 0
+
+    grid = OccupancyGridMap3D(voxel_size_m=4.0)
+    # Insert scans from all drones
+    grid.insert_scan(s1)
+    grid.insert_scan(s2)
+    grid.insert_scan(s3)
+
+    # Export Net Combined PLY
+    net_ply = grid.export_point_cloud_ply(drones=drones)
+    assert net_ply.startswith("ply\n")
+    assert "comment Net 3D City & Structural Map Combined from All Individual Drone Sensors" in net_ply
+    assert "UAV_1" in net_ply
+    assert "UAV_2" in net_ply
+    assert "RELAY_1" in net_ply
+
+    lines = net_ply.strip().split("\n")
+    header_end = lines.index("end_header")
+    data_lines = lines[header_end + 1:]
+
+    # Combined total points must equal sum of all individual drones' points
+    total_expected = len(d1.scanned_points) + len(d2.scanned_points) + len(r1.scanned_points)
+    assert len(data_lines) == total_expected
+

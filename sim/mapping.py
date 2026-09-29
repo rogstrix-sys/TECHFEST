@@ -7,6 +7,7 @@ occupancy voxel grid mapping for autonomous UAV swarm perception and SLAM.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 import math
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -33,15 +34,13 @@ class LiDARScan:
     drone_id: str
     sensor_origin: np.ndarray  # [x, y, z] in world frame
     points: List[LiDARPoint] = field(default_factory=list)
+    _pts_array: Optional[np.ndarray] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "timestamp": round(float(self.timestamp), 3),
-            "drone_id": self.drone_id,
-            "origin": [round(float(c), 2) for c in self.sensor_origin],
-            "num_points": len(self.points),
-            # Downsampled/compact point list for fast WebSocket transport [x, y, z, intensity]
-            "points": [
+        if getattr(self, "_pts_array", None) is not None:
+            pts_data = self._pts_array.tolist()
+        else:
+            pts_data = [
                 [
                     round(p.x, 2),
                     round(p.y, 2),
@@ -49,7 +48,13 @@ class LiDARScan:
                     round(p.intensity, 2)
                 ]
                 for p in self.points
-            ],
+            ]
+        return {
+            "timestamp": round(float(self.timestamp), 3),
+            "drone_id": self.drone_id,
+            "origin": [round(float(c), 2) for c in self.sensor_origin],
+            "num_points": len(self.points),
+            "points": pts_data,
         }
 
 
@@ -69,9 +74,9 @@ class LiDARScanner:
         max_range_m: float = 75.0,
         min_range_m: float = 0.5,
         horizontal_fov_deg: float = 360.0,
-        horizontal_resolution_deg: float = 6.0,  # 60 azimuth beams per ring
+        horizontal_resolution_deg: float = 4.0,  # 90 azimuth beams per ring
         vertical_fov_deg: Tuple[float, float] = (-50.0, 15.0),  # -50 deg downward ground look to +15 deg upward
-        vertical_channels: int = 16,  # 16 elevation rings (960 rays total)
+        vertical_channels: int = 24,  # 24 elevation rings (2,160 rays total)
         range_noise_std_m: float = 0.03,  # 3cm range measurement noise
     ) -> None:
         self.max_range = float(max_range_m)
@@ -118,7 +123,7 @@ class LiDARScanner:
         """
         Executes a 3D LiDAR scan sweep from position with given attitude.
         Rays are tested against all obstacles and ground plane (z = 0)
-        using fast vectorized raycasting.
+        using fast vectorized raycasting with deferred surface normal calculations.
         """
         pos = np.asarray(position, dtype=np.float64)
         roll, pitch, yaw = attitude[0], attitude[1], attitude[2]
@@ -147,9 +152,8 @@ class LiDARScanner:
                 active_obstacles.append(obs)
 
         closest_dist = np.full(N_rays, self.max_range, dtype=np.float64)
-        hit_obstacle_id = np.array([None] * N_rays, dtype=object)
-        hit_normals = np.zeros((N_rays, 3), dtype=np.float64)
-        hit_normals[:, 2] = 1.0
+        hit_obs_idx = np.full(N_rays, -1, dtype=np.int32)
+        is_ground = np.zeros(N_rays, dtype=bool)
 
         # 1. Ground plane intersection (z = 0)
         downward_mask = world_ray_dirs[:, 2] < -1e-5
@@ -158,14 +162,13 @@ class LiDARScanner:
             valid_g = downward_mask.copy()
             valid_g[downward_mask] = (t_ground >= self.min_range) & (t_ground < closest_dist[downward_mask])
             closest_dist[valid_g] = t_ground[valid_g[downward_mask]]
-            hit_obstacle_id[valid_g] = "GROUND"
-            hit_normals[valid_g] = [0.0, 0.0, 1.0]
+            is_ground[valid_g] = True
 
         # 2. Obstacles intersection (Vectorized Ray-AABB slab test)
         if active_obstacles:
             safe_dirs = np.where(np.abs(world_ray_dirs) > 1e-7, world_ray_dirs, 1e-7)
             inv_dirs = 1.0 / safe_dirs
-            for obs in active_obstacles:
+            for idx, obs in enumerate(active_obstacles):
                 min_pt = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
                 max_pt = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
                 if min_pt is None or max_pt is None:
@@ -177,24 +180,38 @@ class LiDARScanner:
                 hits = (t_max >= np.maximum(0.0, t_min)) & (t_min < closest_dist) & (t_min >= self.min_range)
                 if np.any(hits):
                     closest_dist[hits] = t_min[hits]
-                    hit_obstacle_id[hits] = obs.id
-                    hit_pts = pos + world_ray_dirs[hits] * t_min[hits, np.newaxis]
-                    center = (min_pt + max_pt) * 0.5
-                    extent = (max_pt - min_pt) * 0.5
-                    norm_diff = (hit_pts - center) / np.maximum(1e-4, extent)
-                    dominant_axis = np.argmax(np.abs(norm_diff), axis=1)
-                    normals = np.zeros_like(hit_pts)
-                    for idx, axis in enumerate(dominant_axis):
-                        normals[idx, axis] = np.sign(norm_diff[idx, axis])
-                    hit_normals[hits] = normals
+                    hit_obs_idx[hits] = idx
+                    is_ground[hits] = False
 
-        # 3. Assemble point cloud returns
-        valid_indices = np.where((closest_dist < self.max_range) & (hit_obstacle_id != None))[0]
+        # 3. Assemble point cloud returns with deferred normal computation
+        valid_mask = (closest_dist < self.max_range) & (is_ground | (hit_obs_idx >= 0))
+        valid_indices = np.where(valid_mask)[0]
         if len(valid_indices) > 0:
             dists = closest_dist[valid_indices]
             dirs = world_ray_dirs[valid_indices]
-            normals = hit_normals[valid_indices]
-            obs_ids = hit_obstacle_id[valid_indices]
+            obs_indices = hit_obs_idx[valid_indices]
+            ground_hits = is_ground[valid_indices]
+
+            normals = np.zeros((len(valid_indices), 3), dtype=np.float64)
+            normals[ground_hits, 2] = 1.0
+
+            # Analytical surface normal calculation: exact entry face from ray-AABB intersection
+            obs_mask = (obs_indices >= 0)
+            if np.any(obs_mask):
+                obs_inv = inv_dirs[valid_indices[obs_mask]]
+                obs_dirs = dirs[obs_mask]
+                for u_idx in np.unique(obs_indices[obs_mask]):
+                    u_obs = active_obstacles[u_idx]
+                    min_p = getattr(u_obs, "min_pt", getattr(u_obs, "min_bound", None))
+                    max_p = getattr(u_obs, "max_pt", getattr(u_obs, "max_bound", None))
+                    sub_sel = (obs_indices[obs_mask] == u_idx)
+                    t1 = (min_p - pos) * obs_inv[sub_sel]
+                    t2 = (max_p - pos) * obs_inv[sub_sel]
+                    t_near_sub = np.minimum(t1, t2)
+                    axis_sub = np.argmax(t_near_sub, axis=1)
+                    sub_normals = np.zeros_like(t_near_sub)
+                    sub_normals[np.arange(len(axis_sub)), axis_sub] = -np.sign(obs_dirs[sub_sel, axis_sub])
+                    normals[np.where(obs_mask)[0][sub_sel]] = sub_normals
 
             # Add range measurement noise
             if self.range_noise_std > 0:
@@ -208,6 +225,12 @@ class LiDARScanner:
             range_factor = np.maximum(0.2, 1.0 - (dists / self.max_range) * 0.5)
             intensities = np.minimum(1.0, cos_incidence * range_factor)
 
+            active_obs_ids = [str(getattr(obs, "id", "OBS")) for obs in active_obstacles]
+            obs_id_strings = [
+                "GROUND" if ground_hits[i] else active_obs_ids[obs_indices[i]]
+                for i in range(len(valid_indices))
+            ]
+
             for i in range(len(valid_indices)):
                 scan.points.append(
                     LiDARPoint(
@@ -216,9 +239,10 @@ class LiDARScanner:
                         z=float(hit_positions[i, 2]),
                         range_m=float(dists[i]),
                         intensity=float(intensities[i]),
-                        obstacle_id=str(obs_ids[i]),
+                        obstacle_id=obs_id_strings[i],
                     )
                 )
+            scan._pts_array = np.column_stack([np.round(hit_positions, 2), np.round(intensities, 2)])
 
         return scan
 
@@ -284,7 +308,10 @@ class OccupancyGridMap3D:
         # Sparse dictionary of active voxels keyed by (ix, iy, iz)
         self.voxels: Dict[Tuple[int, int, int], VoxelNode] = {}
         self.total_surveyed_points: int = 0
-        self.accumulated_hits: List[Tuple[float, float, float, float]] = []
+        self.accumulated_hits: deque = deque(maxlen=100000)
+        # Multi-UAV collaborative point storage & spatial mapping
+        self.drone_points: Dict[str, deque] = {}
+        self.spatial_point_map: Dict[Tuple[int, int, int], Tuple[float, float, float, float, str]] = {}
 
     def world_to_grid(self, pt: np.ndarray) -> Tuple[int, int, int]:
         """Maps 3D world coordinates [x, y, z] to discrete integer grid indices."""
@@ -310,59 +337,88 @@ class OccupancyGridMap3D:
             and self.bounds_z[0] <= pt[2] <= self.bounds_z[1]
         )
 
-    def insert_scan(self, scan: LiDARScan, max_traversal_steps: int = 6) -> None:
+    def insert_scan(self, scan: LiDARScan, max_traversal_steps: int = 4) -> None:
         """
-        Integrates a LiDAR scan into the 3D occupancy map using log-odds updates.
-        Free space voxels along the ray are decremented; hit endpoints are incremented.
+        Integrates an individual UAV LiDAR scan into the 3D occupancy map and collaborative point cloud.
+        Records 3D hits from this drone into the fused spatial structure map.
+        Free space voxels along rays are cleared; hit endpoints are incremented.
         """
         origin = scan.sensor_origin
         if not self.is_in_bounds(origin):
             return
 
         self.total_surveyed_points += len(scan.points)
+        drone_id = scan.drone_id or "UNKNOWN"
+        if drone_id not in self.drone_points:
+            self.drone_points[drone_id] = deque(maxlen=25000)
+        d_deque = self.drone_points[drone_id]
+
+        inv = self.inv_voxel_size
+        vsz = self.voxel_size
+        bx, by, bz = self.bounds_x, self.bounds_y, self.bounds_z
 
         for pt in scan.points:
-            hit_world = np.array([pt.x, pt.y, pt.z], dtype=np.float64)
-            if not self.is_in_bounds(hit_world):
+            px, py, pz, p_int = pt.x, pt.y, pt.z, pt.intensity
+            if not (bx[0] <= px <= bx[1] and by[0] <= py <= by[1] and bz[0] <= pz <= bz[1]):
                 continue
 
-            if len(self.accumulated_hits) < 100000:
-                self.accumulated_hits.append((float(pt.x), float(pt.y), float(pt.z), float(pt.intensity)))
+            pt_tuple = (float(px), float(py), float(pz), float(p_int))
 
-            # 1. Update Hit Voxel
-            hit_key = self.world_to_grid(hit_world)
-            if hit_key not in self.voxels:
-                self.voxels[hit_key] = VoxelNode(
+            # 1. Deduplicated Spatial Point Cloud Map for 3D City & Structures
+            # 0.8m spatial bins preserve sharp building facades, rooftops, rubble, and towers
+            sp_key = (int(round(px * 1.25)), int(round(py * 1.25)), int(round(pz * 1.25)))
+            self.spatial_point_map[sp_key] = (float(px), float(py), float(pz), float(p_int), drone_id)
+
+            # 2. Accumulated hits for backwards compatibility with test fixtures
+            self.accumulated_hits.append(pt_tuple)
+
+            # Per-drone point tracking (bound to 25,000 points per drone with O(1) deque)
+            d_deque.append(pt_tuple)
+
+            # 3. Update Hit Voxel in 3D Occupancy Grid
+            hit_key = (int(math.floor(px * inv)), int(math.floor(py * inv)), int(math.floor(pz * inv)))
+            voxel = self.voxels.get(hit_key)
+            if voxel is None:
+                c = np.array([(hit_key[0] + 0.5) * vsz, (hit_key[1] + 0.5) * vsz, (hit_key[2] + 0.5) * vsz], dtype=np.float64)
+                voxel = VoxelNode(
                     ix=hit_key[0],
                     iy=hit_key[1],
                     iz=hit_key[2],
-                    center=self.grid_to_world(hit_key),
+                    center=c,
                     log_odds=0.0
                 )
-            voxel = self.voxels[hit_key]
+                self.voxels[hit_key] = voxel
             voxel.log_odds = min(self.l_max, max(self.l_min, voxel.log_odds + self.l_occ))
 
-            # 2. Sample Free-Space Voxels along ray (Bresenham / coarse ray-march)
-            ray_vec = hit_world - origin
-            dist = float(np.linalg.norm(ray_vec))
-            if dist > self.voxel_size:
-                step_size = self.voxel_size * 2.0
-                num_steps = min(max_traversal_steps, int(dist / step_size))
-                for s in range(1, num_steps):
-                    sample_pt = origin + ray_vec * (s * step_size / dist)
-                    free_key = self.world_to_grid(sample_pt)
-                    if free_key == hit_key:
-                        break
-                    if free_key not in self.voxels:
-                        self.voxels[free_key] = VoxelNode(
-                            ix=free_key[0],
-                            iy=free_key[1],
-                            iz=free_key[2],
-                            center=self.grid_to_world(free_key),
-                            log_odds=0.0
-                        )
-                    free_vox = self.voxels[free_key]
-                    free_vox.log_odds = min(self.l_max, max(self.l_min, free_vox.log_odds + self.l_free))
+        # 4. Fast Free-Space Ray-Marching (sampled along rays for rapid clearance)
+        # Sample every 8th ray to clear air corridors with zero CPU stutter
+        if scan.points:
+            hit_world_pts = np.array([[p.x, p.y, p.z] for p in scan.points[::8]], dtype=np.float64)
+            if len(hit_world_pts) > 0:
+                ray_vecs = hit_world_pts - origin
+                dists = np.linalg.norm(ray_vecs, axis=1)
+                step_size = vsz * 2.5
+                for idx in range(len(hit_world_pts)):
+                    d = float(dists[idx])
+                    if d <= vsz:
+                        continue
+                    num_steps = min(max_traversal_steps, int(d / step_size))
+                    r_vec = ray_vecs[idx]
+                    for s in range(1, num_steps):
+                        sample_pt = origin + r_vec * (s * step_size / d)
+                        free_key = (int(math.floor(sample_pt[0] * inv)), int(math.floor(sample_pt[1] * inv)), int(math.floor(sample_pt[2] * inv)))
+                        free_vox = self.voxels.get(free_key)
+                        if free_vox is None:
+                            c = np.array([(free_key[0] + 0.5) * vsz, (free_key[1] + 0.5) * vsz, (free_key[2] + 0.5) * vsz], dtype=np.float64)
+                            free_vox = VoxelNode(
+                                ix=free_key[0],
+                                iy=free_key[1],
+                                iz=free_key[2],
+                                center=c,
+                                log_odds=0.0
+                            )
+                            self.voxels[free_key] = free_vox
+                        free_vox.log_odds = min(self.l_max, max(self.l_min, free_vox.log_odds + self.l_free))
 
     def get_occupied_voxels(self, max_count: int = 1500) -> List[Dict[str, Any]]:
         """
@@ -370,7 +426,7 @@ class OccupancyGridMap3D:
         """
         occupied = []
         for key, v in self.voxels.items():
-            if v.is_occupied:
+            if v.log_odds >= 0.619:
                 occupied.append({
                     "pos": [round(float(c), 2) for c in v.center],
                     "prob": round(float(v.occupancy_prob), 2),
@@ -382,9 +438,14 @@ class OccupancyGridMap3D:
 
     def compute_metrics(self) -> Dict[str, float]:
         """Calculates quantitative SLAM mapping metrics for analytics and reporting."""
-        occupied_count = sum(1 for v in self.voxels.values() if v.is_occupied)
-        free_count = sum(1 for v in self.voxels.values() if v.is_free)
         total_cells = len(self.voxels)
+        occupied_count = 0
+        free_count = 0
+        for v in self.voxels.values():
+            if v.log_odds >= 0.619:
+                occupied_count += 1
+            elif v.log_odds <= -0.619:
+                free_count += 1
 
         voxel_vol = self.voxel_size ** 3
         mapped_volume_m3 = total_cells * voxel_vol
@@ -407,21 +468,43 @@ class OccupancyGridMap3D:
             "coverage_pct": round(float(coverage_pct), 1),
         }
 
-    def export_point_cloud_ply(self, filename: Optional[str] = None) -> str:
+    def export_point_cloud_ply(
+        self,
+        filename: Optional[str] = None,
+        drones: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Exports the 3D LiDAR SLAM Point Cloud in Stanford ASCII PLY format.
         Universally compatible with CloudCompare, Blender (Stanford PLY Importer),
         MeshLab, and Open3D.
         Points are colored by altitude (Z) with reflection intensity values.
+
+        Combines point cloud data from all individual drones to 3D map the city
+        and structures.
         """
         points: List[Tuple[float, float, float, float]] = []
-        if hasattr(self, "accumulated_hits") and self.accumulated_hits:
-            points = self.accumulated_hits[-65000:]
-        else:
-            for v in self.voxels.values():
-                if v.is_occupied:
-                    c = v.center
-                    points.append((float(c[0]), float(c[1]), float(c[2]), float(v.occupancy_prob)))
+        contributing_drones: List[str] = []
+
+        # 1. Combine points directly from individual drones if provided
+        if drones:
+            for d_id, drone in drones.items():
+                d_pts = getattr(drone, "scanned_points", [])
+                if d_pts:
+                    contributing_drones.append(f"{d_id} ({len(d_pts)} pts)")
+                    points.extend(d_pts)
+
+        # 2. If drones not provided or empty, combine from spatial map or accumulated hits
+        if not points:
+            if hasattr(self, "spatial_point_map") and self.spatial_point_map:
+                points = [(p[0], p[1], p[2], p[3]) for p in self.spatial_point_map.values()]
+                contributing_drones = [f"{d_id} ({len(pts)} pts)" for d_id, pts in self.drone_points.items() if pts]
+            elif hasattr(self, "accumulated_hits") and self.accumulated_hits:
+                points = list(self.accumulated_hits)[-65000:]
+            else:
+                for v in self.voxels.values():
+                    if v.is_occupied:
+                        c = v.center
+                        points.append((float(c[0]), float(c[1]), float(c[2]), float(v.occupancy_prob)))
 
         # Fallback if no scans yet: generate baseline terrain points
         if not points:
@@ -429,10 +512,20 @@ class OccupancyGridMap3D:
                 for y in np.linspace(-250.0, 250.0, 40):
                     points.append((float(x), float(y), 0.0, 0.5))
 
+        # Cap points to 100,000 for fast export while preserving complete city coverage
+        if len(points) > 100000:
+            step = max(1, len(points) // 100000)
+            points = points[::step][:100000]
+
         lines = [
             "ply",
             "format ascii 1.0",
             "comment UAV Swarm Autonomous SLAM LiDAR Point Cloud",
+            "comment Net 3D City & Structural Map Combined from All Individual Drone Sensors",
+        ]
+        if contributing_drones:
+            lines.append(f"comment Contributing UAVs: {', '.join(contributing_drones[:16])}")
+        lines.extend([
             f"element vertex {len(points)}",
             "property float x",
             "property float y",
@@ -442,7 +535,7 @@ class OccupancyGridMap3D:
             "property uchar blue",
             "property float intensity",
             "end_header",
-        ]
+        ])
 
         z_vals = [p[2] for p in points]
         z_min = min(z_vals) if z_vals else 0.0
@@ -470,7 +563,11 @@ class OccupancyGridMap3D:
 
         return ply_data
 
-    def export_point_cloud_las(self, filename: Optional[str] = None) -> bytes:
+    def export_point_cloud_las(
+        self,
+        filename: Optional[str] = None,
+        drones: Optional[Dict[str, Any]] = None,
+    ) -> bytes:
         """
         Exports the 3D LiDAR SLAM Point Cloud in ASPRS LAS 1.2 Binary format.
         Compatible with CloudCompare, PDAL, QGIS, ArcGIS, and civil survey packages.
@@ -479,18 +576,31 @@ class OccupancyGridMap3D:
         import struct
 
         points: List[Tuple[float, float, float, float]] = []
-        if hasattr(self, "accumulated_hits") and self.accumulated_hits:
-            points = self.accumulated_hits[-65000:]
-        else:
-            for v in self.voxels.values():
-                if v.is_occupied:
-                    c = v.center
-                    points.append((float(c[0]), float(c[1]), float(c[2]), float(v.occupancy_prob)))
+        if drones:
+            for d_id, drone in drones.items():
+                d_pts = getattr(drone, "scanned_points", [])
+                if d_pts:
+                    points.extend(d_pts)
+
+        if not points:
+            if hasattr(self, "spatial_point_map") and self.spatial_point_map:
+                points = [(p[0], p[1], p[2], p[3]) for p in self.spatial_point_map.values()]
+            elif hasattr(self, "accumulated_hits") and self.accumulated_hits:
+                points = self.accumulated_hits[-65000:]
+            else:
+                for v in self.voxels.values():
+                    if v.is_occupied:
+                        c = v.center
+                        points.append((float(c[0]), float(c[1]), float(c[2]), float(v.occupancy_prob)))
 
         if not points:
             for x in np.linspace(-250.0, 250.0, 40):
                 for y in np.linspace(-250.0, 250.0, 40):
                     points.append((float(x), float(y), 0.0, 0.5))
+
+        if len(points) > 100000:
+            step = max(1, len(points) // 100000)
+            points = points[::step][:100000]
 
         num_points = len(points)
         x_vals = [p[0] for p in points]

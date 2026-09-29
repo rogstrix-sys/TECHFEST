@@ -78,11 +78,11 @@ let lastManualSendTime = 0;
 let sceneSLAM, cameraSLAM, rendererSLAM, controlsSLAM;
 let slamDroneMesh = null;
 let lidarPointsMesh = null;
-const maxLidarPts = 25000;
+const maxLidarPts = 60000;
 let lidarWriteIndex = 0;
 let lidarTotalStored = 0;
 let activeLidarColormap = "turbo"; // "turbo", "intensity", "cyber"
-let isTheaterLidarActive = true;
+let isTheaterLidarActive = false;
 let theaterLidarPointsMesh = null;
 let voxelMeshGroup = null;
 let voxelInstancedMesh = null;
@@ -283,25 +283,6 @@ function initTheaterViewport() {
 
     // 8. Particle Systems
     initParticleSystems();
-
-    // 8b. 3D LiDAR Point Cloud Overlay in Theater Viewport
-    const theaterLidarGeo = new THREE.BufferGeometry();
-    const theaterLidarPositions = new Float32Array(maxLidarPts * 3);
-    const theaterLidarColors = new Float32Array(maxLidarPts * 3);
-    theaterLidarGeo.setAttribute('position', new THREE.BufferAttribute(theaterLidarPositions, 3));
-    theaterLidarGeo.setAttribute('color', new THREE.BufferAttribute(theaterLidarColors, 3));
-    const theaterLidarMat = new THREE.PointsMaterial({
-        size: 3.6,
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.85,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-    });
-    theaterLidarPointsMesh = new THREE.Points(theaterLidarGeo, theaterLidarMat);
-    theaterLidarPointsMesh.geometry.setDrawRange(0, 0);
-    theaterLidarPointsMesh.visible = isTheaterLidarActive;
-    sceneTheater.add(theaterLidarPointsMesh);
 
     // 8b. Swarm Tactical Formation Lattice Overlay
     const MAX_FORMATION_SEGMENTS = 64;
@@ -1068,8 +1049,11 @@ function createQuadcopterMesh(role) {
     laserCone.position.set(0, 0, -6.0);
     droneGroup.add(laserCone);
 
-    // Ground Drop Laser Line & Ground Footprint Reticle (shown only for active/selected drone)
-    const altLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+    // Ground Drop Laser Line & Ground Footprint Reticle (Zero-allocation pre-allocated typed buffer)
+    const altLineGeo = new THREE.BufferGeometry();
+    const altPositions = new Float32Array(6);
+    altPositions[5] = -1.0;
+    altLineGeo.setAttribute('position', new THREE.BufferAttribute(altPositions, 3));
     const altLineMat = new THREE.LineDashedMaterial({
         color: primaryColor,
         dashSize: 1.5,
@@ -1108,9 +1092,13 @@ function createQuadcopterMesh(role) {
     droneGroup.searchLight = searchLight;
     droneSearchlights.push(searchLight);
 
-    // Dynamic Motion Interpolation Targets (60-144 FPS smooth animation)
+    // Dynamic Motion Interpolation Targets with Velocity Dead Reckoning (60-144 FPS smooth animation)
     droneGroup.targetPosition = new THREE.Vector3();
     droneGroup.targetQuaternion = new THREE.Quaternion();
+    droneGroup.basePosition = new THREE.Vector3();
+    droneGroup.velocity = new THREE.Vector3();
+    droneGroup.predictedPosition = new THREE.Vector3();
+    droneGroup.lastPacketTime = performance.now();
     droneGroup.hasInitialPose = false;
 
     return droneGroup;
@@ -1408,10 +1396,12 @@ function initSLAMViewport() {
     });
     lidarPointsMesh = new THREE.Points(lidarGeo, lidarMat);
     lidarPointsMesh.geometry.setDrawRange(0, 0);
+    lidarPointsMesh.visible = true;
     sceneSLAM.add(lidarPointsMesh);
 
     // 8. 3D Occupancy Voxel Instanced Mesh (Ultra-Fast 60-144 FPS Hardware Acceleration)
     voxelMeshGroup = new THREE.Group();
+    voxelMeshGroup.visible = true;
     sceneSLAM.add(voxelMeshGroup);
 
     const voxelGeo = new THREE.BoxGeometry(1.0, 1.0, 1.0);
@@ -1423,6 +1413,7 @@ function initSLAMViewport() {
     voxelInstancedMesh = new THREE.InstancedMesh(voxelGeo, voxelMat, maxInstancedVoxels);
     voxelInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     voxelInstancedMesh.count = 0;
+    voxelInstancedMesh.visible = true;
     voxelMeshGroup.add(voxelInstancedMesh);
 
     // 9. Khatib APF Guidance Vector 3D Arrows
@@ -1438,8 +1429,11 @@ function initSLAMViewport() {
     sceneSLAM.add(apfArrowRep);
     sceneSLAM.add(apfArrowNet);
 
-    // 10. Executed Trajectory Trail
+    // 10. Executed Trajectory Trail (Zero-allocation pre-allocated typed buffer)
     const trajGeo = new THREE.BufferGeometry();
+    const trajPositions = new Float32Array(maxTrajectoryPoints * 3);
+    trajGeo.setAttribute('position', new THREE.BufferAttribute(trajPositions, 3));
+    trajGeo.setDrawRange(0, 0);
     const trajMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.85, linewidth: 2 });
     slamTrajectoryLine = new THREE.Line(trajGeo, trajMat);
     sceneSLAM.add(slamTrajectoryLine);
@@ -1483,11 +1477,23 @@ function updateDrones(dronesData) {
         if (!mesh.targetPosition) {
             mesh.targetPosition = new THREE.Vector3();
             mesh.targetQuaternion = new THREE.Quaternion();
+            mesh.basePosition = new THREE.Vector3();
+            mesh.velocity = new THREE.Vector3();
+            mesh.predictedPosition = new THREE.Vector3();
+            mesh.lastPacketTime = performance.now();
             mesh.hasInitialPose = false;
         }
 
-        // Store new target position & attitude quaternion from telemetry packet
-        mesh.targetPosition.set(drone.position[0], drone.position[1], drone.position[2]);
+        // Store new base position, velocity & attitude quaternion from telemetry packet
+        mesh.basePosition.set(drone.position[0], drone.position[1], drone.position[2]);
+        mesh.targetPosition.copy(mesh.basePosition);
+        if (drone.velocity) {
+            mesh.velocity.set(drone.velocity[0], drone.velocity[1], drone.velocity[2]);
+        } else {
+            mesh.velocity.set(0, 0, 0);
+        }
+        mesh.lastPacketTime = performance.now();
+
         if (drone.attitude) {
             const euler = new THREE.Euler(drone.attitude[0], drone.attitude[1], drone.attitude[2], 'XYZ');
             mesh.targetQuaternion.setFromEuler(euler);
@@ -1495,18 +1501,19 @@ function updateDrones(dronesData) {
 
         // Snap to initial pose on first packet or when sitting on ground launch pad
         if (!mesh.hasInitialPose || drone.flight_mode === "IDLE" || drone.flight_mode === "LANDED" || (drone.position && drone.position[2] <= 0.55)) {
-            mesh.position.copy(mesh.targetPosition);
+            mesh.position.copy(mesh.basePosition);
             mesh.quaternion.copy(mesh.targetQuaternion);
             mesh.hasInitialPose = true;
         }
 
-        // 1. Multi-UAV 3D Flight Path Trajectory Ribbons
+        // 1. Multi-UAV 3D Flight Path Trajectory Ribbons (Zero-Allocation In-Place Ring Buffer)
         let trail = droneTrails.get(drone.id);
         if (!trail) {
             const maxTrailPts = 60;
             const trailGeo = new THREE.BufferGeometry();
             const trailPositions = new Float32Array(maxTrailPts * 3);
             trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+            trailGeo.setDrawRange(0, 0);
             const trailMat = new THREE.LineBasicMaterial({
                 color: roleColor,
                 transparent: true,
@@ -1514,30 +1521,35 @@ function updateDrones(dronesData) {
                 depthWrite: false,
             });
             const trailLine = new THREE.Line(trailGeo, trailMat);
-            trail = { line: trailLine, points: [], maxPoints: maxTrailPts };
+            trail = { line: trailLine, coords: [], maxPoints: maxTrailPts };
             sceneTheater.add(trailLine);
             droneTrails.set(drone.id, trail);
         }
 
         if (drone.position[2] > 0.8 && drone.flight_mode !== "IDLE" && drone.flight_mode !== "LANDED") {
-            trail.points.push(new THREE.Vector3(drone.position[0], drone.position[1], drone.position[2]));
-            if (trail.points.length > trail.maxPoints) {
-                trail.points.shift();
+            trail.coords.push(drone.position[0], drone.position[1], drone.position[2]);
+            if (trail.coords.length > trail.maxPoints * 3) {
+                trail.coords.splice(0, 3);
             }
-            trail.line.geometry.setFromPoints(trail.points);
+            const posAttr = trail.line.geometry.attributes.position;
+            if (posAttr) {
+                posAttr.array.set(trail.coords);
+                posAttr.needsUpdate = true;
+                trail.line.geometry.setDrawRange(0, trail.coords.length / 3);
+            }
             trail.line.visible = true;
         } else if (drone.flight_mode === "LANDED" || drone.flight_mode === "IDLE") {
-            trail.points = [];
+            trail.coords = [];
+            trail.line.geometry.setDrawRange(0, 0);
             trail.line.visible = false;
         }
 
-        // 2. 3D Dashed Target Waypoint Projection Vectors
+        // 2. 3D Dashed Target Waypoint Projection Vectors (Zero-Allocation In-Place Buffer)
         let targetLine = targetVectorLines.get(drone.id);
         if (!targetLine) {
-            const targetGeo = new THREE.BufferGeometry().setFromPoints([
-                new THREE.Vector3(0, 0, 0),
-                new THREE.Vector3(0, 0, 0)
-            ]);
+            const targetGeo = new THREE.BufferGeometry();
+            const targetPositions = new Float32Array(6);
+            targetGeo.setAttribute('position', new THREE.BufferAttribute(targetPositions, 3));
             const targetMat = new THREE.LineDashedMaterial({
                 color: roleColor,
                 dashSize: 2.5,
@@ -1552,23 +1564,35 @@ function updateDrones(dronesData) {
         }
 
         if (drone.target_position && drone.position[2] > 1.2 && drone.flight_mode !== "IDLE" && drone.flight_mode !== "LANDED") {
-            const p1 = new THREE.Vector3(drone.position[0], drone.position[1], drone.position[2]);
-            const p2 = new THREE.Vector3(drone.target_position[0], drone.target_position[1], drone.target_position[2]);
-            targetLine.geometry.setFromPoints([p1, p2]);
-            targetLine.computeLineDistances();
+            const posAttr = targetLine.geometry.attributes.position;
+            if (posAttr) {
+                posAttr.array[0] = drone.position[0];
+                posAttr.array[1] = drone.position[1];
+                posAttr.array[2] = drone.position[2];
+                posAttr.array[3] = drone.target_position[0];
+                posAttr.array[4] = drone.target_position[1];
+                posAttr.array[5] = drone.target_position[2];
+                posAttr.needsUpdate = true;
+                targetLine.computeLineDistances();
+            }
             targetLine.visible = true;
         } else {
             targetLine.visible = false;
         }
 
-        // Record trajectory point for focused drone in SLAM view
+        // Record trajectory point for focused drone in SLAM view (Zero-Allocation In-Place Buffer)
         if (drone.id === selectedDroneId) {
-            slamTrajectoryPoints.push(new THREE.Vector3(drone.position[0], drone.position[1], drone.position[2]));
-            if (slamTrajectoryPoints.length > maxTrajectoryPoints) {
-                slamTrajectoryPoints.shift();
+            slamTrajectoryPoints.push(drone.position[0], drone.position[1], drone.position[2]);
+            if (slamTrajectoryPoints.length > maxTrajectoryPoints * 3) {
+                slamTrajectoryPoints.splice(0, 3);
             }
             if (slamTrajectoryLine) {
-                slamTrajectoryLine.geometry.setFromPoints(slamTrajectoryPoints);
+                const posAttr = slamTrajectoryLine.geometry.attributes.position;
+                if (posAttr) {
+                    posAttr.array.set(slamTrajectoryPoints);
+                    posAttr.needsUpdate = true;
+                    slamTrajectoryLine.geometry.setDrawRange(0, slamTrajectoryPoints.length / 3);
+                }
             }
         }
     });
@@ -1814,10 +1838,10 @@ function updateLinks(linksData, routesData, dronesData) {
     const nodeCoords = new Map();
 
     dronesData.forEach(d => {
-        nodeCoords.set(d.id, new THREE.Vector3(...d.position));
+        nodeCoords.set(d.id, d.position);
     });
     // GCS Base Station Radar Mast Receiver (Sector Delta: 0, -145, 26 | Challenge: -75, 0, 16)
-    const gcsCoords = (currentScenario === "challenge") ? new THREE.Vector3(-75, 0, 16) : new THREE.Vector3(0, -145, 26);
+    const gcsCoords = (currentScenario === "challenge") ? [-75, 0, 16] : [0, -145, 26];
     nodeCoords.set("GCS", gcsCoords);
 
     const activeRoutePairs = new Set();
@@ -1855,7 +1879,9 @@ function updateLinks(linksData, routesData, dronesData) {
 
         let line = linkMeshes.get(key);
         if (!line) {
-            const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+            const geo = new THREE.BufferGeometry();
+            const posArr = new Float32Array([p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]]);
+            geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
             const mat = new THREE.LineBasicMaterial({
                 color: linkColor,
                 transparent: true,
@@ -1870,12 +1896,12 @@ function updateLinks(linksData, routesData, dronesData) {
             // Update vertex endpoints dynamically as drones fly
             const posAttr = line.geometry.attributes.position;
             const positions = posAttr.array;
-            positions[0] = p1.x;
-            positions[1] = p1.y;
-            positions[2] = p1.z;
-            positions[3] = p2.x;
-            positions[4] = p2.y;
-            positions[5] = p2.z;
+            positions[0] = p1[0];
+            positions[1] = p1[1];
+            positions[2] = p1[2];
+            positions[3] = p2[0];
+            positions[4] = p2[1];
+            positions[5] = p2[2];
             posAttr.needsUpdate = true;
             line.geometry.computeBoundingSphere();
             line.material.color.setHex(linkColor);
@@ -1962,7 +1988,7 @@ function getTurboRGB(val) {
     return [r, g, b];
 }
 
-// Update 3D LiDAR Point Cloud in SLAM Viewport & Theater Overlay (Persistent Accumulation)
+// Update 3D LiDAR Point Cloud in SLAM Viewport Only (Theater view remains clean)
 function updateLiDAR(scanData) {
     if (!scanData || !lidarPointsMesh) return;
     const pts = scanData.points || [];
@@ -1970,9 +1996,6 @@ function updateLiDAR(scanData) {
 
     const posAttr = lidarPointsMesh.geometry.attributes.position;
     const colAttr = lidarPointsMesh.geometry.attributes.color;
-
-    const theaterPosAttr = theaterLidarPointsMesh ? theaterLidarPointsMesh.geometry.attributes.position : null;
-    const theaterColAttr = theaterLidarPointsMesh ? theaterLidarPointsMesh.geometry.attributes.color : null;
 
     for (let i = 0; i < pts.length; i++) {
         const p = pts[i];
@@ -2007,15 +2030,6 @@ function updateLiDAR(scanData) {
         colAttr.array[idx * 3 + 1] = g;
         colAttr.array[idx * 3 + 2] = b;
 
-        if (theaterPosAttr && theaterColAttr) {
-            theaterPosAttr.array[idx * 3] = p[0];
-            theaterPosAttr.array[idx * 3 + 1] = p[1];
-            theaterPosAttr.array[idx * 3 + 2] = p[2];
-            theaterColAttr.array[idx * 3] = r;
-            theaterColAttr.array[idx * 3 + 1] = g;
-            theaterColAttr.array[idx * 3 + 2] = b;
-        }
-
         lidarWriteIndex = (lidarWriteIndex + 1) % maxLidarPts;
         lidarTotalStored = Math.min(maxLidarPts, lidarTotalStored + 1);
     }
@@ -2023,18 +2037,19 @@ function updateLiDAR(scanData) {
     lidarPointsMesh.geometry.setDrawRange(0, lidarTotalStored);
     posAttr.needsUpdate = true;
     colAttr.needsUpdate = true;
+    lidarPointsMesh.visible = true;
 
-    if (theaterLidarPointsMesh && theaterPosAttr && theaterColAttr) {
-        theaterLidarPointsMesh.geometry.setDrawRange(0, lidarTotalStored);
-        theaterPosAttr.needsUpdate = true;
-        theaterColAttr.needsUpdate = true;
+    // Theater view never displays LiDAR overlay (clean external city diorama)
+    if (theaterLidarPointsMesh) {
+        theaterLidarPointsMesh.geometry.setDrawRange(0, 0);
+        theaterLidarPointsMesh.visible = false;
     }
 
     const elPts = document.getElementById("slam-pts-count");
     if (elPts) elPts.textContent = lidarTotalStored.toLocaleString();
 }
 
-// Update 3D Occupancy Voxel Grid with InstancedMesh Hardware Acceleration
+// Update 3D Occupancy Voxel Grid in SLAM Viewport Only
 function updateOccupancyVoxels(voxelsData, metricsData) {
     if (!voxelInstancedMesh) return;
     const vList = voxelsData || [];
@@ -2060,6 +2075,8 @@ function updateOccupancyVoxels(voxelsData, metricsData) {
     }
 
     voxelInstancedMesh.count = count;
+    voxelInstancedMesh.visible = true;
+    if (voxelMeshGroup) voxelMeshGroup.visible = true;
     voxelInstancedMesh.instanceMatrix.needsUpdate = true;
     if (voxelInstancedMesh.instanceColor) {
         voxelInstancedMesh.instanceColor.needsUpdate = true;
@@ -2084,6 +2101,7 @@ function resetSLAMMap() {
     }
     if (theaterLidarPointsMesh) {
         theaterLidarPointsMesh.geometry.setDrawRange(0, 0);
+        theaterLidarPointsMesh.visible = false;
     }
     if (voxelInstancedMesh) {
         voxelInstancedMesh.count = 0;
@@ -2192,6 +2210,9 @@ function selectDrone(droneId, openPanel = true) {
     if (!droneId) return;
     selectedDroneId = droneId;
     slamTrajectoryPoints = []; // reset trajectory trail for new drone
+    if (slamTrajectoryLine) {
+        slamTrajectoryLine.geometry.setDrawRange(0, 0);
+    }
 
     // Inform server to direct LiDAR scanning to this drone
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -3325,6 +3346,13 @@ function connectWebSocket() {
             if (telemetry.lidar_scan) updateLiDAR(telemetry.lidar_scan);
             if (telemetry.occupied_voxels) updateOccupancyVoxels(telemetry.occupied_voxels, telemetry.mapping_metrics);
             if (telemetry.apf_vectors) updateAPFVectors(telemetry.apf_vectors);
+            if (telemetry.sim_speed !== undefined) {
+                window.activeSimSpeed = parseFloat(telemetry.sim_speed);
+                const selSpd = document.getElementById("select-speed");
+                if (selSpd && Math.abs(parseFloat(selSpd.value) - window.activeSimSpeed) > 0.01) {
+                    selSpd.value = window.activeSimSpeed.toFixed(1);
+                }
+            }
             updateHUD(telemetry);
         } catch (e) {
             console.error("Telemetry parse error", e);
@@ -3461,7 +3489,7 @@ function exportPointCloudPLY() {
             const a = document.createElement("a");
             a.style.display = "none";
             a.href = url;
-            a.download = "UAVX_Disaster_PointCloud.ply";
+            a.download = "UAVX_Net_Combined_City_PointCloud.ply";
             document.body.appendChild(a);
             a.click();
             window.URL.revokeObjectURL(url);
@@ -3740,7 +3768,7 @@ function initUIControls() {
         });
         slamTrajectoryPoints = [];
         if (slamTrajectoryLine) {
-            slamTrajectoryLine.geometry.setFromPoints([]);
+            slamTrajectoryLine.geometry.setDrawRange(0, 0);
         }
         resetSLAMMap();
     });
@@ -3756,9 +3784,16 @@ function initUIControls() {
     // Speed Control
     const selectSpeed = document.getElementById("select-speed");
     selectSpeed.addEventListener("change", (e) => {
+        const val = parseFloat(e.target.value);
+        window.activeSimSpeed = val;
         if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ command: "speed", value: parseFloat(e.target.value) }));
+            socket.send(JSON.stringify({ command: "speed", value: val }));
         }
+        fetch("/api/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command: "speed", value: val })
+        }).catch(() => {});
     });
 
     // Swarm Tactical Formation Selector
@@ -4195,29 +4230,48 @@ function animate() {
     const dt = Math.min((now - lastAnimateTime) * 0.001, 0.1);
     lastAnimateTime = now;
 
-    // Smooth Frame-Rate Independent Drone Motion Interpolation (LERP & SLERP)
-    // Eliminates discrete telemetry step stutter and produces silky-smooth 60-144 FPS continuous flight
-    const lerpFactor = 1.0 - Math.exp(-22.0 * dt);
+    // Smooth Frame-Rate Independent Drone Motion Interpolation with Velocity Dead Reckoning
+    // Extrapolates position continuously along the drone's true flight velocity vector
+    // and smoothly tracks at 60-144 FPS with zero micro-stuttering or pauses between telemetry ticks.
+    const simSpeedMult = window.activeSimSpeed || 1.0;
     droneMeshes.forEach((mesh, id) => {
-        if (mesh.targetPosition) {
+        if (mesh.basePosition) {
+            const elapsedSec = (now - (mesh.lastPacketTime || now)) * 0.001 * simSpeedMult;
+            const clampedElapsed = Math.min(Math.max(0.0, elapsedSec), 0.25);
+            if (mesh.velocity && (mesh.velocity.x !== 0 || mesh.velocity.y !== 0 || mesh.velocity.z !== 0)) {
+                mesh.predictedPosition.copy(mesh.basePosition).addScaledVector(mesh.velocity, clampedElapsed);
+            } else {
+                mesh.predictedPosition.copy(mesh.basePosition);
+            }
+
+            // Critically-damped exponential smoother for ultra-fluid 60+ FPS motion
+            const smoothRate = 18.0;
+            const smoothFactor = 1.0 - Math.exp(-smoothRate * dt);
+            mesh.position.lerp(mesh.predictedPosition, smoothFactor);
+        } else if (mesh.targetPosition) {
+            const lerpFactor = 1.0 - Math.exp(-20.0 * dt);
             mesh.position.lerp(mesh.targetPosition, lerpFactor);
         }
+
         if (mesh.targetQuaternion) {
-            mesh.quaternion.slerp(mesh.targetQuaternion, lerpFactor);
+            const rotFactor = 1.0 - Math.exp(-22.0 * dt);
+            mesh.quaternion.slerp(mesh.targetQuaternion, rotFactor);
         }
 
-        // Keep altitude drop laser line & ground projection reticle in sync with interpolated position
+        // Keep altitude drop laser line & ground projection reticle in sync with interpolated position (Zero-allocation in-place buffer)
         if (mesh.altLine && mesh.reticle && id === selectedDroneId) {
             const pz = mesh.position.z;
             if (pz > 1.2) {
                 mesh.altLine.visible = true;
                 mesh.reticle.visible = true;
                 const localGroundZ = -pz;
-                mesh.altLine.geometry.setFromPoints([
-                    new THREE.Vector3(0, 0, 0),
-                    new THREE.Vector3(0, 0, localGroundZ)
-                ]);
-                mesh.altLine.computeLineDistances();
+                const posAttr = mesh.altLine.geometry.attributes.position;
+                if (posAttr) {
+                    posAttr.array[0] = 0; posAttr.array[1] = 0; posAttr.array[2] = 0;
+                    posAttr.array[3] = 0; posAttr.array[4] = 0; posAttr.array[5] = localGroundZ;
+                    posAttr.needsUpdate = true;
+                    mesh.altLine.computeLineDistances();
+                }
                 mesh.reticle.position.set(0, 0, localGroundZ + 0.05);
             } else {
                 mesh.altLine.visible = false;
@@ -4243,9 +4297,10 @@ function animate() {
         handleManualFPVInput();
     }
 
-    // Spin Propeller Rotors and Blurred Discs
+    // Spin Propeller Rotors and Blurred Discs with high RPM during speed boost
+    const rotorSpinRate = 0.45 * Math.min(3.0, Math.max(1.0, simSpeedMult * 0.7));
     rotorMeshes.forEach(rotor => {
-        rotor.rotation.z += 0.45;
+        rotor.rotation.z += rotorSpinRate;
     });
 
     // Animate FAA / Military LED Navigation Strobes
@@ -4266,7 +4321,7 @@ function animate() {
     // Rotate SLAM LiDAR 360° Sweep Beam
     if (lidarSweepLine && slamDroneMesh) {
         lidarSweepLine.position.copy(slamDroneMesh.position);
-        lidarSweepLine.rotation.z += 0.08;
+        lidarSweepLine.rotation.z += 0.08 * Math.min(2.5, simSpeedMult);
     }
 
     // Wind vector calculation from live telemetry weather
@@ -4280,12 +4335,13 @@ function animate() {
     }
 
     // Update Disaster Smoke Particles (Rising plumes drifting with atmospheric wind)
+    const particleSpeedMult = Math.min(2.5, Math.max(1.0, simSpeedMult * 0.7));
     if (smokeParticles) {
         const pos = smokeParticles.geometry.attributes.position.array;
         const speeds = smokeParticles.speeds;
         const origins = smokeParticles.origins;
         for (let i = 0; i < speeds.length; i++) {
-            pos[i * 3 + 2] += speeds[i];
+            pos[i * 3 + 2] += speeds[i] * particleSpeedMult;
             pos[i * 3] += windVx + (Math.random() - 0.48) * 0.18;
             pos[i * 3 + 1] += windVy + (Math.random() - 0.48) * 0.18;
             if (pos[i * 3 + 2] > 65) {
@@ -4304,7 +4360,7 @@ function animate() {
         const fSpeeds = flameParticles.speeds;
         const fOrigins = flameParticles.origins;
         for (let i = 0; i < fSpeeds.length; i++) {
-            fPos[i * 3 + 2] += fSpeeds[i];
+            fPos[i * 3 + 2] += fSpeeds[i] * particleSpeedMult;
             fPos[i * 3] += (Math.random() - 0.5) * 0.35 + windVx * 0.4;
             fPos[i * 3 + 1] += (Math.random() - 0.5) * 0.35 + windVy * 0.4;
             if (fPos[i * 3 + 2] > 16) {
@@ -4315,7 +4371,7 @@ function animate() {
             }
         }
         flameParticles.geometry.attributes.position.needsUpdate = true;
-        flameParticles.material.opacity = 0.65 + Math.sin(tSec * 16) * 0.25;
+        flameParticles.material.opacity = 0.65 + Math.sin(tSec * 16 * particleSpeedMult) * 0.25;
     }
 
     // Animate Holographic Click-to-Dispatch Waypoint Beacon

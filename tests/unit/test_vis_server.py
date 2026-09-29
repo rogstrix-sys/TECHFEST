@@ -108,3 +108,30 @@ def test_server_scenario_endpoints(client: TestClient):
     assert resp_sd.json()["scenario"] == "sector_delta"
     assert server_manager.scenario == "sector_delta"
 
+
+def test_server_export_point_cloud_endpoints(client: TestClient):
+    """Verify /api/export_point_cloud produces Net Combined PLY/LAS and individual drone PLY."""
+    # 1. Net Combined PLY Export
+    resp_ply = client.get("/api/export_point_cloud?format=ply")
+    assert resp_ply.status_code == 200
+    assert "UAVX_Net_Combined_City_PointCloud.ply" in resp_ply.headers.get("content-disposition", "")
+    assert resp_ply.text.startswith("ply\n")
+    assert "element vertex" in resp_ply.text
+
+    # 2. Net Combined LAS Export
+    resp_las = client.get("/api/export_point_cloud?format=las")
+    assert resp_las.status_code == 200
+    assert "UAVX_Net_Combined_City_PointCloud.las" in resp_las.headers.get("content-disposition", "")
+    assert resp_las.content[:4] == b"LASF"
+
+    # 3. Individual Drone PLY Export
+    resp_drone = client.get("/api/export_point_cloud?format=ply&drone_id=UAV_1")
+    assert resp_drone.status_code == 200
+    assert "UAV_1_PointCloud.ply" in resp_drone.headers.get("content-disposition", "")
+    assert resp_drone.text.startswith("ply\n")
+
+    # 4. Unknown drone ID 404 check
+    resp_404 = client.get("/api/export_point_cloud?format=ply&drone_id=INVALID_UAV_999")
+    assert resp_404.status_code == 404
+
+

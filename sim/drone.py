@@ -9,10 +9,12 @@ and 4-tier altitude corridor deconfliction.
 
 from __future__ import annotations
 
+from collections import deque
 import math
 from typing import Any, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
+from sim.mapping import LiDARScanner
 from sim.sensors import DroneEKF, SensorSuite
 from sim.types import (
     BatteryModel,
@@ -93,6 +95,19 @@ class Drone:
         self.sensor_suite = SensorSuite()
         self.ekf = DroneEKF(initial_position=self.position)
         self.ambient_wind = np.zeros(3, dtype=np.float64)
+
+        # Onboard 3D LiDAR Perception Sensor (Individual per-UAV Payload)
+        # Each drone in the swarm is equipped with its own multi-channel rotating LiDAR sensor
+        self.lidar = LiDARScanner(
+            max_range_m=85.0 if self.role == DroneRole.SURVEY else 95.0,
+            horizontal_fov_deg=360.0,
+            horizontal_resolution_deg=4.0,
+            vertical_fov_deg=(-50.0, 15.0),
+            vertical_channels=24,
+            range_noise_std_m=0.03,
+        )
+        self.scanned_points: deque = deque(maxlen=40000)
+        self.last_scan: Optional[Any] = None
 
     # -------------------------------------------------------------------------
     # Properties & Aliases
@@ -211,6 +226,8 @@ class Drone:
         self.sensor_suite = SensorSuite()
         self.ekf = DroneEKF(initial_position=self.position)
         self.ambient_wind = np.zeros(3, dtype=np.float64)
+        self.scanned_points.clear()
+        self.last_scan = None
 
     # -------------------------------------------------------------------------
     # Attitude Conversion Helpers
@@ -799,3 +816,72 @@ class Drone:
             drafting_leader_id=self.drafting_leader_id,
             drafting_saving_pct=float(self.drafting_saving_pct),
         )
+
+    def perform_lidar_scan(
+        self,
+        obstacles: List[Any],
+        sim_time: float = 0.0,
+    ) -> Any:
+        """
+        Executes a 3D LiDAR sweep from this drone's current position and attitude
+        using its onboard LiDAR sensor. Records point returns into the drone's
+        individual point cloud memory and returns the LiDARScan object.
+        """
+        scan = self.lidar.scan(
+            drone_id=self.id,
+            position=self.position,
+            attitude=self.attitude,
+            obstacles=obstacles,
+            sim_time=sim_time,
+        )
+        self.last_scan = scan
+        # Accumulate scanned points in individual drone buffer (O(1) bounded deque)
+        for pt in scan.points:
+            self.scanned_points.append((float(pt.x), float(pt.y), float(pt.z), float(pt.intensity)))
+        return scan
+
+    def export_point_cloud_ply(self, filename: Optional[str] = None) -> str:
+        """
+        Exports this individual drone's onboard LiDAR point cloud in Stanford ASCII PLY format.
+        """
+        points = self.scanned_points
+        if not points:
+            pos = self.position
+            points = [(float(pos[0]), float(pos[1]), float(pos[2]), 1.0)]
+
+        lines = [
+            "ply",
+            "format ascii 1.0",
+            f"comment UAV {self.id} Onboard LiDAR Point Cloud",
+            f"element vertex {len(points)}",
+            "property float x",
+            "property float y",
+            "property float z",
+            "property uchar red",
+            "property uchar green",
+            "property uchar blue",
+            "property float intensity",
+            "end_header",
+        ]
+        z_vals = [p[2] for p in points]
+        z_min = min(z_vals) if z_vals else 0.0
+        z_max = max(z_vals) if z_vals else 50.0
+        z_range = max(1.0, z_max - z_min)
+
+        for x, y, z, intensity in points:
+            norm_z = (z - z_min) / z_range
+            if norm_z < 0.25:
+                r, g, b = 0, int(255 * (norm_z / 0.25)), 255
+            elif norm_z < 0.5:
+                r, g, b = 0, 255, int(255 * (1.0 - (norm_z - 0.25) / 0.25))
+            elif norm_z < 0.75:
+                r, g, b = int(255 * ((norm_z - 0.5) / 0.25)), 255, 0
+            else:
+                r, g, b = 255, int(255 * (1.0 - (norm_z - 0.75) / 0.25)), 50
+            lines.append(f"{x:.3f} {y:.3f} {z:.3f} {r} {g} {b} {intensity:.2f}")
+
+        ply_str = "\n".join(lines) + "\n"
+        if filename:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(ply_str)
+        return ply_str

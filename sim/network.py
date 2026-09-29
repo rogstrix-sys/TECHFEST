@@ -326,7 +326,22 @@ class FANETNetworkEngine:
                 occ_cnt = 0
                 if dist > 1e-4:
                     dir_vec = diff / dist
+                    seg_min_x = min(p1[0], p2[0])
+                    seg_max_x = max(p1[0], p2[0])
+                    seg_min_y = min(p1[1], p2[1])
+                    seg_max_y = max(p1[1], p2[1])
+                    seg_min_z = min(p1[2], p2[2])
+                    seg_max_z = max(p1[2], p2[2])
+
                     for obs in obstacles:
+                        obs_min = getattr(obs, "min_bound", getattr(obs, "min_pt", None))
+                        obs_max = getattr(obs, "max_bound", getattr(obs, "max_pt", None))
+                        if obs_min is not None and obs_max is not None:
+                            if seg_min_x > obs_max[0] or seg_max_x < obs_min[0] or \
+                               seg_min_y > obs_max[1] or seg_max_y < obs_min[1] or \
+                               seg_min_z > obs_max[2] or seg_max_z < obs_min[2]:
+                                continue
+
                         # Duck-typing with obstacles.py or conftest AABB
                         if hasattr(obs, "intersect_ray_segment"):
                             res = obs.intersect_ray_segment(p1, p2)
