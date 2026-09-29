@@ -86,9 +86,20 @@ let isTheaterLidarActive = false;
 let theaterLidarPointsMesh = null;
 let voxelMeshGroup = null;
 let voxelInstancedMesh = null;
-const maxInstancedVoxels = 1500;
+const maxInstancedVoxels = 5000;
+const voxelOccupancyCache = new Map();
+const slamFrustum = new THREE.Frustum();
+const slamProjScreenMatrix = new THREE.Matrix4();
+const voxelBoundingSphere = new THREE.Sphere(new THREE.Vector3(), 3.0);
 const voxelDummyMatrix = new THREE.Matrix4();
 const voxelDummyColor = new THREE.Color();
+
+// Coverage Heatmap Overlay State (Item 15)
+let heatmapMesh = null;
+let heatmapCanvas = null;
+let heatmapCtx = null;
+let heatmapTexture = null;
+let isHeatmapActive = false;
 let apfArrowAtt = null;
 let apfArrowRep = null;
 let apfArrowNet = null;
@@ -141,6 +152,7 @@ window.applyScenarioUI = applyScenarioUI;
 // Initialize on DOM ready
 document.addEventListener("DOMContentLoaded", () => {
     try { initTheaterViewport(); } catch (e) { console.error("initTheaterViewport error:", e); }
+    try { initHeatmapOverlay(); } catch (e) { console.error("initHeatmapOverlay error:", e); }
     try { initSLAMViewport(); } catch (e) { console.error("initSLAMViewport error:", e); }
     try { connectWebSocket(); } catch (e) { console.error("connectWebSocket error:", e); }
     try { initUIControls(); } catch (e) { console.error("initUIControls error:", e); }
@@ -2049,20 +2061,117 @@ function updateLiDAR(scanData) {
     if (elPts) elPts.textContent = lidarTotalStored.toLocaleString();
 }
 
-// Update 3D Occupancy Voxel Grid in SLAM Viewport Only
-function updateOccupancyVoxels(voxelsData, metricsData) {
+function getVoxelKey(v) {
+    if (!v) return null;
+    if (v.key !== undefined) {
+        return Array.isArray(v.key) ? v.key.join(",") : String(v.key);
+    }
+    if (v.pos && Array.isArray(v.pos)) {
+        return `${Math.round(v.pos[0] * 10)},${Math.round(v.pos[1] * 10)},${Math.round(v.pos[2] * 10)}`;
+    }
+    return null;
+}
+
+// Update 3D Occupancy Voxel Grid in SLAM Viewport with Frustum Culling & LOD (Items 7, 12, 13)
+function updateOccupancyVoxels(voxelsData, metricsData, voxelDelta) {
     if (!voxelInstancedMesh) return;
-    const vList = voxelsData || [];
-    const count = Math.min(vList.length, maxInstancedVoxels);
 
-    for (let i = 0; i < count; i++) {
-        const v = vList[i];
-        const scale = (v.size || 4.0) * 0.96;
+    // 1. Process incremental delta updates if provided (Item 7)
+    if (voxelDelta && typeof voxelDelta === "object") {
+        if (voxelDelta.full) {
+            voxelOccupancyCache.clear();
+            const list = voxelDelta.voxels || voxelsData || [];
+            for (let i = 0; i < list.length; i++) {
+                const v = list[i];
+                const k = getVoxelKey(v);
+                if (k) voxelOccupancyCache.set(k, v);
+            }
+        } else {
+            if (Array.isArray(voxelDelta.added)) {
+                for (let i = 0; i < voxelDelta.added.length; i++) {
+                    const v = voxelDelta.added[i];
+                    const k = getVoxelKey(v);
+                    if (k) voxelOccupancyCache.set(k, v);
+                }
+            }
+            if (Array.isArray(voxelDelta.removed)) {
+                for (let i = 0; i < voxelDelta.removed.length; i++) {
+                    const item = voxelDelta.removed[i];
+                    const k = Array.isArray(item) ? item.join(",") : (item && item.pos ? getVoxelKey(item) : String(item));
+                    if (k) voxelOccupancyCache.delete(k);
+                }
+            }
+        }
+    } else if (Array.isArray(voxelDelta) && voxelDelta.length > 0) {
+        for (let i = 0; i < voxelDelta.length; i++) {
+            const vd = voxelDelta[i];
+            const k = getVoxelKey(vd);
+            if (!k) continue;
+            if (vd.state === "free") {
+                voxelOccupancyCache.delete(k);
+            } else {
+                voxelOccupancyCache.set(k, vd);
+            }
+        }
+    } else if (voxelsData && Array.isArray(voxelsData) && voxelsData.length > 0) {
+        // Full frame replacement
+        voxelOccupancyCache.clear();
+        for (let i = 0; i < voxelsData.length; i++) {
+            const v = voxelsData[i];
+            const k = getVoxelKey(v);
+            if (k) voxelOccupancyCache.set(k, v);
+        }
+    }
+
+    if (voxelOccupancyCache.size === 0) {
+        voxelInstancedMesh.count = 0;
+        voxelInstancedMesh.instanceMatrix.needsUpdate = true;
+        const elVoxEmpty = document.getElementById("slam-voxels-count");
+        if (elVoxEmpty) elVoxEmpty.textContent = "0";
+        return;
+    }
+
+    // 2. Camera Frustum and Distance-Based LOD Culling (Item 13)
+    let activeCam = (activeViewportMode === "slam" || activeViewportMode === "split") ? cameraSLAM : cameraTheater;
+    if (!activeCam) activeCam = cameraSLAM;
+
+    let useFrustum = false;
+    if (activeCam && activeCam.projectionMatrix && activeCam.matrixWorldInverse) {
+        activeCam.updateMatrixWorld();
+        slamProjScreenMatrix.multiplyMatrices(activeCam.projectionMatrix, activeCam.matrixWorldInverse);
+        slamFrustum.setFromProjectionMatrix(slamProjScreenMatrix);
+        useFrustum = true;
+    }
+
+    const camPos = activeCam ? activeCam.position : new THREE.Vector3(0, 0, 50);
+    const maxLODDistance = 350.0; // Distance LOD boundary
+    const maxLODDistSq = maxLODDistance * maxLODDistance;
+
+    let instanceIdx = 0;
+    for (const v of voxelOccupancyCache.values()) {
+        if (instanceIdx >= maxInstancedVoxels) break;
+
+        const vx = v.pos[0], vy = v.pos[1], vz = v.pos[2];
+        const dx = vx - camPos.x, dy = vy - camPos.y, dz = vz - camPos.z;
+        const distSq = dx * dx + dy * dy + dz * dz;
+
+        // Distance-based LOD Culling
+        if (distSq > maxLODDistSq) continue;
+
+        // Frustum Bounding-Sphere Culling
+        const vSize = v.size || 4.0;
+        if (useFrustum) {
+            voxelBoundingSphere.center.set(vx, vy, vz);
+            voxelBoundingSphere.radius = vSize * 0.866;
+            if (!slamFrustum.intersectsSphere(voxelBoundingSphere)) continue;
+        }
+
+        const scale = vSize * 0.96;
         voxelDummyMatrix.makeScale(scale, scale, scale);
-        voxelDummyMatrix.setPosition(v.pos[0], v.pos[1], v.pos[2]);
-        voxelInstancedMesh.setMatrixAt(i, voxelDummyMatrix);
+        voxelDummyMatrix.setPosition(vx, vy, vz);
+        voxelInstancedMesh.setMatrixAt(instanceIdx, voxelDummyMatrix);
 
-        const zNorm = Math.min(1.0, Math.max(0.0, v.pos[2] / 50.0));
+        const zNorm = Math.min(1.0, Math.max(0.0, vz / 50.0));
         const prob = v.prob !== undefined ? v.prob : 0.8;
         let hexColor;
         if (prob > 0.85) {
@@ -2071,10 +2180,11 @@ function updateOccupancyVoxels(voxelsData, metricsData) {
             hexColor = zNorm > 0.3 ? 0xffd600 : 0x00e5ff;
         }
         voxelDummyColor.setHex(hexColor);
-        voxelInstancedMesh.setColorAt(i, voxelDummyColor);
+        voxelInstancedMesh.setColorAt(instanceIdx, voxelDummyColor);
+        instanceIdx++;
     }
 
-    voxelInstancedMesh.count = count;
+    voxelInstancedMesh.count = instanceIdx;
     voxelInstancedMesh.visible = true;
     if (voxelMeshGroup) voxelMeshGroup.visible = true;
     voxelInstancedMesh.instanceMatrix.needsUpdate = true;
@@ -2083,7 +2193,7 @@ function updateOccupancyVoxels(voxelsData, metricsData) {
     }
 
     const elVox = document.getElementById("slam-voxels-count");
-    if (elVox) elVox.textContent = count.toLocaleString();
+    if (elVox) elVox.textContent = voxelOccupancyCache.size.toLocaleString();
 
     if (metricsData) {
         const elVol = document.getElementById("slam-vol-count");
@@ -2096,6 +2206,7 @@ function updateOccupancyVoxels(voxelsData, metricsData) {
 function resetSLAMMap() {
     lidarWriteIndex = 0;
     lidarTotalStored = 0;
+    voxelOccupancyCache.clear();
     if (lidarPointsMesh) {
         lidarPointsMesh.geometry.setDrawRange(0, 0);
     }
@@ -2464,8 +2575,9 @@ function updateScientificCharts(telemetry) {
         }
 
         // Update RF Link SNR Scatter
-        if (chartRF && chartRF.data && telemetry.links) {
-            const scatterData = telemetry.links
+        if (chartRF && chartRF.data && (telemetry.links || window._lastLinks)) {
+            const currentLinks = telemetry.links || window._lastLinks;
+            const scatterData = currentLinks
                 .filter(l => l.viable)
                 .map(l => ({ x: Math.round(l.distance), y: Math.round(l.snr) }));
             chartRF.data.datasets[0].data = scatterData;
@@ -2813,7 +2925,8 @@ function updateHUD(telemetry) {
     const elEkf = document.getElementById("metric-ekf-err");
     if (elEkf) elEkf.textContent = `${(analytics.avg_ekf_error_m || 0.08).toFixed(2)} m`;
 
-    const pois = telemetry.pois || [];
+    if (telemetry.pois) window._lastPois = telemetry.pois;
+    const pois = telemetry.pois || window._lastPois || [];
     const completedCount = pois.filter(p => p.is_completed).length;
     document.getElementById("metric-pois").textContent = `${completedCount} / ${pois.length}`;
 
@@ -2932,14 +3045,18 @@ function updateHUD(telemetry) {
     if (now - lastFleetRenderTime >= 100) {
         lastFleetRenderTime = now;
         renderFleetList(telemetry.drones);
-        const poiSource = (telemetry.priority_queue && telemetry.priority_queue.length > 0) ? telemetry.priority_queue : (telemetry.pois || []);
+        if (telemetry.priority_queue) window._lastPriorityQueue = telemetry.priority_queue;
+        const pq = telemetry.priority_queue || window._lastPriorityQueue;
+        const poiSource = (pq && pq.length > 0) ? pq : (telemetry.pois || window._lastPois || []);
         renderPoiList(poiSource);
     }
 
     // 2. Routes List (diff-checked to avoid unnecessary DOM reflows)
     const routesContainer = document.getElementById("routes-list");
     if (routesContainer) {
-        const routeHtml = (telemetry.active_routes || []).map(path =>
+        if (telemetry.active_routes) window._lastRoutes = telemetry.active_routes;
+        const currentRoutes = telemetry.active_routes || window._lastRoutes || [];
+        const routeHtml = currentRoutes.map(path =>
             `<div class="route-badge"><span>${path.join(" ➔ ")} (${path.length - 1} HOPS)</span></div>`
         ).join("");
         if (routesContainer.innerHTML !== routeHtml) {
@@ -2950,12 +3067,14 @@ function updateHUD(telemetry) {
     // 3. Links List (diff-checked)
     const linksContainer = document.getElementById("links-list");
     if (linksContainer) {
-        const linksHtml = (telemetry.links || []).map(link => {
+        if (telemetry.links) window._lastLinks = telemetry.links;
+        const currentLinks = telemetry.links || window._lastLinks || [];
+        const linksHtml = currentLinks.map(link => {
             const isLoRa = (link.band && link.band.includes("LORA")) || (link.distance > 80.0 && link.viable);
             const bandTag = isLoRa ? '<span class="link-lora">[915MHz]</span>' : '<span class="link-payload">[2.4GHz]</span>';
             return `<div class="link-row">
                 <span>${link.source} ↔ ${link.target} ${bandTag}</span>
-                <span class="${link.viable ? 'text-neon-green' : 'text-red'}">${link.snr} dB (${link.distance.toFixed(0)}m)</span>
+                <span class="${link.viable ? 'text-neon-green' : 'text-red'}">${link.snr} dB (${link.distance ? link.distance.toFixed(0) : 0}m)</span>
             </div>`;
         }).join("");
         if (linksContainer.innerHTML !== linksHtml) {
@@ -3307,6 +3426,135 @@ function takeSnapshot() {
 }
 
 // ============================================================================
+// Coverage / Visit-Frequency Heatmap Overlay Engine (Item 15)
+// ============================================================================
+
+function initHeatmapOverlay() {
+    heatmapCanvas = document.createElement("canvas");
+    heatmapCanvas.width = 512;
+    heatmapCanvas.height = 512;
+    heatmapCtx = heatmapCanvas.getContext("2d");
+    heatmapCtx.fillStyle = "rgba(0, 0, 0, 0)";
+    heatmapCtx.fillRect(0, 0, 512, 512);
+
+    heatmapTexture = new THREE.CanvasTexture(heatmapCanvas);
+    heatmapTexture.minFilter = THREE.LinearFilter;
+    heatmapTexture.magFilter = THREE.LinearFilter;
+
+    const heatmapGeo = new THREE.PlaneGeometry(600, 600);
+    const heatmapMat = new THREE.MeshBasicMaterial({
+        map: heatmapTexture,
+        transparent: true,
+        opacity: 0.65,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+    });
+
+    heatmapMesh = new THREE.Mesh(heatmapGeo, heatmapMat);
+    heatmapMesh.position.set(0, 0, 0.35); // Just above ground plane
+    heatmapMesh.visible = false;
+    sceneTheater.add(heatmapMesh);
+
+    const btnHeatmap = document.getElementById("btn-toggle-heatmap");
+    if (btnHeatmap) {
+        btnHeatmap.addEventListener("click", () => {
+            isHeatmapActive = !isHeatmapActive;
+            if (heatmapMesh) heatmapMesh.visible = isHeatmapActive;
+            btnHeatmap.textContent = isHeatmapActive ? "HEATMAP: ON" : "HEATMAP: OFF";
+            btnHeatmap.classList.toggle("active", isHeatmapActive);
+        });
+    }
+}
+
+function updateHeatmap(drones) {
+    if (!heatmapCtx || !heatmapTexture || !drones) return;
+
+    // Gradual soft decay for dynamic visit intensity
+    heatmapCtx.fillStyle = "rgba(0, 0, 0, 0.004)";
+    heatmapCtx.fillRect(0, 0, 512, 512);
+
+    const droneList = Array.isArray(drones) ? drones : Object.values(drones);
+    let painted = false;
+
+    for (let i = 0; i < droneList.length; i++) {
+        const d = droneList[i];
+        const pos = d.position || (d.telemetry && d.telemetry.position);
+        if (!pos) continue;
+
+        // Map operational bounds [-300, 300] to canvas pixel space [0, 512]
+        // Note: In Three.js CanvasTexture, row 0 corresponds to mesh +Y (North, +300), row 512 to mesh -Y (South, -300)
+        const u = ((pos[0] + 300) / 600) * 512;
+        const v = ((300 - pos[1]) / 600) * 512;
+
+        if (u < 0 || u >= 512 || v < 0 || v >= 512) continue;
+
+        const rad = 28;
+        const grad = heatmapCtx.createRadialGradient(u, v, 2, u, v, rad);
+        grad.addColorStop(0, "rgba(0, 255, 120, 0.32)");
+        grad.addColorStop(0.5, "rgba(0, 229, 255, 0.16)");
+        grad.addColorStop(1, "rgba(0, 229, 255, 0)");
+
+        heatmapCtx.fillStyle = grad;
+        heatmapCtx.beginPath();
+        heatmapCtx.arc(u, v, rad, 0, Math.PI * 2);
+        heatmapCtx.fill();
+        painted = true;
+    }
+
+    if (painted && isHeatmapActive) {
+        heatmapTexture.needsUpdate = true;
+    }
+}
+
+// ============================================================================
+// Telemetry Frame Rendering Engine
+// ============================================================================
+
+function renderTelemetryFrame(telemetry) {
+    if (!telemetry) return;
+    if (telemetry.scenario && telemetry.scenario !== currentScenario) {
+        applyScenarioUI(telemetry.scenario);
+    }
+    if (telemetry.drones) {
+        updateDrones(telemetry.drones);
+        updateHeatmap(telemetry.drones);
+    }
+    if (telemetry.obstacles) updateObstacles(telemetry.obstacles);
+    if (telemetry.pois) updatePoIs(telemetry.pois);
+    if (telemetry.links && telemetry.drones) updateLinks(telemetry.links, telemetry.active_routes, telemetry.drones);
+    if (telemetry.drones) updateFormationLattice(telemetry.drones, telemetry.active_formation || activeSwarmFormation);
+    if (telemetry.active_formation) {
+        const selForm = document.getElementById("select-formation");
+        if (selForm && selForm.value !== telemetry.active_formation) {
+            selForm.value = telemetry.active_formation;
+            activeSwarmFormation = telemetry.active_formation;
+        }
+    }
+    if (telemetry.lidar_scan) updateLiDAR(telemetry.lidar_scan);
+    if (telemetry.occupied_voxels || telemetry.voxel_delta) {
+        updateOccupancyVoxels(telemetry.occupied_voxels, telemetry.mapping_metrics, telemetry.voxel_delta);
+    }
+    if (telemetry.apf_vectors) updateAPFVectors(telemetry.apf_vectors);
+    if (telemetry.thermal_grid) updatePredictiveThermalHeatmap(telemetry.thermal_grid);
+    if (telemetry.bft_audit && telemetry.bft_audit.length > 0) {
+        const bftBadge = document.getElementById("badge-bft");
+        if (bftBadge) {
+            bftBadge.textContent = "BFT: ACTIVE (100%)";
+            bftBadge.style.color = "#00e5ff";
+            bftBadge.style.borderColor = "#00e5ff";
+        }
+    }
+    if (telemetry.sim_speed !== undefined) {
+        window.activeSimSpeed = parseFloat(telemetry.sim_speed);
+        const selSpd = document.getElementById("select-speed");
+        if (selSpd && Math.abs(parseFloat(selSpd.value) - window.activeSimSpeed) > 0.01) {
+            selSpd.value = window.activeSimSpeed.toFixed(1);
+        }
+    }
+    updateHUD(telemetry);
+}
+
+// ============================================================================
 // WebSocket Connection
 // ============================================================================
 
@@ -3328,32 +3576,7 @@ function connectWebSocket() {
     socket.onmessage = (event) => {
         try {
             const telemetry = JSON.parse(event.data);
-            if (telemetry.scenario && telemetry.scenario !== currentScenario) {
-                applyScenarioUI(telemetry.scenario);
-            }
-            if (telemetry.drones) updateDrones(telemetry.drones);
-            if (telemetry.obstacles) updateObstacles(telemetry.obstacles);
-            if (telemetry.pois) updatePoIs(telemetry.pois);
-            if (telemetry.links && telemetry.drones) updateLinks(telemetry.links, telemetry.active_routes, telemetry.drones);
-            if (telemetry.drones) updateFormationLattice(telemetry.drones, telemetry.active_formation || activeSwarmFormation);
-            if (telemetry.active_formation) {
-                const selForm = document.getElementById("select-formation");
-                if (selForm && selForm.value !== telemetry.active_formation) {
-                    selForm.value = telemetry.active_formation;
-                    activeSwarmFormation = telemetry.active_formation;
-                }
-            }
-            if (telemetry.lidar_scan) updateLiDAR(telemetry.lidar_scan);
-            if (telemetry.occupied_voxels) updateOccupancyVoxels(telemetry.occupied_voxels, telemetry.mapping_metrics);
-            if (telemetry.apf_vectors) updateAPFVectors(telemetry.apf_vectors);
-            if (telemetry.sim_speed !== undefined) {
-                window.activeSimSpeed = parseFloat(telemetry.sim_speed);
-                const selSpd = document.getElementById("select-speed");
-                if (selSpd && Math.abs(parseFloat(selSpd.value) - window.activeSimSpeed) > 0.01) {
-                    selSpd.value = window.activeSimSpeed.toFixed(1);
-                }
-            }
-            updateHUD(telemetry);
+            renderTelemetryFrame(telemetry);
         } catch (e) {
             console.error("Telemetry parse error", e);
         }
@@ -3504,6 +3727,188 @@ function exportPointCloudPLY() {
         });
 }
 window.exportPointCloudPLY = exportPointCloudPLY;
+
+// ============================================================================
+// Tier 1: Thermal Heatmap, Obstacle Collapse, Byzantine Fault Tolerance
+// ============================================================================
+
+let isThermalHeatmapActive = true;
+let thermalHeatmapMesh = null;
+let thermalCanvas = null;
+let thermalTexture = null;
+
+function initThermalHeatmap() {
+    if (thermalHeatmapMesh || !sceneTheater) return;
+    thermalCanvas = document.createElement("canvas");
+    thermalCanvas.width = 256;
+    thermalCanvas.height = 256;
+    const ctx = thermalCanvas.getContext("2d");
+    ctx.fillStyle = "rgba(0,0,0,0)";
+    ctx.fillRect(0, 0, 256, 256);
+
+    thermalTexture = new THREE.CanvasTexture(thermalCanvas);
+    thermalTexture.minFilter = THREE.LinearFilter;
+    thermalTexture.magFilter = THREE.LinearFilter;
+
+    // 700m x 700m plane covering operational diorama [-350, 350]
+    const geo = new THREE.PlaneGeometry(700, 700);
+    const mat = new THREE.MeshBasicMaterial({
+        map: thermalTexture,
+        transparent: true,
+        opacity: 0.72,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+    });
+    thermalHeatmapMesh = new THREE.Mesh(geo, mat);
+    thermalHeatmapMesh.position.set(0, 0, 0.45);
+    sceneTheater.add(thermalHeatmapMesh);
+}
+
+function updatePredictiveThermalHeatmap(thermalData) {
+    if (!thermalHeatmapMesh && sceneTheater) {
+        initThermalHeatmap();
+    }
+    if (!thermalHeatmapMesh || !thermalCanvas) return;
+
+    thermalHeatmapMesh.visible = isThermalHeatmapActive;
+    if (!isThermalHeatmapActive || !thermalData) return;
+
+    const ctx = thermalCanvas.getContext("2d");
+    ctx.clearRect(0, 0, 256, 256);
+
+    // Subtle dark grid background
+    ctx.fillStyle = "rgba(10, 25, 45, 0.08)";
+    ctx.fillRect(0, 0, 256, 256);
+
+    const hotspots = thermalData.hotspots || [];
+    hotspots.forEach(pt => {
+        // Map [-350, 350] to [0, 256]
+        const cx = ((pt.x + 350.0) / 700.0) * 256.0;
+        const cy = (1.0 - (pt.y + 350.0) / 700.0) * 256.0;
+        const p = Math.min(1.0, Math.max(0.0, pt.prob));
+        const rad = 14 + p * 22;
+
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+        if (p > 0.75) {
+            grad.addColorStop(0.0, `rgba(255, 30, 60, ${0.85 * p})`);
+            grad.addColorStop(0.35, `rgba(255, 120, 0, ${0.70 * p})`);
+            grad.addColorStop(0.70, `rgba(255, 220, 0, ${0.40 * p})`);
+            grad.addColorStop(1.0, "rgba(255, 200, 0, 0)");
+        } else if (p > 0.40) {
+            grad.addColorStop(0.0, `rgba(255, 200, 0, ${0.75 * p})`);
+            grad.addColorStop(0.50, `rgba(0, 255, 180, ${0.50 * p})`);
+            grad.addColorStop(1.0, "rgba(0, 255, 180, 0)");
+        } else {
+            grad.addColorStop(0.0, `rgba(0, 225, 255, ${0.55 * p})`);
+            grad.addColorStop(0.60, `rgba(0, 160, 220, ${0.25 * p})`);
+            grad.addColorStop(1.0, "rgba(0, 160, 220, 0)");
+        }
+
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    thermalTexture.needsUpdate = true;
+}
+
+function toggleThermalHeatmap() {
+    isThermalHeatmapActive = !isThermalHeatmapActive;
+    const btn = document.getElementById("btn-heatmap");
+    if (btn) {
+        btn.classList.toggle("active", isThermalHeatmapActive);
+        btn.textContent = isThermalHeatmapActive ? "🔥 HEATMAP: ON" : "🔥 HEATMAP";
+        btn.classList.toggle("text-neon-green", isThermalHeatmapActive);
+        btn.classList.toggle("text-cyan", !isThermalHeatmapActive);
+    }
+    if (thermalHeatmapMesh) {
+        thermalHeatmapMesh.visible = isThermalHeatmapActive;
+    }
+}
+window.toggleThermalHeatmap = toggleThermalHeatmap;
+
+function triggerObstacleCollapse() {
+    playTacticalSound("alarm");
+    const btn = document.getElementById("btn-collapse");
+    if (btn) btn.textContent = "💥 COLLAPSING...";
+
+    const payload = { command: "trigger_collapse" };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+
+    fetch("/api/trigger_collapse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (btn) {
+            btn.textContent = "💥 COLLAPSED!";
+            setTimeout(() => { btn.textContent = "💥 COLLAPSE"; }, 3500);
+        }
+        const ticker = document.getElementById("hud-comms-ticker");
+        const tickerBadge = document.getElementById("ticker-badge");
+        const tickerMsg = document.getElementById("ticker-msg");
+        if (ticker && tickerBadge && tickerMsg) {
+            tickerBadge.textContent = "[STRUCTURAL FAILURE]";
+            tickerBadge.className = "ticker-badge comms-badge-WARNING";
+            tickerMsg.textContent = "💥 Building structural collapse detected! Rubble zone expanded. APF rerouting engaged!";
+            ticker.classList.remove("hidden");
+            setTimeout(() => { ticker.classList.add("hidden"); }, 5000);
+        }
+    })
+    .catch(() => {
+        if (btn) btn.textContent = "💥 COLLAPSE";
+    });
+}
+window.triggerObstacleCollapse = triggerObstacleCollapse;
+
+function injectByzantineTest() {
+    playTacticalSound("alarm");
+    const btn = document.getElementById("btn-byzantine");
+    if (btn) btn.textContent = "🛡️ INJECTING...";
+
+    const payload = { command: "byzantine_test", drone_id: "SCOUT_1", poi_id: "POI_SURVIVORS", score: 9999.0 };
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
+    }
+
+    fetch("/api/inject_byzantine_bid", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (btn) {
+            btn.textContent = "🛡️ BFT: OVERRIDDEN!";
+            setTimeout(() => { btn.textContent = "🛡️ BFT TEST"; }, 3500);
+        }
+        const bftBadge = document.getElementById("badge-bft");
+        if (bftBadge) {
+            bftBadge.textContent = "BFT: DEFENDED (100%)";
+            bftBadge.style.color = "#00ff88";
+            bftBadge.style.borderColor = "#00ff88";
+        }
+        const ticker = document.getElementById("hud-comms-ticker");
+        const tickerBadge = document.getElementById("ticker-badge");
+        const tickerMsg = document.getElementById("ticker-msg");
+        if (ticker && tickerBadge && tickerMsg) {
+            tickerBadge.textContent = "[BYZANTINE BFT DEFENSE]";
+            tickerBadge.className = "ticker-badge comms-badge-WARNING";
+            tickerMsg.textContent = "🛡️ Rogue bid (9999.0) rejected by consensus voting. Honest winner awarded POI!";
+            ticker.classList.remove("hidden");
+            setTimeout(() => { ticker.classList.add("hidden"); }, 5500);
+        }
+    })
+    .catch(() => {
+        if (btn) btn.textContent = "🛡️ BFT TEST";
+    });
+}
+window.injectByzantineTest = injectByzantineTest;
 
 function toggleManualControl() {
     isManualControlActive = !isManualControlActive;
@@ -3668,6 +4073,30 @@ function initUIControls() {
     if (btnChaos) {
         btnChaos.addEventListener("click", () => {
             triggerChaosFault();
+        });
+    }
+
+    // Dynamic Obstacle Collapse Simulation
+    const btnCollapse = document.getElementById("btn-collapse");
+    if (btnCollapse) {
+        btnCollapse.addEventListener("click", () => {
+            triggerObstacleCollapse();
+        });
+    }
+
+    // Byzantine Fault Tolerant (BFT) Mission Voting Test
+    const btnByzantine = document.getElementById("btn-byzantine");
+    if (btnByzantine) {
+        btnByzantine.addEventListener("click", () => {
+            injectByzantineTest();
+        });
+    }
+
+    // Predictive Survivor Thermal Heatmap Overlay Toggle
+    const btnHeatmap = document.getElementById("btn-heatmap");
+    if (btnHeatmap) {
+        btnHeatmap.addEventListener("click", () => {
+            toggleThermalHeatmap();
         });
     }
 

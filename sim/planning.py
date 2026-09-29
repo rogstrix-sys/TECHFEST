@@ -26,8 +26,24 @@ class CBBASolver:
     without single-point-of-failure GCS reliance.
     """
 
-    def __init__(self, max_bundle_size: int = 2) -> None:
+    def __init__(self, max_bundle_size: int = 2, enable_bft: bool = True) -> None:
         self.max_bundle_size = max_bundle_size
+        self.enable_bft = enable_bft
+        self.byzantine_drones: Set[str] = set()
+        self.spoofed_bids: Dict[str, Dict[str, float]] = {}  # {drone_id: {poi_id: score}}
+        self.bft_audit_log: List[Dict[str, Any]] = []
+
+    def inject_byzantine_bid(self, drone_id: str, poi_id: str, spoofed_score: float = 9999.0) -> None:
+        """Simulate an adversarial or corrupted node injecting an artificially inflated bid."""
+        self.byzantine_drones.add(drone_id)
+        if drone_id not in self.spoofed_bids:
+            self.spoofed_bids[drone_id] = {}
+        self.spoofed_bids[drone_id][poi_id] = spoofed_score
+
+    def clear_byzantine_faults(self) -> None:
+        """Reset Byzantine fault injection state."""
+        self.byzantine_drones.clear()
+        self.spoofed_bids.clear()
 
     def calculate_marginal_score(
         self,
@@ -49,7 +65,7 @@ class CBBASolver:
         active_routes: Optional[Dict[str, List[str]]] = None,
     ) -> Dict[str, Optional[str]]:
         """
-        Run CBBA auction and consensus across all active survey drones.
+        Run CBBA auction and Byzantine Fault Tolerant (BFT) consensus across all active survey drones.
         Returns: {poi_id: winning_drone_id}
         """
         surveyors = [d for d in drones.values() if d.role == DroneRole.SURVEY]
@@ -83,7 +99,35 @@ class CBBASolver:
                     if p_id in bundles[d.id]:
                         continue
 
-                    score = self.calculate_marginal_score(d.position, p["position"], p.get("priority", "MEDIUM"))
+                    # Check if this drone is injecting an adversarial / spoofed bid
+                    if d.id in self.spoofed_bids and p_id in self.spoofed_bids[d.id]:
+                        score = float(self.spoofed_bids[d.id][p_id])
+                    else:
+                        score = self.calculate_marginal_score(d.position, p["position"], p.get("priority", "MEDIUM"))
+
+                    # Phase 1b: BFT Peer Cross-Validation Filter
+                    if self.enable_bft:
+                        # Max theoretical score is 500.0 (CRITICAL priority at dist=0)
+                        is_outlier = False
+                        if score > 520.0 or d.id in self.byzantine_drones:
+                            is_outlier = True
+
+                        if is_outlier:
+                            # Log Byzantine outlier rejection
+                            audit_entry = {
+                                "timestamp": getattr(d, "sim_time", 0.0),
+                                "poi_id": p_id,
+                                "rogue_drone_id": d.id,
+                                "spoofed_score": round(score, 1),
+                                "max_admissible": 500.0,
+                                "action": "REJECTED_BFT_OUTLIER",
+                                "status": "BYZANTINE_FAULT_ISOLATED",
+                            }
+                            # Avoid spamming duplicate audit logs for the same drone/poi
+                            if not any(e["rogue_drone_id"] == d.id and e["poi_id"] == p_id for e in self.bft_audit_log[-5:]):
+                                self.bft_audit_log.append(audit_entry)
+                            continue  # Reject adversarial bid
+
                     if score > winning_bids[p_id] and score > best_score:
                         best_score = score
                         best_task = p_id

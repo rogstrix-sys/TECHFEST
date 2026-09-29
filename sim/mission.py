@@ -152,6 +152,10 @@ class DisasterMissionManager:
         self.survivors: Dict[str, SurvivorRecord] = {}
         self._survivors_initialized: bool = False
 
+        # Predictive Survivor Thermal Probability Heatmap
+        from sim.mapping import BayesianThermalGrid
+        self.thermal_grid = BayesianThermalGrid(bounds_x=(-350.0, 350.0), bounds_y=(-350.0, 350.0), cell_size=20.0)
+
     def emit_tactical_comms(self, level: str, callsign: str, message: str, category: str = "MISSION") -> None:
         """Log a real-time tactical comms chatter event for visual HUD display."""
         evt = TacticalCommsEvent(
@@ -188,6 +192,9 @@ class DisasterMissionManager:
                     discovered=False,
                 )
                 s_count += 1
+
+        if hasattr(self, "thermal_grid") and self.thermal_grid is not None:
+            self.thermal_grid.seed_priors([poi["position"] for poi in pois.values()])
 
     def get_survivors_telemetry(self) -> Dict[str, Any]:
         """Returns structured survivor counts and discovered locations for HUD and UI."""
@@ -402,6 +409,13 @@ class DisasterMissionManager:
 
         # 5b. Evaluate aerodynamic wake drafting in V-formation corridors
         self._apply_formation_drafting(drones)
+
+        # 5c. Update Predictive Bayesian Thermal Belief Grid with active drone FLIR sweeps
+        if hasattr(self, "thermal_grid") and self.thermal_grid is not None:
+            active_survs = [s.position for s in self.survivors.values() if not s.discovered]
+            for d in drones.values():
+                if d.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.TAKEOFF, FlightMode.RELAY) and d.position[2] > 2.0:
+                    self.thermal_grid.update_flir_scan(d.position, active_survs, fov_radius=55.0)
 
         # 6. Assign available survey drones to pending PoIs in strict priority order
         self._assign_pending_pois(drones, pois)
@@ -719,8 +733,17 @@ class DisasterMissionManager:
 
             for idx, drone in enumerate(available_surveyors):
                 if drone.flight_mode not in (FlightMode.IDLE, FlightMode.TAKEOFF, FlightMode.LANDED):
-                    sec_pt = target_points[(idx + int(self.total_mission_time // 12)) % len(target_points)]
-                    target_pt = np.array(sec_pt, dtype=np.float64).copy()
+                    # Prioritize highest entropy thermal belief hotspot if unvisited
+                    thermal_target = None
+                    if hasattr(self, "thermal_grid") and self.thermal_grid is not None:
+                        thermal_target = self.thermal_grid.get_highest_entropy_target(drone.position)
+
+                    if thermal_target is not None and idx == 0:
+                        target_pt = thermal_target
+                    else:
+                        sec_pt = target_points[(idx + int(self.total_mission_time // 12)) % len(target_points)]
+                        target_pt = np.array(sec_pt, dtype=np.float64).copy()
+
                     if getattr(drone, "cruise_altitude", None) is not None:
                         target_pt[2] = drone.cruise_altitude
                     drone.set_target_waypoint(target_pt)

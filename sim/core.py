@@ -23,6 +23,7 @@ from sim.types import (
     TelemetrySnapshot,
 )
 from sim.weather import DrydenTurbulenceModel, WindConfig
+from sim.swarm_sim import DroneSpatialGrid
 
 
 @dataclass
@@ -40,6 +41,7 @@ class SimulationConfig:
     enable_weather: bool = False                 # Enable Dryden atmospheric wind & turbulence
     wind_config: Optional[WindConfig] = None     # Custom wind/turbulence parameters
     history_buffer_len: int = 600                # Number of telemetry frames to buffer (30s @ 20Hz)
+    enable_spatial_grid: bool = True             # Enable accelerated 3D spatial grid for large swarms
 
 
 class SwarmSimulationCore:
@@ -87,6 +89,10 @@ class SwarmSimulationCore:
         # Event logging
         self.collision_events: List[Dict[str, Any]] = []
         self.flight_events: List[Dict[str, Any]] = []
+
+        # 3D Spatial Grid for accelerated proximity / collision avoidance
+        self.spatial_grid: DroneSpatialGrid = DroneSpatialGrid(cell_size=25.0)
+        self.enable_spatial_grid: bool = getattr(self.config, "enable_spatial_grid", False)
 
     # -------------------------------------------------------------------------
     # Entity Registration
@@ -139,6 +145,82 @@ class SwarmSimulationCore:
         """Attach a high-level disaster survey mission manager (Milestone 3)."""
         self.mission_manager = mission_manager
 
+    def trigger_obstacle_collapse(
+        self,
+        obstacle_id: Optional[str] = None,
+        collapse_ratio: float = 0.45,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Simulate a mid-mission dynamic structural failure of a disaster building.
+        Reduces building height, updates AABB bounds, expands rubble field,
+        and spawns an emergency trapped survivor.
+        """
+        if not self.obstacles:
+            return None
+
+        target_obs = None
+        if obstacle_id:
+            for obs in self.obstacles:
+                if getattr(obs, "id", "") == obstacle_id or getattr(obs, "name", "") == obstacle_id:
+                    target_obs = obs
+                    break
+
+        if target_obs is None:
+            # Default to tall tower (e.g. Damaged Tower Beta or high-rise)
+            candidates = [obs for obs in self.obstacles if getattr(obs, "max_pt", [0, 0, 0])[2] >= 35.0]
+            target_obs = candidates[0] if candidates else self.obstacles[0]
+
+        # Record original bounds
+        old_h = float(target_obs.max_pt[2] - target_obs.min_pt[2])
+        old_max_z = float(target_obs.max_pt[2])
+        new_max_z = round(float(target_obs.min_pt[2] + old_h * (1.0 - collapse_ratio)), 1)
+
+        # Modify AABB geometry in-place so all drones' APF calculations see the update immediately
+        target_obs.max_pt[2] = new_max_z
+        target_obs.min_pt[0] -= 4.0
+        target_obs.max_pt[0] += 4.0
+        target_obs.min_pt[1] -= 4.0
+        target_obs.max_pt[1] += 4.0
+        setattr(target_obs, "is_collapsed", True)
+        if hasattr(self, "network_engine") and hasattr(self.network_engine, "_los_cache"):
+            self.network_engine._los_cache.clear()
+
+        # Notify mission manager if present
+        spawned_survivor = None
+        if self.mission_manager is not None:
+            if hasattr(self.mission_manager, "emit_tactical_comms"):
+                self.mission_manager.emit_tactical_comms(
+                    "WARNING",
+                    "GCS",
+                    f"💥 STRUCTURAL FAILURE: {target_obs.name} collapsed ({int(old_max_z)}m -> {int(new_max_z)}m). Rubble expanded. APF re-routing engaged!",
+                    "COLLAPSE",
+                )
+            if hasattr(self.mission_manager, "survivors"):
+                from sim.types import SurvivorRecord
+                c_x = float(0.5 * (target_obs.min_pt[0] + target_obs.max_pt[0]))
+                c_y = float(0.5 * (target_obs.min_pt[1] + target_obs.max_pt[1]))
+                s_id = f"SURVIVOR_COLLAPSE_{len(self.mission_manager.survivors)+1:02d}"
+                new_surv = SurvivorRecord(
+                    id=s_id,
+                    poi_id="POI_COLLAPSE",
+                    position=[c_x, c_y, 0.5],
+                    heat_c=38.4,
+                    confidence=0.96,
+                    discovered=False,
+                )
+                self.mission_manager.survivors[s_id] = new_surv
+                spawned_survivor = new_surv.to_dict()
+
+        return {
+            "obstacle_id": target_obs.id,
+            "obstacle_name": target_obs.name,
+            "old_height_m": old_h,
+            "new_height_m": round(old_h * (1.0 - collapse_ratio), 1),
+            "new_max_pt": target_obs.max_pt.tolist(),
+            "new_min_pt": target_obs.min_pt.tolist(),
+            "spawned_survivor": spawned_survivor,
+        }
+
     # -------------------------------------------------------------------------
     # Physics & Navigation Steering Calculations
     # -------------------------------------------------------------------------
@@ -178,10 +260,20 @@ class SwarmSimulationCore:
         atten_horizon = max(8.0, r_sep_limit * 1.5)
         atten_barrier = max(2.2, r_sep_limit * 1.1)
 
-        for other_id in sorted(self.drones.keys()):
-            if other_id == drone.id:
-                continue
+        # Determine candidate peer drones for interactions
+        if self.enable_spatial_grid and self.spatial_grid is not None and len(self.drones) >= 8:
+            if getattr(self.spatial_grid, "total_drones", 0) != len(self.drones):
+                self.spatial_grid.build(list(self.drones.values()))
+            peer_candidates = self.spatial_grid.query_nearby_peers(drone, search_radius=max(atten_horizon, 40.0))
+            candidate_ids = sorted([p.id for p in peer_candidates if getattr(p, "id", None) != drone.id])
+        else:
+            candidate_ids = [k for k in sorted(self.drones.keys()) if k != drone.id]
+
+        for other_id in candidate_ids:
             other = self.drones[other_id]
+            # Fast 2D bounding rejection
+            if abs(pos_i[0] - other.position[0]) > atten_horizon or abs(pos_i[1] - other.position[1]) > atten_horizon:
+                continue
             delta = pos_i - other.position
             d_peer = float(np.linalg.norm(delta))
             if 0.0 < d_peer < atten_horizon:
@@ -191,13 +283,22 @@ class SwarmSimulationCore:
                 f_att -= proj * (1.0 - gamma) * (-r_hat)
 
         for obs in self.obstacles:
+            min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
+            max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
+            if min_p is not None and max_p is not None:
+                # Fast axis-aligned distance lower-bound for 10m horizon
+                if (pos_i[0] < min_p[0] - 10.5 or pos_i[0] > max_p[0] + 10.5 or
+                    pos_i[1] < min_p[1] - 10.5 or pos_i[1] > max_p[1] + 10.5 or
+                    pos_i[2] > max_p[2] + 10.5):
+                    continue
+
             if hasattr(obs, "distance_and_closest_point"):
                 dist_o, closest_pt = obs.distance_and_closest_point(pos_i)
-            elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
-                closest_pt = np.clip(pos_i, obs.min_bound, obs.max_bound)
-                dist_o = float(np.linalg.norm(pos_i - closest_pt))
             elif hasattr(obs, "min_pt") and hasattr(obs, "max_pt"):
                 closest_pt = np.clip(pos_i, obs.min_pt, obs.max_pt)
+                dist_o = float(np.linalg.norm(pos_i - closest_pt))
+            elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
+                closest_pt = np.clip(pos_i, obs.min_bound, obs.max_bound)
                 dist_o = float(np.linalg.norm(pos_i - closest_pt))
             else:
                 continue
@@ -217,10 +318,11 @@ class SwarmSimulationCore:
         f_align = np.zeros(3, dtype=np.float64)
         f_downwash = np.zeros(3, dtype=np.float64)
 
-        for other_id in sorted(self.drones.keys()):
-            if other_id == drone.id:
-                continue
+        for other_id in candidate_ids:
             other = self.drones[other_id]
+            # Fast 2D bounding rejection (max separation horizon is 25m)
+            if abs(pos_i[0] - other.position[0]) > 25.0 or abs(pos_i[1] - other.position[1]) > 25.0:
+                continue
             delta = pos_i - other.position
             dist = float(np.linalg.norm(delta))
 
@@ -276,13 +378,22 @@ class SwarmSimulationCore:
         # 3. Obstacle repulsion forces
         f_obs = np.zeros(3, dtype=np.float64)
         for obs in self.obstacles:
+            min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
+            max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
+            if min_p is not None and max_p is not None:
+                # Fast axis-aligned distance lower-bound (max dynamic sensing horizon is 35m)
+                if (pos_i[0] < min_p[0] - 35.0 or pos_i[0] > max_p[0] + 35.0 or
+                    pos_i[1] < min_p[1] - 35.0 or pos_i[1] > max_p[1] + 35.0 or
+                    pos_i[2] > max_p[2] + 35.0):
+                    continue
+
             if hasattr(obs, "distance_and_closest_point"):
                 dist_obs, closest_pt = obs.distance_and_closest_point(pos_i)
-            elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
-                closest_pt = np.clip(pos_i, obs.min_bound, obs.max_bound)
-                dist_obs = float(np.linalg.norm(pos_i - closest_pt))
             elif hasattr(obs, "min_pt") and hasattr(obs, "max_pt"):
                 closest_pt = np.clip(pos_i, obs.min_pt, obs.max_pt)
+                dist_obs = float(np.linalg.norm(pos_i - closest_pt))
+            elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
+                closest_pt = np.clip(pos_i, obs.min_bound, obs.max_bound)
                 dist_obs = float(np.linalg.norm(pos_i - closest_pt))
             else:
                 continue
@@ -532,6 +643,10 @@ class SwarmSimulationCore:
             self.update_vsm_relay_setpoints()
         else:
             self.update_formation_setpoints()
+
+        # Update spatial grid for accelerated proximity queries
+        if self.spatial_grid is not None:
+            self.spatial_grid.build(list(self.drones.values()))
 
         # Phase 2: Compute steering forces (double-buffered) and advance physics
         forces = {}
@@ -891,7 +1006,12 @@ class SwarmSimulationCore:
         else:
             return False
 
-        drone.set_target_waypoint(target)
+        if hasattr(drone, "set_waypoint_path"):
+            curr_pos = drone.position
+            mid_pt = 0.5 * (curr_pos + target) + np.array([0.0, 0.0, 2.0], dtype=np.float64)
+            drone.set_waypoint_path([curr_pos, mid_pt, target], smooth=True)
+        else:
+            drone.set_target_waypoint(target)
         if drone.flight_mode in (FlightMode.IDLE, FlightMode.LANDED):
             drone.flight_mode = FlightMode.TAKEOFF
         elif drone.flight_mode != FlightMode.TAKEOFF:

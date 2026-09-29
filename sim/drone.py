@@ -15,6 +15,7 @@ from typing import Any, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from sim.mapping import LiDARScanner
+from sim.physics import OrnsteinUhlenbeckWind
 from sim.sensors import DroneEKF, SensorSuite
 from sim.types import (
     BatteryModel,
@@ -109,6 +110,17 @@ class Drone:
         self.scanned_points: deque = deque(maxlen=40000)
         self.last_scan: Optional[Any] = None
 
+        # Stochastic Aerodynamic Wind & Turbulence Model
+        self.wind_model: Optional[OrnsteinUhlenbeckWind] = None
+
+        # Autonomous Failsafe & Actuator Glitch State
+        self.actuator_glitch: bool = False
+        self.actuator_glitch_severity: float = 0.0
+
+        # Trajectory & Heading Smoothing
+        self.waypoint_queue: deque = deque()
+        self.target_yaw_filtered: float = float(self.attitude[2])
+
     # -------------------------------------------------------------------------
     # Properties & Aliases
     # -------------------------------------------------------------------------
@@ -197,6 +209,88 @@ class Drone:
         self.is_fault_injected = True
         self.flight_mode = FlightMode.EMERGENCY_LAND
 
+    def simulate_actuator_glitch(self, severity: float = 0.5) -> None:
+        """
+        Simulates an actuator / motor glitch or partial rotor failure.
+        Autonomous onboard diagnostics detect asymmetric thrust loss and engage failsafe.
+        """
+        self.actuator_glitch = True
+        self.actuator_glitch_severity = float(np.clip(severity, 0.1, 1.0))
+        if self.flight_mode not in (FlightMode.LANDED, FlightMode.LANDING):
+            if self.actuator_glitch_severity >= 0.6:
+                self.set_flight_mode(FlightMode.EMERGENCY_LAND)
+            else:
+                self.trigger_retreat()
+
+    def clear_actuator_glitch(self) -> None:
+        """Clears active actuator glitch."""
+        self.actuator_glitch = False
+        self.actuator_glitch_severity = 0.0
+
+    def enable_stochastic_wind(
+        self,
+        mean_velocity: Optional[Sequence[float]] = None,
+        theta: float = 0.6,
+        sigma: float = 1.4,
+    ) -> None:
+        """Enables onboard Ornstein-Uhlenbeck stochastic wind turbulence generator."""
+        self.wind_model = OrnsteinUhlenbeckWind(mean_velocity=mean_velocity, theta=theta, sigma=sigma)
+
+    def set_waypoint_path(self, waypoints: Sequence[Sequence[float]], smooth: bool = True) -> None:
+        """
+        Sets a sequence of 3D waypoints with Catmull-Rom cubic spline interpolation.
+        Eliminates abrupt heading snaps and motion jitter between sharp corners.
+        """
+        self.waypoint_queue.clear()
+        if not waypoints:
+            return
+        if not smooth or len(waypoints) < 2:
+            for wp in waypoints:
+                self.waypoint_queue.append(np.array(wp, dtype=np.float64))
+        else:
+            pts = np.array([self.position] + [list(w) for w in waypoints], dtype=np.float64)
+            dists = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+            total_d = float(np.sum(dists))
+            if total_d < 1.0:
+                for wp in waypoints:
+                    self.waypoint_queue.append(np.array(wp, dtype=np.float64))
+            else:
+                n_samples = max(len(waypoints) * 3, int(total_d / 4.0))
+                t_knots = np.zeros(len(pts))
+                t_knots[1:] = np.cumsum(dists) / total_d
+                t_eval = np.linspace(0.0, 1.0, max(len(waypoints) + 2, int(total_d / 2.5)))
+                prev_p = self.position
+                for t in t_eval[1:]:
+                    idx = int(np.searchsorted(t_knots, t) - 1)
+                    idx = max(0, min(idx, len(pts) - 2))
+                    dt_seg = max(1e-4, t_knots[idx + 1] - t_knots[idx])
+                    u = (t - t_knots[idx]) / dt_seg
+                    p0 = pts[max(0, idx - 1)]
+                    p1 = pts[idx]
+                    p2 = pts[idx + 1]
+                    p3 = pts[min(len(pts) - 1, idx + 2)]
+                    m1 = (p2 - p0) * 0.5
+                    m2 = (p3 - p1) * 0.5
+                    h00 = 2 * u**3 - 3 * u**2 + 1
+                    h10 = u**3 - 2 * u**2 + u
+                    h01 = -2 * u**3 + 3 * u**2
+                    h11 = u**3 - u**2
+                    interp_pt = h00 * p1 + h10 * m1 + h01 * p2 + h11 * m2
+                    if float(np.linalg.norm(interp_pt - prev_p)) >= 1.5:
+                        self.waypoint_queue.append(interp_pt)
+                        prev_p = interp_pt
+                final_wp = np.array(waypoints[-1], dtype=np.float64)
+                if float(np.linalg.norm(final_wp - prev_p)) >= 0.5:
+                    self.waypoint_queue.append(final_wp)
+
+        if self.waypoint_queue:
+            self.set_target_waypoint(self.waypoint_queue.popleft())
+
+    @property
+    def is_actuator_glitched(self) -> bool:
+        """Returns True if actuator glitch fault is active."""
+        return bool(getattr(self, "actuator_glitch", False))
+
     def reset(self) -> None:
         """Resets drone kinematic state and recharges battery."""
         self.position = self._initial_pos.copy()
@@ -222,6 +316,11 @@ class Drone:
         self.is_drafting = False
         self.drafting_leader_id = None
         self.drafting_saving_pct = 0.0
+        self.actuator_glitch = False
+        self.actuator_glitch_severity = 0.0
+        self.is_low_battery_rtb = False
+        self.waypoint_queue.clear()
+        self.target_yaw_filtered = float(self.attitude[2])
         self.battery.reset()
         self.sensor_suite = SensorSuite()
         self.ekf = DroneEKF(initial_position=self.position)
@@ -579,6 +678,21 @@ class Drone:
         Otherwise, commanded force is synthesized from active fields.
         """
         obs_list = obstacles if obstacles is not None else getattr(self, "obstacles", [])
+        
+        # Advance smooth waypoint queue if active
+        if self.waypoint_queue and self.target_position is not None:
+            if float(np.linalg.norm(self.position - self.target_position)) < 1.2:
+                self.set_target_waypoint(self.waypoint_queue.popleft())
+
+        # Autonomous Onboard Battery & Actuator Failsafe
+        if hasattr(self, "battery") and self.battery is not None:
+            if self.battery.is_critical() and self.flight_mode not in (FlightMode.LANDED, FlightMode.LANDING, FlightMode.EMERGENCY_LAND):
+                self.set_flight_mode(FlightMode.EMERGENCY_LAND)
+            elif self.battery.is_low() and self.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY):
+                if not getattr(self, "is_low_battery_rtb", False):
+                    self.is_low_battery_rtb = True
+                    self.trigger_retreat()
+
         if self.is_fault_injected:
             # Catastrophic motor failure / flameout: zero motor thrust, gravitational free-fall
             cmd_force = np.array([0.0, 0.0, -self.limits.mass_kg * self.g], dtype=np.float64)
@@ -605,8 +719,12 @@ class Drone:
         Enforces physical acceleration, speed, vertical rate, ground contact, and hard
         obstacle boundary collision constraints.
         """
-        if ambient_wind is not None:
-            self.ambient_wind = np.asarray(ambient_wind, dtype=np.float64)
+        base_wind = np.asarray(ambient_wind, dtype=np.float64) if ambient_wind is not None else np.zeros(3, dtype=np.float64)
+        if getattr(self, "wind_model", None) is not None:
+            ou_gust = self.wind_model.sample_at_altitude(float(self.position[2]), dt=dt)
+            self.ambient_wind = base_wind + ou_gust
+        else:
+            self.ambient_wind = base_wind
 
         if self.flight_mode in (FlightMode.IDLE, FlightMode.LANDED):
             self.velocity[:] = 0.0
@@ -718,6 +836,10 @@ class Drone:
             1500.0,
         )
 
+        if getattr(self, "actuator_glitch", False):
+            glitch_scale = max(0.2, 1.0 - self.actuator_glitch_severity * 0.5)
+            self.rotor_speeds[0] *= glitch_scale
+
         # 8. Avionics Sensor Suite Sampling & EKF State Estimation Update
         hdop = 1.0
         for obs in obs_list:
@@ -762,14 +884,28 @@ class Drone:
         # Desired pitch (pitch angle proportional to longitudinal acceleration)
         desired_pitch = float(np.clip(-self.acceleration[0] / g, -self.limits.max_tilt_rad, self.limits.max_tilt_rad))
 
-        # Desired yaw: track horizontal velocity vector or target
+        # Desired yaw: smoothly track horizontal velocity vector or target with deadband
         v_xy = float(np.linalg.norm(self.velocity[:2]))
-        if v_xy > 0.5:
-            target_yaw = math.atan2(self.velocity[1], self.velocity[0])
+        if v_xy > 0.4:
+            vel_yaw = math.atan2(self.velocity[1], self.velocity[0])
+            if self.target_position is not None:
+                wp_yaw = math.atan2(self.target_position[1] - self.position[1], self.target_position[0] - self.position[0])
+                w_vel = min(1.0, max(0.0, (v_xy - 0.4) / 1.5))
+                dyaw = math.atan2(math.sin(vel_yaw - wp_yaw), math.cos(vel_yaw - wp_yaw))
+                target_yaw = wp_yaw + w_vel * dyaw
+            else:
+                target_yaw = vel_yaw
         elif self.target_position is not None:
             target_yaw = math.atan2(self.target_position[1] - self.position[1], self.target_position[0] - self.position[0])
         else:
             target_yaw = float(self.attitude[2])
+
+        # Smooth filtered yaw transition to eliminate abrupt heading snap
+        if not hasattr(self, "target_yaw_filtered"):
+            self.target_yaw_filtered = float(self.attitude[2])
+        dyaw_filt = math.atan2(math.sin(target_yaw - self.target_yaw_filtered), math.cos(target_yaw - self.target_yaw_filtered))
+        alpha_yaw = 1.0 - math.exp(-dt / 0.18)
+        self.target_yaw_filtered += dyaw_filt * alpha_yaw
 
         # Slew rate filtering (exponential decay filter for unconditional numerical stability)
         tau_att = 0.12
@@ -781,9 +917,8 @@ class Drone:
         self.attitude[0] = float(np.clip(self.attitude[0], -self.limits.max_tilt_rad, self.limits.max_tilt_rad))
         self.attitude[1] = float(np.clip(self.attitude[1], -self.limits.max_tilt_rad, self.limits.max_tilt_rad))
 
-
-        # Yaw wrap-around with rate limit
-        yaw_err = math.atan2(math.sin(target_yaw - self.attitude[2]), math.cos(target_yaw - self.attitude[2]))
+        # Yaw wrap-around with rate limit tracking smoothly filtered target
+        yaw_err = math.atan2(math.sin(self.target_yaw_filtered - self.attitude[2]), math.cos(self.target_yaw_filtered - self.attitude[2]))
         max_dyaw = self.limits.max_yaw_rate * dt
         self.attitude[2] += max(-max_dyaw, min(max_dyaw, yaw_err))
         self.attitude[2] = math.atan2(math.sin(self.attitude[2]), math.cos(self.attitude[2]))

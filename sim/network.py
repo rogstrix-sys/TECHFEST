@@ -321,43 +321,55 @@ class FANETNetworkEngine:
                 diff = p2 - p1
                 dist = float(np.linalg.norm(diff))
 
-                # Check 3D building occlusions
-                is_los = True
-                occ_cnt = 0
-                if dist > 1e-4:
-                    dir_vec = diff / dist
-                    seg_min_x = min(p1[0], p2[0])
-                    seg_max_x = max(p1[0], p2[0])
-                    seg_min_y = min(p1[1], p2[1])
-                    seg_max_y = max(p1[1], p2[1])
-                    seg_min_z = min(p1[2], p2[2])
-                    seg_max_z = max(p1[2], p2[2])
+                pair_key = (n1, n2)
+                cached = getattr(self, "_los_cache", {}).get(pair_key)
+                if (cached is not None and
+                    abs(p1[0] - cached[0][0]) < 0.2 and abs(p1[1] - cached[0][1]) < 0.2 and abs(p1[2] - cached[0][2]) < 0.2 and
+                    abs(p2[0] - cached[1][0]) < 0.2 and abs(p2[1] - cached[1][1]) < 0.2 and abs(p2[2] - cached[1][2]) < 0.2):
+                    is_los = cached[2]
+                    occ_cnt = cached[3]
+                else:
+                    # Check 3D building occlusions
+                    is_los = True
+                    occ_cnt = 0
+                    if dist > 1e-4:
+                        dir_vec = diff / dist
+                        seg_min_x = min(p1[0], p2[0])
+                        seg_max_x = max(p1[0], p2[0])
+                        seg_min_y = min(p1[1], p2[1])
+                        seg_max_y = max(p1[1], p2[1])
+                        seg_min_z = min(p1[2], p2[2])
+                        seg_max_z = max(p1[2], p2[2])
 
-                    for obs in obstacles:
-                        obs_min = getattr(obs, "min_bound", getattr(obs, "min_pt", None))
-                        obs_max = getattr(obs, "max_bound", getattr(obs, "max_pt", None))
-                        if obs_min is not None and obs_max is not None:
-                            if seg_min_x > obs_max[0] or seg_max_x < obs_min[0] or \
-                               seg_min_y > obs_max[1] or seg_max_y < obs_min[1] or \
-                               seg_min_z > obs_max[2] or seg_max_z < obs_min[2]:
-                                continue
+                        for obs in obstacles:
+                            obs_min = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
+                            obs_max = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
+                            if obs_min is not None and obs_max is not None:
+                                if seg_min_x > obs_max[0] or seg_max_x < obs_min[0] or \
+                                   seg_min_y > obs_max[1] or seg_max_y < obs_min[1] or \
+                                   seg_min_z > obs_max[2] or seg_max_z < obs_min[2]:
+                                    continue
 
-                        # Duck-typing with obstacles.py or conftest AABB
-                        if hasattr(obs, "intersect_ray_segment"):
-                            res = obs.intersect_ray_segment(p1, p2)
-                            if res.hit:
-                                occ_cnt += 1
-                                is_los = False
-                        elif hasattr(obs, "ray_intersection"):
-                            if obs.ray_intersection(p1, dir_vec, dist):
-                                occ_cnt += 1
-                                is_los = False
-                        elif hasattr(obs, "contains_point"):
-                            # Check midpoint approximation if ray method not directly available
-                            mid = 0.5 * (p1 + p2)
-                            if obs.contains_point(mid):
-                                occ_cnt += 1
-                                is_los = False
+                            # Duck-typing with obstacles.py or conftest AABB
+                            if hasattr(obs, "intersect_ray_segment"):
+                                res = obs.intersect_ray_segment(p1, p2)
+                                if res.hit:
+                                    occ_cnt += 1
+                                    is_los = False
+                            elif hasattr(obs, "ray_intersection"):
+                                if obs.ray_intersection(p1, dir_vec, dist):
+                                    occ_cnt += 1
+                                    is_los = False
+                            elif hasattr(obs, "contains_point"):
+                                # Check midpoint approximation if ray method not directly available
+                                mid = 0.5 * (p1 + p2)
+                                if obs.contains_point(mid):
+                                    occ_cnt += 1
+                                    is_los = False
+
+                    if not hasattr(self, "_los_cache"):
+                        self._los_cache = {}
+                    self._los_cache[pair_key] = (p1.copy(), p2.copy(), is_los, occ_cnt)
 
                 if hasattr(self.channel, "evaluate_link"):
                     eval_res = self.channel.evaluate_link(dist, is_los, occ_cnt)

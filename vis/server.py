@@ -20,6 +20,124 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
+
+def _json_default(obj: Any) -> Any:
+    """JSON serialization converter for NumPy arrays, scalars, and custom objects."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+        return obj.to_dict()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+try:
+    import orjson
+    def fast_json_dumps(data: Any) -> str:
+        """Ultra-fast JSON serialization using orjson with native NumPy support."""
+        return orjson.dumps(
+            data,
+            option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY,
+        ).decode("utf-8")
+except Exception:
+    def fast_json_dumps(data: Any) -> str:
+        """Fallback JSON serialization using stdlib json with NumPy conversion."""
+        return json.dumps(data, default=_json_default)
+
+
+def prune_mesh_links(
+    links: List[Dict[str, Any]],
+    active_routes: Optional[List[List[str]]] = None,
+    max_links: int = 36,
+) -> List[Dict[str, Any]]:
+    """
+    Prunes redundant FANET mesh links from broadcast payload while preserving:
+    1. All active packet-forwarding route edges (used for routing visualization).
+    2. Minimum Spanning Tree (MST) over viable mesh links to keep graph connectivity.
+    3. Top-K strongest/lowest-cost links to keep tactical network context.
+    Cuts the links payload from ~34 KB down to ~2-3 KB.
+    """
+    def _compact_link(l: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "source": l.get("source", ""),
+            "target": l.get("target", ""),
+            "viable": bool(l.get("viable", True)),
+            "band": str(l.get("band", "2.4GHz")),
+            "distance": round(float(l.get("distance", 0.0)), 1),
+            "snr": round(float(l.get("snr", 0.0)), 1),
+            "cost": round(float(l.get("cost", 0.0)), 1),
+            "path_loss_db": round(float(l.get("path_loss_db", 0.0)), 1),
+        }
+
+    if not links:
+        return []
+    if len(links) <= max_links:
+        return [_compact_link(l) for l in links]
+
+    # 1. Identify active route edges
+    route_edges: Set[Tuple[str, str]] = set()
+    if active_routes:
+        for route in active_routes:
+            for i in range(len(route) - 1):
+                u, v = route[i], route[i + 1]
+                route_edges.add(tuple(sorted([u, v])))
+
+    selected: List[Dict[str, Any]] = []
+    selected_keys: Set[Tuple[str, str]] = set()
+
+    # Always keep active route links
+    for l in links:
+        key = tuple(sorted([l.get("source", ""), l.get("target", "")]))
+        if key in route_edges and key not in selected_keys:
+            selected.append(l)
+            selected_keys.add(key)
+
+    # 2. Minimum Spanning Tree (MST via Kruskal) over viable links
+    viable_links = [l for l in links if l.get("viable", False)]
+    viable_links.sort(key=lambda l: (l.get("cost", 1.0), -l.get("snr", 0.0)))
+
+    parent: Dict[str, str] = {}
+    def find(x: str) -> str:
+        if parent.setdefault(x, x) != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x: str, y: str) -> bool:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+            return True
+        return False
+
+    for l in selected:
+        union(l.get("source", ""), l.get("target", ""))
+
+    for l in viable_links:
+        u, v = l.get("source", ""), l.get("target", "")
+        if union(u, v):
+            key = tuple(sorted([u, v]))
+            if key not in selected_keys:
+                selected.append(l)
+                selected_keys.add(key)
+
+    # 3. Fill remaining quota with highest quality viable links
+    if len(selected) < max_links:
+        for l in viable_links:
+            key = tuple(sorted([l.get("source", ""), l.get("target", "")]))
+            if key not in selected_keys:
+                selected.append(l)
+                selected_keys.add(key)
+                if len(selected) >= max_links:
+                    break
+
+    return [_compact_link(l) for l in selected]
+
 
 from sim.core import SimulationConfig, SwarmSimulationCore
 from sim.drone import Drone
@@ -379,6 +497,7 @@ def create_default_simulation() -> SwarmSimulationCore:
     ]
     for d_id, role, pos in fleet_init:
         drone = Drone(d_id, role=role, initial_pos=np.array(pos, dtype=np.float64))
+        drone.enable_stochastic_wind(mean_velocity=[2.0, 2.0, 0.0], theta=0.5, sigma=1.0)
         # Staggered tactical takeoff delays: Scouts launch first, then Relays, then Surveyors in pairs
         if "SCOUT" in d_id:
             drone.takeoff_delay = 1.0
@@ -433,6 +552,9 @@ class SimulationServer:
             range_noise_std_m=0.03
         )
         self.latest_payload: Optional[str] = None
+        self._sent_voxels: Set[Tuple[int, int, int]] = set()
+        self._cached_obs_list: Optional[List[Dict[str, Any]]] = None
+        self._obs_dirty: bool = True
 
     def reset(self, scenario: Optional[str] = None) -> None:
         """Reset simulation and SLAM occupancy grid to initial disaster scenario."""
@@ -447,8 +569,10 @@ class SimulationServer:
             self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
         self.step_count = 0
         self._cached_obs_list = None
+        self._obs_dirty = True
         self._cached_occupied_voxels = None
         self._cached_mapping_metrics = None
+        self._sent_voxels = set()
 
     async def broadcast_loop(self) -> None:
         """Asynchronous simulation execution, LiDAR perception, and telemetry broadcast loop."""
@@ -472,6 +596,12 @@ class SimulationServer:
                     data = snapshot.to_dict()
                     data["scenario"] = self.scenario
                     data["sim_speed"] = self.sim_speed
+
+                    # Prune and throttle redundant FANET mesh links (~15 Hz broadcast or initial sync)
+                    if self.step_count <= 2 or self.step_count % 2 == 0:
+                        data["links"] = prune_mesh_links(data.get("links", []), data.get("active_routes", []))
+                    else:
+                        data.pop("links", None)
 
                     # 1. Enrich with real-time EKF estimation metrics & attitude Euler angles
                     for d_dict in data.get("drones", []):
@@ -505,7 +635,8 @@ class SimulationServer:
                                 sim_time=snapshot.sim_time,
                             )
                         self.voxel_map.insert_scan(scan)
-                        data["lidar_scan"] = scan.to_dict()
+                        if self.step_count <= 2 or self.step_count % 2 == 0:
+                            data["lidar_scan"] = scan.to_dict()
 
                         # Compute Khatib APF Guidance Vectors for Autonomous Viewport
                         f_att = focus_drone.compute_attractive_force()
@@ -523,14 +654,12 @@ class SimulationServer:
                         }
 
                     # Swarm Collaborative SLAM: Every individual drone in the fleet scans the city with its onboard LiDAR
-                    # Active airborne drones scan their sector environments in interleaved batches
                     active_peers = [
                         d for d in self.sim.drones.values()
                         if d.id != (focus_drone.id if focus_drone else "")
                         and (d.flight_mode in (FlightMode.TAKEOFF, FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.RTL, FlightMode.DATA_TX, FlightMode.MANUAL) or float(d.position[2]) > 0.8)
                     ]
                     if self.step_count % 2 == 0 and active_peers:
-                        # Interleaved collaborative scanning: scan 1 active peer on alternate ticks to maintain locked 30 Hz
                         peer_idx = (self.step_count // 2) % len(active_peers)
                         peer = active_peers[peer_idx]
                         if hasattr(peer, "perform_lidar_scan"):
@@ -545,13 +674,37 @@ class SimulationServer:
                             )
                         self.voxel_map.insert_scan(p_scan)
 
-                    # 3. Stream 3D Occupied Voxels & SLAM Metrics (cached at 10 Hz for fluid 30-60 FPS throughput)
+                    # 3. Stream 3D Occupied Voxels & SLAM Metrics with Delta Streaming
+                    is_full_sync = (self.step_count <= 2 or self.step_count % 30 == 0 or not self._sent_voxels)
                     if self.step_count % 3 == 0 or getattr(self, "_cached_occupied_voxels", None) is None:
                         self._cached_occupied_voxels = self.voxel_map.get_occupied_voxels(max_count=1200)
                         self._cached_mapping_metrics = self.voxel_map.compute_metrics()
-                    data["occupied_voxels"] = self._cached_occupied_voxels
                     mapping_metrics = self._cached_mapping_metrics
                     data["mapping_metrics"] = mapping_metrics
+
+                    current_occupied = self._cached_occupied_voxels or []
+                    current_keys = {tuple(v.get("key", v["pos"])) for v in current_occupied}
+                    if is_full_sync:
+                        data["occupied_voxels"] = current_occupied
+                        data["voxel_delta"] = {
+                            "full": True,
+                            "voxels": current_occupied,
+                            "total_occupied": len(current_occupied),
+                        }
+                        self._sent_voxels = current_keys
+                    else:
+                        added_keys = current_keys - self._sent_voxels
+                        removed_keys = self._sent_voxels - current_keys
+                        added_voxels = [v for v in current_occupied if tuple(v.get("key", v["pos"])) in added_keys]
+                        removed_list = [list(k) for k in removed_keys]
+                        data["voxel_delta"] = {
+                            "full": False,
+                            "added": added_voxels,
+                            "removed": removed_list,
+                            "total_occupied": len(current_occupied),
+                        }
+                        data["occupied_voxels"] = []
+                        self._sent_voxels = current_keys
 
                     # 4. Stream Scientific Analytical Chart Data
                     drones_list = data.get("drones", [])
@@ -573,7 +726,7 @@ class SimulationServer:
                         "throughput_kbps": round(float(len(snapshot.packets) * 14.5 + 28.0), 1),
                     }
 
-                    # 5. Add obstacles geometry for client 3D rendering (cached)
+                    # 5. Add obstacles geometry for client 3D rendering (cached & dirty-flagged)
                     if getattr(self, "_cached_obs_list", None) is None:
                         obs_list = []
                         for obs in self.sim.obstacles:
@@ -587,15 +740,38 @@ class SimulationServer:
                                     "max_pt": [round(float(c), 2) for c in max_p],
                                 })
                         self._cached_obs_list = obs_list
-                    if self.step_count <= 2 or self.step_count % 30 == 0:
+                        self._obs_dirty = True
+                    if getattr(self, "_obs_dirty", False) or self.step_count <= 2 or self.step_count % 60 == 0:
                         data["obstacles"] = self._cached_obs_list
+                        self._obs_dirty = False
+
+                    # Decoupled slow channels: throttle static and slow-moving telemetry
+                    completed_pois = int(snapshot.metrics.get("completed_pois", 0))
+                    if self.step_count > 2 and self.step_count % 30 != 0 and completed_pois == getattr(self, "_last_completed_pois", -1):
+                        data.pop("pois", None)
+                    else:
+                        self._last_completed_pois = completed_pois
+
+                    if self.step_count > 2 and self.step_count % 10 != 0:
+                        data.pop("priority_queue", None)
+                        data.pop("charging_pads", None)
 
                     # 6. Add live NVIDIA GPU hardware telemetry
                     data["gpu"] = get_gpu_telemetry()
                     data["active_formation"] = getattr(self.sim, "active_formation", "AUTONOMOUS")
 
-                    # 7. Broadcast to connected WebSockets
-                    payload = json.dumps(data)
+                    # 6b. Add Predictive Bayesian Thermal Belief Grid & BFT Consensus telemetry
+                    if hasattr(self.sim, "mission_manager") and self.sim.mission_manager is not None:
+                        mm = self.sim.mission_manager
+                        if hasattr(mm, "thermal_grid") and mm.thermal_grid is not None:
+                            # Stream thermal grid at ~3 Hz (every 10 frames), on start, or if updated
+                            if self.step_count <= 2 or self.step_count % 10 == 0 or getattr(mm.thermal_grid, "_dirty", True):
+                                data["thermal_grid"] = mm.thermal_grid.to_dict()
+                        if hasattr(mm, "cbba_solver") and mm.cbba_solver is not None:
+                            data["bft_audit"] = getattr(mm.cbba_solver, "bft_audit_log", [])[-5:]
+
+                    # 7. Broadcast to connected WebSockets using fast_json_dumps
+                    payload = fast_json_dumps(data)
                     self.latest_payload = payload
                     if self.clients:
                         dead_clients = set()
@@ -630,6 +806,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 @app.middleware("http")
@@ -905,66 +1082,150 @@ async def post_formation(payload: Dict[str, Any]):
     })
 
 
-@app.post("/api/control")
-async def post_control(payload: Dict[str, Any]):
-    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat, dispatch, formation."""
+@app.post("/api/trigger_collapse")
+@app.get("/api/trigger_collapse")
+async def trigger_collapse(payload: Optional[Dict[str, Any]] = None):
+    """Trigger dynamic structural failure and collapse of a disaster building."""
+    obs_id = payload.get("obstacle_id") if payload else None
+    res = server_manager.sim.trigger_obstacle_collapse(obstacle_id=obs_id)
+    server_manager._cached_obs_list = None
+    server_manager._obs_dirty = True
+    if res:
+        return JSONResponse({"status": "ok", "collapse": res})
+    return JSONResponse({"status": "error", "message": "No eligible obstacle found for collapse."}, status_code=400)
+
+
+@app.post("/api/inject_byzantine_bid")
+@app.get("/api/inject_byzantine_bid")
+async def inject_byzantine_bid(payload: Optional[Dict[str, Any]] = None):
+    """Simulate an adversarial drone submitting a spoofed bid to test BFT consensus."""
+    d_id = (payload.get("drone_id") if payload else None) or "SCOUT_1"
+    poi_id = (payload.get("poi_id") if payload else None) or "POI_SURVIVORS"
+    spoofed_score = float(payload.get("score", 9999.0)) if payload else 9999.0
+
+    mm = getattr(server_manager.sim, "mission_manager", None)
+    if mm and hasattr(mm, "cbba_solver"):
+        mm.cbba_solver.inject_byzantine_bid(d_id, poi_id, spoofed_score)
+        if hasattr(mm, "emit_tactical_comms"):
+            mm.emit_tactical_comms(
+                "WARNING",
+                "SECURITY",
+                f"🛡️ ADVERSARIAL ATTEMPT: {d_id} injected spoofed bid ({spoofed_score}) on {poi_id}. BFT peer voting engaged.",
+                "SECURITY",
+            )
+        return JSONResponse({
+            "status": "ok",
+            "drone_id": d_id,
+            "poi_id": poi_id,
+            "spoofed_score": spoofed_score,
+            "bft_audit": getattr(mm.cbba_solver, "bft_audit_log", [])[-5:],
+            "message": f"Byzantine bid injected on {d_id}. Swarm BFT consensus evaluating.",
+        })
+    return JSONResponse({"status": "error", "message": "Mission manager or CBBA solver not initialized."}, status_code=400)
+
+
+@app.get("/api/thermal_grid")
+async def get_thermal_grid():
+    """Return live 2D Bayesian Thermal Belief Grid telemetry."""
+    mm = getattr(server_manager.sim, "mission_manager", None)
+    if mm and hasattr(mm, "thermal_grid") and mm.thermal_grid:
+        return JSONResponse(mm.thermal_grid.to_dict())
+    return JSONResponse({"status": "error", "message": "Thermal grid not initialized."}, status_code=404)
+
+
+def handle_command(server: SimulationServer, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Unified handler for HUD commands via REST (/api/control) and WebSocket (/ws)."""
     cmd = payload.get("command") or payload.get("cmd")
     if cmd == "pause":
-        server_manager.is_running = False
+        server.is_running = False
     elif cmd == "resume":
-        server_manager.is_running = True
+        server.is_running = True
     elif cmd == "reset":
-        server_manager.reset()
+        server.reset()
     elif cmd == "speed":
-        server_manager.sim_speed = float(payload.get("value", 1.0))
+        server.sim_speed = float(payload.get("value", 1.0))
     elif cmd == "focus_drone":
         drone_id = str(payload.get("drone_id", "UAV_1"))
-        if drone_id in server_manager.sim.drones:
-            server_manager.focus_drone_id = drone_id
+        if drone_id in server.sim.drones:
+            server.focus_drone_id = drone_id
     elif cmd == "dispatch":
-        drone_id = payload.get("drone_id") or server_manager.focus_drone_id
+        drone_id = payload.get("drone_id") or server.focus_drone_id
         target = payload.get("target") or payload.get("waypoint") or [0.0, 0.0, 35.0]
-        server_manager.sim.dispatch_drone_waypoint(drone_id, target)
-        return JSONResponse({"status": "ok", "drone_id": drone_id, "target": target})
+        server.sim.dispatch_drone_waypoint(drone_id, target)
+        return {"status": "ok", "drone_id": drone_id, "target": target}
     elif cmd in ("retreat", "rtl"):
         drone_id = payload.get("drone_id")
-        if drone_id and drone_id in server_manager.sim.drones:
-            server_manager.sim.trigger_drone_retreat(drone_id)
+        if drone_id and drone_id in server.sim.drones:
+            server.sim.trigger_drone_retreat(drone_id)
         else:
-            server_manager.sim.trigger_fleet_retreat()
+            server.sim.trigger_fleet_retreat()
+        return {"status": "ok", "drone_id": drone_id or "FLEET"}
     elif cmd == "chaos_fault":
         drone_id = payload.get("drone_id")
-        victim = server_manager.sim.trigger_chaos_fault(drone_id)
-        return JSONResponse({"status": "ok", "victim_id": victim})
+        victim = server.sim.trigger_chaos_fault(drone_id)
+        return {"status": "ok", "victim_id": victim}
     elif cmd in ("formation", "set_formation"):
         form = payload.get("formation") or payload.get("value") or "AUTONOMOUS"
-        server_manager.sim.set_swarm_formation(form)
-        return JSONResponse({"status": "ok", "formation": server_manager.sim.active_formation})
+        server.sim.set_swarm_formation(form)
+        return {"status": "ok", "formation": server.sim.active_formation}
     elif cmd in ("switch_scenario", "scenario"):
         scen = (payload.get("scenario") or payload.get("value") or "sector_delta").lower()
         if scen in ("sector_delta", "challenge"):
-            server_manager.reset(scenario=scen)
-            return JSONResponse({"status": "ok", "scenario": server_manager.scenario})
+            server.reset(scenario=scen)
+            return {"status": "ok", "scenario": server.scenario}
+        return {"status": "error", "message": f"Unsupported scenario: {scen}"}
     elif cmd in ("reset_slam", "clear_slam"):
-        server_manager.voxel_map.voxels.clear()
-        if hasattr(server_manager.voxel_map, "accumulated_hits"):
-            server_manager.voxel_map.accumulated_hits.clear()
-        server_manager.voxel_map.total_surveyed_points = 0
-        return JSONResponse({"status": "ok", "message": "3D SLAM map cleared"})
+        server.voxel_map.voxels.clear()
+        if hasattr(server.voxel_map, "accumulated_hits"):
+            server.voxel_map.accumulated_hits.clear()
+        server.voxel_map.total_surveyed_points = 0
+        return {"status": "ok", "message": "3D SLAM map cleared"}
+    elif cmd in ("trigger_collapse", "collapse"):
+        obs_id = payload.get("obstacle_id")
+        res = server.sim.trigger_obstacle_collapse(obstacle_id=obs_id)
+        server._cached_obs_list = None
+        server._obs_dirty = True
+        return {"status": "ok" if res else "error", "collapse": res}
+    elif cmd in ("byzantine_test", "inject_byzantine_bid"):
+        d_id = payload.get("drone_id", "SCOUT_1")
+        poi_id = payload.get("poi_id", "POI_SURVIVORS")
+        score = float(payload.get("score", 9999.0))
+        mm = getattr(server.sim, "mission_manager", None)
+        if mm and hasattr(mm, "cbba_solver"):
+            mm.cbba_solver.inject_byzantine_bid(d_id, poi_id, score)
+            if hasattr(mm, "emit_tactical_comms"):
+                mm.emit_tactical_comms(
+                    "WARNING",
+                    "SECURITY",
+                    f"🛡️ ADVERSARIAL ATTEMPT: {d_id} injected spoofed bid ({score}) on {poi_id}. BFT peer voting engaged.",
+                    "SECURITY",
+                )
+            return {"status": "ok", "drone_id": d_id, "poi_id": poi_id, "bft_audit": getattr(mm.cbba_solver, "bft_audit_log", [])[-5:]}
+        return {"status": "error", "message": "CBBA solver not ready"}
     elif cmd == "manual_control":
-        drone_id = payload.get("drone_id") or server_manager.focus_drone_id
+        drone_id = payload.get("drone_id") or server.focus_drone_id
         vx = float(payload.get("vx", 0.0))
         vy = float(payload.get("vy", 0.0))
         vz = float(payload.get("vz", 0.0))
         yaw_rate = float(payload.get("yaw_rate", 0.0))
         enabled = bool(payload.get("enabled", True))
-        server_manager.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
-    return JSONResponse({
+        success = server.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
+        return {"status": "ok" if success else "error", "drone_id": drone_id, "enabled": enabled}
+
+    return {
         "status": "ok",
-        "running": server_manager.is_running,
-        "speed": server_manager.sim_speed,
-        "focus_drone": server_manager.focus_drone_id
-    })
+        "running": server.is_running,
+        "speed": server.sim_speed,
+        "focus_drone": server.focus_drone_id
+    }
+
+
+@app.post("/api/control")
+async def post_control(payload: Dict[str, Any]):
+    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat, dispatch, formation."""
+    res = handle_command(server_manager, payload)
+    status_code = 400 if res.get("status") == "error" else 200
+    return JSONResponse(res, status_code=status_code)
 
 
 @app.websocket("/ws")
@@ -981,47 +1242,7 @@ async def websocket_endpoint(websocket: WebSocket):
             msg = await websocket.receive_text()
             try:
                 data = json.loads(msg)
-                cmd = data.get("command") or data.get("cmd")
-                if cmd == "pause":
-                    server_manager.is_running = False
-                elif cmd == "resume":
-                    server_manager.is_running = True
-                elif cmd == "reset":
-                    server_manager.reset()
-                elif cmd == "speed":
-                    server_manager.sim_speed = float(data.get("value", 1.0))
-                elif cmd == "focus_drone":
-                    drone_id = str(data.get("drone_id", "UAV_1"))
-                    if drone_id in server_manager.sim.drones:
-                        server_manager.focus_drone_id = drone_id
-                elif cmd == "dispatch":
-                    drone_id = data.get("drone_id") or server_manager.focus_drone_id
-                    target = data.get("target") or data.get("waypoint") or [0.0, 0.0, 35.0]
-                    server_manager.sim.dispatch_drone_waypoint(drone_id, target)
-                elif cmd in ("retreat", "rtl"):
-                    drone_id = data.get("drone_id")
-                    if drone_id and drone_id in server_manager.sim.drones:
-                        server_manager.sim.trigger_drone_retreat(drone_id)
-                    else:
-                        server_manager.sim.trigger_fleet_retreat()
-                elif cmd == "chaos_fault":
-                    server_manager.sim.trigger_chaos_fault(data.get("drone_id"))
-                elif cmd in ("formation", "set_formation"):
-                    form = data.get("formation") or data.get("value") or "AUTONOMOUS"
-                    server_manager.sim.set_swarm_formation(form)
-                elif cmd in ("reset_slam", "clear_slam"):
-                    server_manager.voxel_map.voxels.clear()
-                    if hasattr(server_manager.voxel_map, "accumulated_hits"):
-                        server_manager.voxel_map.accumulated_hits.clear()
-                    server_manager.voxel_map.total_surveyed_points = 0
-                elif cmd == "manual_control":
-                    drone_id = data.get("drone_id") or server_manager.focus_drone_id
-                    vx = float(data.get("vx", 0.0))
-                    vy = float(data.get("vy", 0.0))
-                    vz = float(data.get("vz", 0.0))
-                    yaw_rate = float(data.get("yaw_rate", 0.0))
-                    enabled = bool(data.get("enabled", True))
-                    server_manager.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
+                handle_command(server_manager, data)
             except Exception:
                 pass
     except WebSocketDisconnect:

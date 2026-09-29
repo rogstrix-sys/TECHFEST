@@ -175,3 +175,69 @@ def test_net_combined_ply_export_fused_from_all_drones(sample_obstacles):
     total_expected = len(d1.scanned_points) + len(d2.scanned_points) + len(r1.scanned_points)
     assert len(data_lines) == total_expected
 
+
+def test_obstacle_bvh_and_spatial_hash(sample_obstacles):
+    """Verify BVH and SpatialHash accelerate broadphase ray-AABB queries correctly."""
+    from sim.mapping import ObstacleBVH, ObstacleSpatialHash
+
+    # Create multiple obstacles
+    obstacles = list(sample_obstacles)
+    for i in range(10):
+        obstacles.append(
+            ObstacleAABB(
+                id=f"BLD_{i}",
+                name=f"Building {i}",
+                min_pt=np.array([50.0 + i * 20.0, 10.0, 0.0]),
+                max_pt=np.array([65.0 + i * 20.0, 30.0, 25.0]),
+            )
+        )
+
+    # 1. Test ObstacleBVH construction & ray intersection
+    bvh = ObstacleBVH(obstacles, max_leaf_size=3)
+    assert bvh.root is not None
+    assert not bvh.root.is_leaf
+
+    # 2. Test ObstacleSpatialHash
+    spatial_hash = ObstacleSpatialHash(obstacles, cell_size=30.0)
+    candidates = spatial_hash.get_candidate_indices(np.array([20.0, 20.0, 10.0]), max_range=50.0)
+    assert len(candidates) > 0
+
+    # 3. Test scanner with BVH enabled (>6 obstacles)
+    scanner = LiDARScanner(max_range_m=100.0, horizontal_resolution_deg=20.0, vertical_channels=4)
+    pos = np.array([10.0, 20.0, 15.0])
+    att = np.array([0.0, 0.0, 0.0])
+    scan = scanner.scan("UAV_1", pos, att, obstacles, sim_time=0.0)
+    assert len(scan.points) > 0
+
+
+def test_occupancy_grid_deltas():
+    """Verify OccupancyGridMap3D voxel deltas and active occupied key tracking."""
+    grid = OccupancyGridMap3D(voxel_size_m=4.0)
+
+    # Initial state
+    assert len(grid._occupied_keys) == 0
+    deltas0 = grid.get_voxel_deltas()
+    assert len(deltas0["added"]) == 0
+    assert len(deltas0["removed"]) == 0
+
+    # Insert a scan hitting a voxel
+    scan = LiDARScan(
+        timestamp=1.0,
+        drone_id="UAV_1",
+        sensor_origin=np.array([0.0, 0.0, 10.0]),
+        points=[
+            LiDARPoint(x=20.0, y=20.0, z=10.0, range_m=28.0, intensity=0.8, obstacle_id="BLD_1")
+        ]
+    )
+    grid.insert_scan(scan)
+
+    assert len(grid._occupied_keys) >= 1
+    deltas1 = grid.get_voxel_deltas()
+    assert len(deltas1["added"]) >= 1
+    assert deltas1["total_occupied"] >= 1
+
+    # Subsequent delta query without changes should return empty deltas
+    deltas2 = grid.get_voxel_deltas()
+    assert len(deltas2["added"]) == 0
+
+
