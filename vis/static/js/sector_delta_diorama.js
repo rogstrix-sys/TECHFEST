@@ -248,12 +248,12 @@ const SectorDelta = (() => {
         c.height = 2048;
         const ctx = c.getContext("2d");
 
-        // Coordinate helper: World [-180, +180] -> Canvas [0, 2048]
+        // Coordinate helper: World [-500, +500] -> Canvas [0, 2048]
         const toC = (x, y) => [
-            ((x + 180) / 360) * 2048,
-            ((180 - y) / 360) * 2048
+            ((x + 500) / 1000) * 2048,
+            ((500 - y) / 1000) * 2048
         ];
-        const toLen = (m) => (m / 360) * 2048;
+        const toLen = (m) => (m / 1000) * 2048;
 
         // 1. Rich Natural Parkland Green Base Gradient
         // Deep, saturated botanical greens that stay lush under bright directional sunlight
@@ -418,11 +418,11 @@ const SectorDelta = (() => {
         // 4. Subtle Topographic Elevation Contour Lines
         ctx.save();
         const contours = [
-            { el: "+10.0m", pts: [[-180, 130], [-80, 150], [40, 110], [140, 140], [180, 160]] },
-            { el: "+14.0m", pts: [[-180, 70], [-70, 95], [30, 60], [120, 90], [180, 110]] },
-            { el: "+18.0m", pts: [[-180, 10], [-60, 35], [25, 0], [110, 30], [180, 50]] },
-            { el: "+22.0m", pts: [[-180, -50], [-70, -25], [20, -55], [105, -30], [180, -10]] },
-            { el: "+26.0m", pts: [[-180, -110], [-65, -85], [15, -115], [100, -90], [180, -70]] },
+            { el: "+10.0m", pts: [[-500, 360], [-220, 420], [110, 310], [390, 390], [500, 450]] },
+            { el: "+14.0m", pts: [[-500, 190], [-190, 260], [80, 170], [330, 250], [500, 310]] },
+            { el: "+18.0m", pts: [[-500, 30], [-170, 100], [70, 0], [310, 80], [500, 140]] },
+            { el: "+22.0m", pts: [[-500, -140], [-190, -70], [60, -150], [290, -80], [500, -30]] },
+            { el: "+26.0m", pts: [[-500, -310], [-180, -240], [40, -320], [280, -250], [500, -200]] },
         ];
 
         contours.forEach(({ el, pts }) => {
@@ -442,15 +442,6 @@ const SectorDelta = (() => {
             ctx.strokeStyle = "rgba(235, 255, 220, 0.24)";
             ctx.lineWidth = 1.8;
             ctx.stroke();
-
-            // Elevation label badge
-            const labelPt = pts[2];
-            const [lx, ly] = toC(labelPt[0], labelPt[1]);
-            ctx.font = "bold 12px 'Consolas', monospace";
-            ctx.fillStyle = "rgba(10, 35, 12, 0.85)";
-            ctx.fillRect(lx - 3, ly - 9, 58, 16);
-            ctx.fillStyle = "rgba(240, 255, 220, 0.95)";
-            ctx.fillText(el, lx + 2, ly + 4);
         });
         ctx.restore();
 
@@ -615,215 +606,10 @@ const SectorDelta = (() => {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // 8. Tactical GCS Flight Apron & 16-UAV Launch Markings
-        // Positioned cleanly from x = -88 to +88, y = -130 to -165 (depth 35m)
-        const [apronX, apronY] = toC(-88, -130);
-        const apW = toLen(176);
-        const apH = toLen(35);
+        // 8. Former Central South Parkland (Hub relocated 75m south outside the 1000m black boundary)
 
-        // Concrete tarmac apron slab
-        ctx.fillStyle = "#242e37";
-        ctx.fillRect(apronX, apronY, apW, apH);
 
-        // Reinforced concrete slab expansion joint grid
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.10)";
-        ctx.lineWidth = 1.2;
-        for (let sx = apronX; sx <= apronX + apW; sx += 28) {
-            ctx.beginPath();
-            ctx.moveTo(sx, apronY);
-            ctx.lineTo(sx, apronY + apH);
-            ctx.stroke();
-        }
-        for (let sy = apronY; sy <= apronY + apH; sy += 28) {
-            ctx.beginPath();
-            ctx.moveTo(apronX, sy);
-            ctx.lineTo(apronX + apW, sy);
-            ctx.stroke();
-        }
 
-        // Safety yellow border outline
-        ctx.strokeStyle = "#ffd600";
-        ctx.lineWidth = 3.0;
-        ctx.strokeRect(apronX, apronY, apW, apH);
-
-        // Apron threshold white piano-key stripes
-        ctx.fillStyle = "#ffffff";
-        for (let b = 6; b < apH - 6; b += 10) {
-            ctx.fillRect(apronX + 4, apronY + b, 16, 5);
-            ctx.fillRect(apronX + apW - 20, apronY + b, 16, 5);
-        }
-
-        // Apron centerline dashed yellow taxiway
-        ctx.strokeStyle = "#ffd600";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([14, 10]);
-        ctx.beginPath();
-        ctx.moveTo(apronX + 28, apronY + apH / 2);
-        ctx.lineTo(apronX + apW - 28, apronY + apH / 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Central GCS Command Bunker Pad (x = 0, y = -145)
-        const [gcsCenterX, gcsCenterY] = toC(0, -145);
-        ctx.fillStyle = "#18202c";
-        ctx.beginPath();
-        ctx.arc(gcsCenterX, gcsCenterY, toLen(10.5), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = "#ffd600";
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-
-        // 2 Primary Helipads: Pad Alpha (-65, -136) and Pad Bravo (+65, -136)
-        // Positioned cleanly on the Relay line with zero overlap on any UAV spawn bay
-        [ { x: -65, y: -136, lbl: "PAD-A [SURVEY]" }, { x: 65, y: -136, lbl: "PAD-B [SURVEY]" } ].forEach(hp => {
-            const [hx, hy] = toC(hp.x, hp.y);
-            const hRadius = toLen(6.5);
-
-            ctx.strokeStyle = "#ffd600";
-            ctx.lineWidth = 2.8;
-            ctx.beginPath();
-            ctx.arc(hx, hy, hRadius, 0, Math.PI * 2);
-            ctx.stroke();
-
-            ctx.strokeStyle = "rgba(255, 214, 0, 0.4)";
-            ctx.lineWidth = 1.4;
-            ctx.setLineDash([5, 5]);
-            ctx.beginPath();
-            ctx.arc(hx, hy, hRadius * 0.7, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.setLineDash([]);
-
-            ctx.font = "bold 20px 'Consolas', monospace";
-            ctx.fillStyle = "#ffd600";
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText("H", hx, hy);
-
-            ctx.font = "bold 9px 'Consolas', monospace";
-            ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
-            ctx.fillText(hp.lbl, hx, hy + hRadius + 8);
-            ctx.textAlign = "left";
-            ctx.textBaseline = "alphabetic";
-        });
-
-        // 16 UAV Spawn Marking Bays matching vis/server.py:
-        // Surveyors row (y = -145, x in [-70, -50, -30, -10, 10, 30, 50, 70])
-        const surveyorXs = [-70, -50, -30, -10, 10, 30, 50, 70];
-        surveyorXs.forEach((sx, idx) => {
-            const [bx, by] = toC(sx, -145);
-            ctx.strokeStyle = "rgba(0, 229, 255, 0.75)";
-            ctx.lineWidth = 1.4;
-            const sz = toLen(3.8);
-            ctx.strokeRect(bx - sz, by - sz, sz * 2, sz * 2);
-
-            ctx.font = "bold 9px 'Consolas', monospace";
-            ctx.fillStyle = "rgba(0, 229, 255, 0.85)";
-            ctx.fillText(`U${idx + 1}`, bx - 6, by - sz - 2);
-        });
-
-        // Relays row (y = -136, x in [-45, -15, 15, 45])
-        const relayXs = [-45, -15, 15, 45];
-        relayXs.forEach((rx, idx) => {
-            const [bx, by] = toC(rx, -136);
-            ctx.strokeStyle = "rgba(255, 214, 0, 0.75)";
-            ctx.lineWidth = 1.4;
-            const sz = toLen(3.4);
-            ctx.strokeRect(bx - sz, by - sz, sz * 2, sz * 2);
-
-            ctx.font = "bold 9px 'Consolas', monospace";
-            ctx.fillStyle = "rgba(255, 214, 0, 0.85)";
-            ctx.fillText(`R${idx + 1}`, bx - 5, by - sz - 2);
-        });
-
-        // Scouts row (y = -153, x in [-45, -15, 15, 45])
-        const scoutXs = [-45, -15, 15, 45];
-        scoutXs.forEach((scx, idx) => {
-            const [bx, by] = toC(scx, -153);
-            ctx.strokeStyle = "rgba(100, 255, 120, 0.75)";
-            ctx.lineWidth = 1.4;
-            const sz = toLen(3.4);
-            ctx.strokeRect(bx - sz, by - sz, sz * 2, sz * 2);
-
-            ctx.font = "bold 9px 'Consolas', monospace";
-            ctx.fillStyle = "rgba(100, 255, 120, 0.85)";
-            ctx.fillText(`S${idx + 1}`, bx - 5, by + sz + 9);
-        });
-
-        // Apron Header Title
-        ctx.font = "bold 13px 'Consolas', monospace";
-        ctx.fillStyle = "#ffd600";
-        ctx.fillText("GCS FLIGHT APRON // 16-UAV FANET COMMAND POST", apronX + 28, apronY - 8);
-
-        // 9. SECTOR DELTA -27 Main Typography & Title Plate
-        // Positioned in the open South-East parkland lawn corridor (x = 94 to 166, y = -132 to -162)
-        // Completely clear of overpasses, buildings, roads, and GCS apron. 100% visible in top and orbit views!
-        const [txtX, txtY] = toC(94, -134);
-
-        ctx.save();
-        ctx.shadowColor = "rgba(10, 35, 12, 0.95)";
-        ctx.shadowBlur = 12;
-
-        // Tactical classification badge
-        ctx.font = "bold 11px 'Consolas', monospace";
-        ctx.fillStyle = "#ffd600";
-        ctx.fillText("TACTICAL THEATER // AUTONOMOUS SWARM GRID", txtX, txtY);
-
-        // Main Sector Name
-        ctx.font = "bold 44px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
-        ctx.fillStyle = "#ffffff";
-        ctx.fillText("SECTOR DELTA", txtX, txtY + 38);
-
-        // Subtitle
-        ctx.font = "bold 20px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
-        ctx.fillStyle = "#c8f0d0";
-        ctx.fillText("(SE - RELAY CORRIDOR)", txtX, txtY + 64);
-
-        // Prominent numeric "-27"
-        ctx.font = "900 76px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
-        ctx.fillStyle = "#ffffff";
-        ctx.fillText("-27", txtX + 260, txtY + 54);
-
-        // Graphic scale bar: 0m to 50m
-        ctx.strokeStyle = "rgba(240, 255, 225, 0.85)";
-        ctx.lineWidth = 2.5;
-        const scaleW = toLen(50);
-        ctx.beginPath();
-        ctx.moveTo(txtX, txtY + 84);
-        ctx.lineTo(txtX + scaleW, txtY + 84);
-        ctx.moveTo(txtX, txtY + 78);
-        ctx.lineTo(txtX, txtY + 88);
-        ctx.moveTo(txtX + scaleW / 2, txtY + 80);
-        ctx.lineTo(txtX + scaleW / 2, txtY + 86);
-        ctx.moveTo(txtX + scaleW, txtY + 78);
-        ctx.lineTo(txtX + scaleW, txtY + 88);
-        ctx.stroke();
-
-        ctx.font = "bold 10px 'Consolas', monospace";
-        ctx.fillStyle = "rgba(235, 255, 215, 0.90)";
-        ctx.fillText("0m", txtX - 4, txtY + 98);
-        ctx.fillText("25m", txtX + scaleW / 2 - 8, txtY + 98);
-        ctx.fillText("50m SCALE", txtX + scaleW - 14, txtY + 98);
-
-        // North compass indicator badge
-        ctx.fillStyle = "rgba(10, 35, 12, 0.85)";
-        ctx.fillRect(txtX + 348, txtY + 68, 38, 34);
-        ctx.strokeStyle = "#ffd600";
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(txtX + 348, txtY + 68, 38, 34);
-
-        ctx.font = "bold 14px 'Consolas', monospace";
-        ctx.fillStyle = "#ffd600";
-        ctx.fillText("▲ N", txtX + 354, txtY + 90);
-
-        ctx.restore();
-
-        // 10. Northwest Arboretum Metadata Typography
-        const [nwBadgeX, nwBadgeY] = toC(-162, 162);
-        ctx.font = "bold 11px 'Consolas', monospace";
-        ctx.fillStyle = "rgba(240, 255, 230, 0.85)";
-        ctx.fillText("SECTOR DELTA // NORTH ARBORETUM & BOTANICAL COMMONS", nwBadgeX, nwBadgeY);
-        ctx.fillStyle = "rgba(200, 240, 190, 0.70)";
-        ctx.fillText("GRID REF: 48Q-DE 28914 // DATUM: WGS84 // ELEV: +12.0m", nwBadgeX, nwBadgeY + 16);
 
         // 11. Outer Plinth Border Frame & Corner Registration Crosshairs
         ctx.strokeStyle = "rgba(235, 255, 220, 0.40)";
@@ -1841,22 +1627,22 @@ const SectorDelta = (() => {
         const crossGeoV = new THREE.BoxGeometry(0.8, 3.6, 0.05);
 
         const padsConfig = [
-            // Surveyors (UAV_1 to UAV_8) along y = -145
+            // Surveyors (UAV_1 to UAV_8) along y = -575 (75m south of black boundary)
             ...[-70, -50, -30, -10, 10, 30, 50, 70].map((x, i) => ({
                 id: `UAV_${i + 1}`,
-                x, y: -145,
+                x, y: -575,
                 color: 0x00e5ff,
             })),
-            // Relays (RELAY_1 to RELAY_4) along y = -136
+            // Relays (RELAY_1 to RELAY_4) along y = -566
             ...[-45, -15, 15, 45].map((x, i) => ({
                 id: `RELAY_${i + 1}`,
-                x, y: -136,
+                x, y: -566,
                 color: 0xffd600,
             })),
-            // Scouts (SCOUT_1 to SCOUT_4) along y = -153
+            // Scouts (SCOUT_1 to SCOUT_4) along y = -583
             ...[-45, -15, 15, 45].map((x, i) => ({
                 id: `SCOUT_${i + 1}`,
-                x, y: -153,
+                x, y: -583,
                 color: 0x00ff66,
             })),
         ];
@@ -1908,6 +1694,180 @@ const SectorDelta = (() => {
         });
 
         group.add(padsGroup);
+    }
+
+    // ------------------------------------------------------------------------
+    // Relocated GCS Flight Apron Platform (75m Outside South Boundary at Y = -575)
+    // ------------------------------------------------------------------------
+    function createHubApronPlatform(group) {
+        const hubGroup = new THREE.Group();
+        hubGroup.name = "gcs_hub_apron_platform";
+
+        // 1. Concrete Sub-Foundation Slab (Width 184m x Depth 48m x Height 0.4m)
+        const subBaseMat = new THREE.MeshStandardMaterial({
+            color: 0x111720,
+            roughness: 0.85,
+            metalness: 0.15,
+        });
+        const subBase = new THREE.Mesh(new THREE.BoxGeometry(184, 48, 0.4), subBaseMat);
+        subBase.position.set(0, -575, 0.0);
+        subBase.receiveShadow = true;
+        hubGroup.add(subBase);
+
+        // 2. Primary Tarmac Deck (Width 180m x Depth 44m x Height 0.2m)
+        const tarmacMat = new THREE.MeshStandardMaterial({
+            color: 0x222b37,
+            roughness: 0.7,
+            metalness: 0.25,
+        });
+        const tarmac = new THREE.Mesh(new THREE.BoxGeometry(180, 44, 0.2), tarmacMat);
+        tarmac.position.set(0, -575, 0.2);
+        tarmac.receiveShadow = true;
+        hubGroup.add(tarmac);
+
+        // 3. Safety Yellow Perimeter Border Rails
+        const borderMat = new THREE.MeshBasicMaterial({ color: 0xffd600 });
+        const hw = 90, hd = 22; // half-width and half-depth
+        const borderThickness = 0.5;
+        // North & South borders
+        [-hd, hd].forEach(dy => {
+            const bMesh = new THREE.Mesh(new THREE.BoxGeometry(180, borderThickness, 0.05), borderMat);
+            bMesh.position.set(0, -575 + dy, 0.31);
+            hubGroup.add(bMesh);
+        });
+        // West & East borders
+        [-hw, hw].forEach(dx => {
+            const bMesh = new THREE.Mesh(new THREE.BoxGeometry(borderThickness, 44, 0.05), borderMat);
+            bMesh.position.set(dx, -575, 0.31);
+            hubGroup.add(bMesh);
+        });
+
+        // 4. White Runway Threshold Piano-Key Stripes
+        const whiteMat = new THREE.MeshBasicMaterial({ color: 0xf1f5f9 });
+        for (let y = -575 - 18; y <= -575 + 18; y += 4.5) {
+            // West threshold keys
+            const wKey = new THREE.Mesh(new THREE.BoxGeometry(5.0, 1.8, 0.04), whiteMat);
+            wKey.position.set(-84, y, 0.31);
+            hubGroup.add(wKey);
+            // East threshold keys
+            const eKey = new THREE.Mesh(new THREE.BoxGeometry(5.0, 1.8, 0.04), whiteMat);
+            eKey.position.set(84, y, 0.31);
+            hubGroup.add(eKey);
+        }
+
+        // 5. Centerline Yellow Dashed Taxiway along Y = -575 (excluding center GCS pad |X| < 14)
+        for (let x = -75; x <= 75; x += 6) {
+            if (Math.abs(x) < 14) continue;
+            const dash = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.6, 0.04), borderMat);
+            dash.position.set(x, -575, 0.31);
+            hubGroup.add(dash);
+        }
+
+        // 6. Central GCS Ground Pad Base Ring at (0, -575)
+        const gcsRingMat = new THREE.MeshBasicMaterial({ color: 0xffd600, side: THREE.DoubleSide });
+        const gcsRing = new THREE.Mesh(new THREE.RingGeometry(10.6, 11.4, 36), gcsRingMat);
+        gcsRing.position.set(0, -575, 0.31);
+        hubGroup.add(gcsRing);
+
+        const gcsInnerRingMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.6, side: THREE.DoubleSide });
+        const gcsInnerRing = new THREE.Mesh(new THREE.RingGeometry(6.8, 7.2, 36), gcsInnerRingMat);
+        gcsInnerRing.position.set(0, -575, 0.31);
+        hubGroup.add(gcsInnerRing);
+
+        // 7. Helipads: PAD-A (-65, -566) and PAD-B (+65, -566)
+        [-65, 65].forEach(hx => {
+            const hRing = new THREE.Mesh(new THREE.RingGeometry(5.2, 5.8, 32), borderMat);
+            hRing.position.set(hx, -566, 0.31);
+            hubGroup.add(hRing);
+
+            const hInnerDashed = new THREE.Mesh(new THREE.RingGeometry(3.4, 3.8, 24), gcsInnerRingMat);
+            hInnerDashed.position.set(hx, -566, 0.31);
+            hubGroup.add(hInnerDashed);
+
+            // "H" Letter Crossbars
+            const hBarMat = new THREE.MeshBasicMaterial({ color: 0xffd600 });
+            const v1 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 3.8, 0.05), hBarMat);
+            v1.position.set(hx - 1.2, -566, 0.32);
+            hubGroup.add(v1);
+
+            const v2 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 3.8, 0.05), hBarMat);
+            v2.position.set(hx + 1.2, -566, 0.32);
+            hubGroup.add(v2);
+
+            const horiz = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.5, 0.05), hBarMat);
+            horiz.position.set(hx, -566, 0.32);
+            hubGroup.add(horiz);
+        });
+
+        // 8. 75m Standoff Access Runway Connector (Connecting Y = -500 black city boundary to Y = -553 hub)
+        const roadMat = new THREE.MeshStandardMaterial({
+            color: 0x1c2430,
+            roughness: 0.8,
+            metalness: 0.2,
+        });
+        const road = new THREE.Mesh(new THREE.BoxGeometry(16, 52, 0.15), roadMat);
+        road.position.set(0, -526, 0.15); // span Y = -500 to -552
+        road.receiveShadow = true;
+        hubGroup.add(road);
+
+        // Road yellow boundary curbs
+        [-8, 8].forEach(rx => {
+            const curb = new THREE.Mesh(new THREE.BoxGeometry(0.4, 52, 0.06), borderMat);
+            curb.position.set(rx, -526, 0.24);
+            hubGroup.add(curb);
+        });
+
+        // Road dashed center line
+        for (let ry = -548; ry <= -504; ry += 6) {
+            const rDash = new THREE.Mesh(new THREE.BoxGeometry(0.5, 3.5, 0.05), whiteMat);
+            rDash.position.set(0, ry, 0.24);
+            hubGroup.add(rDash);
+        }
+
+        // 9. Visual 75m Standoff Measurement Bracket Line (West Flank at X = -80)
+        const guideMat = new THREE.LineDashedMaterial({
+            color: 0x00e5ff,
+            dashSize: 3,
+            gapSize: 2,
+            transparent: true,
+            opacity: 0.85,
+        });
+        const guideGeo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(-80, -500, 0.5),
+            new THREE.Vector3(-80, -575, 0.5),
+        ]);
+        const guideLine = new THREE.Line(guideGeo, guideMat);
+        guideLine.computeLineDistances();
+        hubGroup.add(guideLine);
+
+        // Boundary tick at Y = -500
+        const tick1 = new THREE.Mesh(new THREE.BoxGeometry(6, 0.6, 0.1), borderMat);
+        tick1.position.set(-80, -500, 0.5);
+        hubGroup.add(tick1);
+
+        // Hub tick at Y = -575
+        const tick2 = new THREE.Mesh(new THREE.BoxGeometry(6, 0.6, 0.1), borderMat);
+        tick2.position.set(-80, -575, 0.5);
+        hubGroup.add(tick2);
+
+        // 10. Corner Floodlight Towers (4 corners of apron)
+        const poleGeo = new THREE.CylinderGeometry(0.2, 0.35, 7.5, 6);
+        const poleMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.8, roughness: 0.3 });
+        const lightGeo = new THREE.SphereGeometry(0.4, 8, 8);
+        const lightMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+
+        [[-90, -597], [90, -597], [-90, -553], [90, -553]].forEach(([px, py]) => {
+            const pole = new THREE.Mesh(poleGeo, poleMat);
+            pole.rotation.x = Math.PI / 2;
+            pole.position.set(px, py, 3.75);
+            hubGroup.add(pole);
+
+            const light = new THREE.Mesh(lightGeo, lightMat);
+            light.position.set(px, py, 7.5);
+            hubGroup.add(light);
+        });
+
+        group.add(hubGroup);
     }
 
     // ------------------------------------------------------------------------
@@ -2185,9 +2145,17 @@ const SectorDelta = (() => {
             dioramaGroup = new THREE.Group();
             sceneTheater.add(dioramaGroup);
 
-            // 1. Beveled Tabletop Tray (Plinth) 360m x 360m
-            const plinth = createPlinthTray(360, 10);
+            // 1. Beveled Tabletop Tray (Plinth) 1000m x 1000m
+            const plinth = createPlinthTray(1000, 10);
             dioramaGroup.add(plinth);
+
+            // 1b. 1000m x 1000m x 130m Holographic Tactical Airspace Boundary Wireframe Box
+            const boundaryGeo = new THREE.BoxGeometry(1000, 1000, 130);
+            const boundaryEdges = new THREE.EdgesGeometry(boundaryGeo);
+            const boundaryMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.28 });
+            const boundaryLine = new THREE.LineSegments(boundaryEdges, boundaryMat);
+            boundaryLine.position.set(0, 0, 65);
+            dioramaGroup.add(boundaryLine);
 
             // 2. Elevated Curved Highway Overpass & Miniature Cars
             createElevatedOverpass(dioramaGroup);
@@ -2200,6 +2168,9 @@ const SectorDelta = (() => {
 
             // 5. Dedicated 3D Physical Launch Pads on GCS Apron
             create3DLaunchPads(dioramaGroup);
+
+            // 5b. Relocated 3D GCS Flight Apron Platform (75m south of boundary at Y = -575)
+            createHubApronPlatform(dioramaGroup);
 
             // 6. Initialize MeitY / IIT Bombay / IISER Bhopal 1000m Challenge Arena
             createChallengeArena(sceneTheater);

@@ -171,9 +171,9 @@ function applyScenarioUI(scen) {
     }
     if (cameraTheater && controlsTheater) {
         smoothPanProgress = 1.0;
-        controlsTheater.maxDistance = 1600;
-        cameraTheater.position.set(135, -345, 215);
-        controlsTheater.target.set(0, -45, 25);
+        controlsTheater.maxDistance = 6500;
+        cameraTheater.position.set(280, -1180, 720);
+        controlsTheater.target.set(0, -50, 20);
         controlsTheater.update();
     }
 }
@@ -227,11 +227,11 @@ function initTheaterViewport() {
     const skyTex = new THREE.CanvasTexture(skyCanvas);
     theaterSkyTex = skyTex;
     sceneTheater.background = skyTex;
-    sceneTheater.fog = new THREE.FogExp2(0x95c7f2, 0.00045);
+    sceneTheater.fog = new THREE.FogExp2(0x95c7f2, 0.00018);
 
     // 2. Camera (3/4 Elevated Isometric Perspective matching reference photograph)
-    cameraTheater = new THREE.PerspectiveCamera(46, width / height, 1, 3500);
-    cameraTheater.position.set(135, -345, 215);
+    cameraTheater = new THREE.PerspectiveCamera(46, width / height, 1, 12000);
+    cameraTheater.position.set(280, -1180, 720);
     cameraTheater.up.set(0, 0, 1);
 
     // 3. Renderer (High-Performance Hardware Context with ACES Filmic Tone Mapping)
@@ -250,9 +250,9 @@ function initTheaterViewport() {
         controlsTheater.enableDamping = true;
         controlsTheater.dampingFactor = 0.05;
         controlsTheater.maxPolarAngle = Math.PI / 2 - 0.02;
-        controlsTheater.minDistance = 20;
-        controlsTheater.maxDistance = 1600;
-        controlsTheater.target.set(0, -45, 25);
+        controlsTheater.minDistance = 15;
+        controlsTheater.maxDistance = 6500;
+        controlsTheater.target.set(0, -50, 20);
         controlsTheater.enablePan = true;
         controlsTheater.screenSpacePanning = false; // Panning glides parallel to ground plane
         controlsTheater.panSpeed = 1.5;
@@ -320,8 +320,8 @@ function initTheaterViewport() {
     outerGroundMesh = outerGround;
     sceneTheater.add(outerGround);
 
-    // 7. GCS Base Station Compound on Sector Delta Diorama Tray at (0, -145, 0.1)
-    createGCSBase(0, -145, 0.1);
+    // 7. GCS Base Station Compound — positioned 75m south of 1000m black boundary at (0, -575, 0.1)
+    createGCSBase(0, -575, 0.1);
 
     // 8. Particle Systems
     initParticleSystems();
@@ -758,7 +758,7 @@ function createTheaterTerrain() {
     // ------------------------------------------------------------------------
     // 5. 700x700x130m Operational Tactical Airspace Boundary
     // ------------------------------------------------------------------------
-    const boundaryGeo = new THREE.BoxGeometry(700, 700, 130);
+    const boundaryGeo = new THREE.BoxGeometry(1000, 1000, 130);
     const boundaryEdges = new THREE.EdgesGeometry(boundaryGeo);
     const boundaryMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.22 });
     const boundaryLine = new THREE.LineSegments(boundaryEdges, boundaryMat);
@@ -2135,8 +2135,8 @@ function updateLinks(linksData, routesData, dronesData) {
     dronesData.forEach(d => {
         nodeCoords.set(d.id, d.position);
     });
-    // GCS Base Station Radar Mast Receiver (Sector Delta: 0, -145, 26 | Challenge: -75, 0, 16)
-    const gcsCoords = (currentScenario === "challenge") ? [-75, 0, 16] : [0, -145, 26];
+    // GCS Base Station Radar Mast Receiver (Sector Delta: 0, -575, 26 | Challenge: -75, 0, 16)
+    const gcsCoords = (currentScenario === "challenge") ? [-75, 0, 16] : [0, -575, 26];
     nodeCoords.set("GCS", gcsCoords);
 
     const activeRoutePairs = new Set();
@@ -2752,7 +2752,7 @@ function updateSelectionRoute() {
         return;
     }
 
-    const gcsCoords = (currentScenario === "challenge") ? [-75, 0, 16] : [0, -145, 26];
+    const gcsCoords = (currentScenario === "challenge") ? [-75, 0, 16] : [0, -575, 26];
     const posAttr = selectionRouteLine.geometry.attributes.position;
     let ptCount = 0;
 
@@ -4978,24 +4978,24 @@ function initUIControls() {
                     cameraTheater.position.set(450, 0, 1150);
                     controlsTheater.target.set(450, 0, 0);
                 } else {
-                    cameraTheater.position.set(0, -45, 520);
-                    controlsTheater.target.set(0, -45, 0);
+                    cameraTheater.position.set(0, -50, 1850);
+                    controlsTheater.target.set(0, -50, 0);
                 }
             } else if (mode === "orbit") {
                 if (currentScenario === "challenge") {
                     cameraTheater.position.set(450, -850, 550);
                     controlsTheater.target.set(450, 0, 0);
                 } else {
-                    cameraTheater.position.set(135, -345, 215);
-                    controlsTheater.target.set(0, -45, 25);
+                    cameraTheater.position.set(280, -1180, 720);
+                    controlsTheater.target.set(0, -50, 20);
                 }
             } else if (mode === "gcs") {
                 if (currentScenario === "challenge") {
                     cameraTheater.position.set(-75, -50, 22);
                     controlsTheater.target.set(-75, 0, 10);
                 } else {
-                    cameraTheater.position.set(0, -145, 26);
-                    controlsTheater.target.set(0, 0, 35);
+                    cameraTheater.position.set(0, -575, 26);
+                    controlsTheater.target.set(0, -50, 45);
                 }
             }
         });
@@ -5457,7 +5457,7 @@ function animate() {
                 controlsTheater.target.lerp(_fpvTarget, 0.12);
             }
         } else if (activeCamMode === "gcs") {
-            cameraTheater.position.set(0, -145, 26);
+            cameraTheater.position.set(0, -575, 26);
             const focusMesh = droneMeshes.get(selectedDroneId) || droneMeshes.get("UAV_1");
             if (focusMesh) {
                 controlsTheater.target.lerp(focusMesh.position, 0.05);

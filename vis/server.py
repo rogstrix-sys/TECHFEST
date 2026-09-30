@@ -234,11 +234,11 @@ def create_default_simulation() -> SwarmSimulationCore:
     """Instantiate a fully configured UAV swarm simulation aligned with Sector Delta 3D Diorama."""
     config = SimulationConfig(
         dt=0.05,
-        world_bounds_x=(-175.0, 175.0),
-        world_bounds_y=(-175.0, 175.0),
+        world_bounds_x=(-500.0, 500.0),
+        world_bounds_y=(-650.0, 500.0),
         world_bounds_z=(0.0, 130.0),
-        gcs_position=(0.0, -145.0, 0.0),
-        gcs_comm_radius=280.0,
+        gcs_position=(0.0, -575.0, 0.0),
+        gcs_comm_radius=350.0,
         enable_downwash=True,
         enable_vsm_relays=True,
         enable_weather=True,
@@ -476,25 +476,25 @@ def create_default_simulation() -> SwarmSimulationCore:
 
     # 3. Add heterogeneous fleet of 16 UAVs spawning on their designated launch pads on the GCS Apron
     fleet_init = [
-        # Heavy Disaster Surveyors (Front row along tactical apron y = -145)
-        ("UAV_1", DroneRole.SURVEY, [-70.0, -145.0, 0.45]),
-        ("UAV_2", DroneRole.SURVEY, [-50.0, -145.0, 0.45]),
-        ("UAV_3", DroneRole.SURVEY, [-30.0, -145.0, 0.45]),
-        ("UAV_4", DroneRole.SURVEY, [-10.0, -145.0, 0.45]),
-        ("UAV_5", DroneRole.SURVEY, [10.0, -145.0, 0.45]),
-        ("UAV_6", DroneRole.SURVEY, [30.0, -145.0, 0.45]),
-        ("UAV_7", DroneRole.SURVEY, [50.0, -145.0, 0.45]),
-        ("UAV_8", DroneRole.SURVEY, [70.0, -145.0, 0.45]),
-        # Elevated High-Altitude Multi-Hop Relays (Relay pad row y = -136)
-        ("RELAY_1", DroneRole.RELAY, [-45.0, -136.0, 0.45]),
-        ("RELAY_2", DroneRole.RELAY, [-15.0, -136.0, 0.45]),
-        ("RELAY_3", DroneRole.RELAY, [15.0, -136.0, 0.45]),
-        ("RELAY_4", DroneRole.RELAY, [45.0, -136.0, 0.45]),
-        # Rapid Reconnaissance Scouts (Scout pad row y = -153)
-        ("SCOUT_1", DroneRole.SURVEY, [-45.0, -153.0, 0.45]),
-        ("SCOUT_2", DroneRole.SURVEY, [-15.0, -153.0, 0.45]),
-        ("SCOUT_3", DroneRole.SURVEY, [15.0, -153.0, 0.45]),
-        ("SCOUT_4", DroneRole.SURVEY, [45.0, -153.0, 0.45]),
+        # Heavy Disaster Surveyors (Front row along tactical apron y = -575)
+        ("UAV_1", DroneRole.SURVEY, [-70.0, -575.0, 0.45]),
+        ("UAV_2", DroneRole.SURVEY, [-50.0, -575.0, 0.45]),
+        ("UAV_3", DroneRole.SURVEY, [-30.0, -575.0, 0.45]),
+        ("UAV_4", DroneRole.SURVEY, [-10.0, -575.0, 0.45]),
+        ("UAV_5", DroneRole.SURVEY, [10.0, -575.0, 0.45]),
+        ("UAV_6", DroneRole.SURVEY, [30.0, -575.0, 0.45]),
+        ("UAV_7", DroneRole.SURVEY, [50.0, -575.0, 0.45]),
+        ("UAV_8", DroneRole.SURVEY, [70.0, -575.0, 0.45]),
+        # Elevated High-Altitude Multi-Hop Relays (Relay pad row y = -566)
+        ("RELAY_1", DroneRole.RELAY, [-45.0, -566.0, 0.45]),
+        ("RELAY_2", DroneRole.RELAY, [-15.0, -566.0, 0.45]),
+        ("RELAY_3", DroneRole.RELAY, [15.0, -566.0, 0.45]),
+        ("RELAY_4", DroneRole.RELAY, [45.0, -566.0, 0.45]),
+        # Rapid Reconnaissance Scouts (Scout pad row y = -583)
+        ("SCOUT_1", DroneRole.SURVEY, [-45.0, -583.0, 0.45]),
+        ("SCOUT_2", DroneRole.SURVEY, [-15.0, -583.0, 0.45]),
+        ("SCOUT_3", DroneRole.SURVEY, [15.0, -583.0, 0.45]),
+        ("SCOUT_4", DroneRole.SURVEY, [45.0, -583.0, 0.45]),
     ]
     for d_id, role, pos in fleet_init:
         drone = Drone(d_id, role=role, initial_pos=np.array(pos, dtype=np.float64))

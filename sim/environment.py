@@ -27,12 +27,12 @@ class AltitudeCorridor(str, Enum):
 @dataclass
 class EnvironmentConfig:
     """Configurable boundaries and base stations for the disaster theater."""
-    x_min: float = -250.0
-    x_max: float = 250.0
-    y_min: float = -250.0
-    y_max: float = 250.0
+    x_min: float = -500.0
+    x_max: float = 500.0
+    y_min: float = -650.0
+    y_max: float = 500.0
     z_min: float = 0.0
-    z_max: float = 120.0
+    z_max: float = 130.0
 
     # Ground Control Station location (default origin)
     gcs_position: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0], dtype=np.float64))
