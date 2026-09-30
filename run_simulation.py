@@ -234,7 +234,7 @@ def main() -> None:
             import threading
             threading.Thread(target=open_browser, daemon=True).start()
 
-        uvicorn.run(app, host="127.0.0.1", port=active_port, log_level="warning")
+        uvicorn.run(app, host="127.0.0.1", port=active_port, log_level="warning", ws_per_message_deflate=True)
 
 
 if __name__ == "__main__":

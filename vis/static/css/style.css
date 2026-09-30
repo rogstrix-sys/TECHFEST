@@ -253,7 +253,16 @@ body {
     gap: 4px;
     width: 100%;
     flex-wrap: nowrap;
-    justify-content: flex-end;
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    padding-bottom: 2px;
+}
+
+.hud-header-row2::-webkit-scrollbar {
+    display: none;
 }
 
 .hud-brand {
@@ -1562,6 +1571,41 @@ body {
 @keyframes blinkFault {
     from { opacity: 0.6; }
     to { opacity: 1.0; box-shadow: 0 0 8px #ff3366; }
+}
+
+.charging-badge {
+    background: rgba(0, 255, 136, 0.2);
+    border: 1px solid #00ff88;
+    color: #00ff88;
+    font-size: 8px;
+    font-weight: 800;
+    padding: 1px 4px;
+    border-radius: 3px;
+    animation: blinkCharging 1.2s infinite alternate;
+}
+
+@keyframes blinkCharging {
+    from { opacity: 0.6; }
+    to { opacity: 1.0; box-shadow: 0 0 8px #00ff88; }
+}
+
+#select-formation {
+    background: rgba(10, 18, 32, 0.85);
+    color: var(--neon-yellow);
+    border: 1px solid rgba(255, 214, 0, 0.45);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+#select-formation:hover, #select-formation:focus {
+    border-color: var(--neon-yellow);
+    box-shadow: 0 0 8px rgba(255, 214, 0, 0.5);
+    outline: none;
 }
 
 

@@ -23,6 +23,7 @@ from sim.types import (
     TelemetrySnapshot,
 )
 from sim.weather import DrydenTurbulenceModel, WindConfig
+from sim.swarm_sim import DroneSpatialGrid
 
 
 @dataclass
@@ -40,6 +41,7 @@ class SimulationConfig:
     enable_weather: bool = False                 # Enable Dryden atmospheric wind & turbulence
     wind_config: Optional[WindConfig] = None     # Custom wind/turbulence parameters
     history_buffer_len: int = 600                # Number of telemetry frames to buffer (30s @ 20Hz)
+    enable_spatial_grid: bool = True             # Enable accelerated 3D spatial grid for large swarms
 
 
 class SwarmSimulationCore:
@@ -81,9 +83,34 @@ class SwarmSimulationCore:
         self.step_count: int = 0
         self.history: deque = deque(maxlen=self.config.history_buffer_len)
 
+        # Swarm tactical formation state
+        self.active_formation: str = "AUTONOMOUS"
+
         # Event logging
         self.collision_events: List[Dict[str, Any]] = []
         self.flight_events: List[Dict[str, Any]] = []
+
+        # 3D Spatial Grid for accelerated proximity / collision avoidance
+        self.spatial_grid: DroneSpatialGrid = DroneSpatialGrid(cell_size=25.0)
+        self.enable_spatial_grid: bool = getattr(self.config, "enable_spatial_grid", False)
+
+        # Pre-cached vectorized obstacle bounding box arrays
+        self._cached_obs_min_pts: Optional[np.ndarray] = None
+        self._cached_obs_max_pts: Optional[np.ndarray] = None
+        self._cached_obs_count: int = -1
+
+    def _update_cached_obstacles(self) -> None:
+        """Synchronize pre-cached NumPy obstacle bounding arrays."""
+        if self._cached_obs_count != len(self.obstacles):
+            om_list = [getattr(o, "min_pt", getattr(o, "min_bound", None)) for o in self.obstacles]
+            ox_list = [getattr(o, "max_pt", getattr(o, "max_bound", None)) for o in self.obstacles]
+            if om_list and om_list[0] is not None and ox_list[0] is not None:
+                self._cached_obs_min_pts = np.vstack(om_list)
+                self._cached_obs_max_pts = np.vstack(ox_list)
+            else:
+                self._cached_obs_min_pts = None
+                self._cached_obs_max_pts = None
+            self._cached_obs_count = len(self.obstacles)
 
     # -------------------------------------------------------------------------
     # Entity Registration
@@ -104,6 +131,10 @@ class SwarmSimulationCore:
         """Add a static 3D obstacle to the simulation."""
         self.obstacles.append(obstacle)
         self.environment.add_obstacle(obstacle)
+        if self.mission_manager is not None:
+            setattr(self.mission_manager, "obstacles", self.obstacles)
+            if hasattr(self.mission_manager, "sector_manager") and self.mission_manager.sector_manager is not None:
+                setattr(self.mission_manager.sector_manager, "obstacles", self.obstacles)
         for d in self.drones.values():
             if not hasattr(d, "obstacles") or d.obstacles is None:
                 d.obstacles = self.obstacles
@@ -126,7 +157,22 @@ class SwarmSimulationCore:
             "current_dwell_time": 0.0,
             "is_completed": False,
             "assigned_drone_id": None,
+            "is_detected": False,
+            "is_reported": False,
+            "is_spawned": True,
+            "detection_time": None,
+            "detected_by": None,
         }
+        if hasattr(self, "mission_manager") and self.mission_manager is not None:
+            if hasattr(self.mission_manager, "sector_manager") and self.mission_manager.sector_manager is not None:
+                self.mission_manager.sector_manager.register_abnormality(
+                    anomaly_id=poi_id,
+                    anomaly_type="TARGET_SITE",
+                    position=position,
+                    severity=str(priority),
+                    description=f"Disaster Target Site: {poi_id}",
+                    required_dwell=float(required_dwell_time),
+                )
 
     def set_network_engine(self, network_engine: Any) -> None:
         """Attach a FANET communication and routing subsystem (Milestone 2)."""
@@ -135,6 +181,105 @@ class SwarmSimulationCore:
     def set_mission_manager(self, mission_manager: Any) -> None:
         """Attach a high-level disaster survey mission manager (Milestone 3)."""
         self.mission_manager = mission_manager
+        if self.mission_manager is not None:
+            setattr(self.mission_manager, "obstacles", self.obstacles)
+            if hasattr(self.mission_manager, "sector_manager") and self.mission_manager.sector_manager is not None:
+                setattr(self.mission_manager.sector_manager, "obstacles", self.obstacles)
+
+    def trigger_obstacle_collapse(
+        self,
+        obstacle_id: Optional[str] = None,
+        collapse_ratio: float = 0.45,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Simulate a mid-mission dynamic structural failure of a disaster building.
+        Reduces building height, updates AABB bounds, expands rubble field,
+        and spawns an emergency trapped survivor.
+        """
+        if not self.obstacles:
+            return None
+
+        target_obs = None
+        if obstacle_id:
+            for obs in self.obstacles:
+                if getattr(obs, "id", "") == obstacle_id or getattr(obs, "name", "") == obstacle_id:
+                    target_obs = obs
+                    break
+
+        if target_obs is None:
+            # Default to tall tower (e.g. Damaged Tower Beta or high-rise)
+            candidates = [obs for obs in self.obstacles if getattr(obs, "max_pt", [0, 0, 0])[2] >= 35.0]
+            target_obs = candidates[0] if candidates else self.obstacles[0]
+
+        # Record original bounds
+        old_h = float(target_obs.max_pt[2] - target_obs.min_pt[2])
+        old_max_z = float(target_obs.max_pt[2])
+        new_max_z = round(float(target_obs.min_pt[2] + old_h * (1.0 - collapse_ratio)), 1)
+
+        # Modify AABB geometry in-place so all drones' APF calculations see the update immediately
+        target_obs.max_pt[2] = new_max_z
+        target_obs.min_pt[0] -= 4.0
+        target_obs.max_pt[0] += 4.0
+        target_obs.min_pt[1] -= 4.0
+        target_obs.max_pt[1] += 4.0
+        setattr(target_obs, "is_collapsed", True)
+        self._cached_obs_count = -1
+        self._update_cached_obstacles()
+        if hasattr(self, "network_engine") and hasattr(self.network_engine, "_los_cache"):
+            self.network_engine._los_cache.clear()
+        try:
+            from sim.planning import invalidate_los_cache
+            invalidate_los_cache()
+        except ImportError:
+            pass
+
+        # Notify mission manager if present
+        spawned_survivor = None
+        if self.mission_manager is not None:
+            if hasattr(self.mission_manager, "emit_tactical_comms"):
+                self.mission_manager.emit_tactical_comms(
+                    "WARNING",
+                    "GCS",
+                    f"💥 STRUCTURAL FAILURE: {target_obs.name} collapsed ({int(old_max_z)}m -> {int(new_max_z)}m). Rubble expanded. APF re-routing engaged!",
+                    "COLLAPSE",
+                )
+            if hasattr(self.mission_manager, "survivors"):
+                from sim.types import SurvivorRecord
+                c_x = float(0.5 * (target_obs.min_pt[0] + target_obs.max_pt[0]))
+                c_y = float(0.5 * (target_obs.min_pt[1] + target_obs.max_pt[1]))
+                s_id = f"SURVIVOR_COLLAPSE_{len(self.mission_manager.survivors)+1:02d}"
+                new_surv = SurvivorRecord(
+                    id=s_id,
+                    poi_id="POI_COLLAPSE",
+                    position=[c_x, c_y, 0.5],
+                    heat_c=38.4,
+                    confidence=0.96,
+                    discovered=False,
+                )
+                self.mission_manager.survivors[s_id] = new_surv
+                spawned_survivor = new_surv.to_dict()
+
+            if hasattr(self.mission_manager, "sector_manager") and self.mission_manager.sector_manager is not None:
+                c_x = float(0.5 * (target_obs.min_pt[0] + target_obs.max_pt[0]))
+                c_y = float(0.5 * (target_obs.min_pt[1] + target_obs.max_pt[1]))
+                self.mission_manager.sector_manager.register_abnormality(
+                    anomaly_id=f"ANOMALY_COLLAPSE_{target_obs.id}",
+                    anomaly_type="STRUCTURAL_COLLAPSE",
+                    position=[c_x, c_y, 0.5],
+                    severity="CRITICAL",
+                    description=f"Structural Failure Rubble: {target_obs.name}",
+                    required_dwell=8.0,
+                )
+
+        return {
+            "obstacle_id": target_obs.id,
+            "obstacle_name": target_obs.name,
+            "old_height_m": old_h,
+            "new_height_m": round(old_h * (1.0 - collapse_ratio), 1),
+            "new_max_pt": target_obs.max_pt.tolist(),
+            "new_min_pt": target_obs.min_pt.tolist(),
+            "spawned_survivor": spawned_survivor,
+        }
 
     # -------------------------------------------------------------------------
     # Physics & Navigation Steering Calculations
@@ -163,7 +308,7 @@ class SwarmSimulationCore:
             f_att = np.array([f_xy[0], f_xy[1], f_z], dtype=np.float64)
         elif target is not None:
             err = target - pos_i
-            dist = float(np.linalg.norm(err))
+            dist = math.sqrt(float(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]))
             k_att = 1.5
             if dist > 15.0:
                 f_att = (err / dist) * 15.0 * k_att
@@ -175,141 +320,225 @@ class SwarmSimulationCore:
         atten_horizon = max(8.0, r_sep_limit * 1.5)
         atten_barrier = max(2.2, r_sep_limit * 1.1)
 
-        for other_id in sorted(self.drones.keys()):
-            if other_id == drone.id:
-                continue
-            other = self.drones[other_id]
-            delta = pos_i - other.position
-            d_peer = float(np.linalg.norm(delta))
-            if 0.0 < d_peer < atten_horizon:
-                r_hat = delta / d_peer
-                gamma = 0.0 if d_peer <= atten_barrier else ((d_peer - atten_barrier) / (atten_horizon - atten_barrier)) ** 2
-                proj = max(0.0, float(np.dot(f_att, -r_hat)))
-                f_att -= proj * (1.0 - gamma) * (-r_hat)
+        # Determine candidate peer drones for interactions
+        if self.enable_spatial_grid and self.spatial_grid is not None and len(self.drones) >= 8:
+            if getattr(self.spatial_grid, "total_drones", 0) != len(self.drones):
+                self.spatial_grid.build(list(self.drones.values()))
+            peer_candidates = self.spatial_grid.query_nearby_peers(drone, search_radius=max(atten_horizon, 40.0))
+            candidate_ids = sorted([p.id for p in peer_candidates if getattr(p, "id", None) != drone.id])
+        else:
+            candidate_ids = [k for k in sorted(self.drones.keys()) if k != drone.id]
 
-        for obs in self.obstacles:
-            if hasattr(obs, "distance_and_closest_point"):
-                dist_o, closest_pt = obs.distance_and_closest_point(pos_i)
-            elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
-                closest_pt = np.clip(pos_i, obs.min_bound, obs.max_bound)
-                dist_o = float(np.linalg.norm(pos_i - closest_pt))
-            elif hasattr(obs, "min_pt") and hasattr(obs, "max_pt"):
-                closest_pt = np.clip(pos_i, obs.min_pt, obs.max_pt)
-                dist_o = float(np.linalg.norm(pos_i - closest_pt))
+        if candidate_ids:
+            cached_idx_map = getattr(self, "_cached_drone_idx_map", None)
+            cached_positions = getattr(self, "_cached_drone_positions", None)
+            cached_velocities = getattr(self, "_cached_drone_velocities", None)
+            cached_roles = getattr(self, "_cached_drone_roles", None)
+
+            if cached_idx_map is not None and cached_positions is not None and len(cached_positions) == len(self.drones) and all(cid in cached_idx_map for cid in candidate_ids):
+                indices = [cached_idx_map[cid] for cid in candidate_ids]
+                cand_positions = cached_positions[indices]
+                cand_velocities = cached_velocities[indices]
+                cand_roles = [cached_roles[idx] for idx in indices]
             else:
-                continue
+                cand_positions = np.array([self.drones[cid].position for cid in candidate_ids], dtype=np.float64)
+                cand_velocities = np.array([self.drones[cid].velocity for cid in candidate_ids], dtype=np.float64)
+                cand_roles = [self.drones[cid].role for cid in candidate_ids]
 
-            if dist_o < 10.0:
-                push = pos_i - closest_pt
-                push_norm = float(np.linalg.norm(push))
+            deltas = pos_i - cand_positions
+            dists = np.linalg.norm(deltas, axis=1)
+
+            # Prioritized Safety Attenuation: Attenuate attractive force along blocked paths
+            atten_mask = (dists > 0.0) & (dists < atten_horizon)
+            if np.any(atten_mask):
+                for idx in np.nonzero(atten_mask)[0]:
+                    d_peer = dists[idx]
+                    delta = deltas[idx]
+                    r_hat = delta / d_peer
+                    gamma = 0.0 if d_peer <= atten_barrier else ((d_peer - atten_barrier) / (atten_horizon - atten_barrier)) ** 2
+                    proj = max(0.0, float(np.dot(f_att, -r_hat)))
+                    f_att -= proj * (1.0 - gamma) * (-r_hat)
+        else:
+            cand_positions = None
+            cand_velocities = None
+            cand_roles = None
+            deltas = None
+            dists = None
+
+        self._update_cached_obstacles()
+
+        if self._cached_obs_min_pts is not None:
+            closest_pts_all = np.clip(pos_i, self._cached_obs_min_pts, self._cached_obs_max_pts)
+            push_all = pos_i - closest_pts_all
+            dists_all = np.linalg.norm(push_all, axis=1)
+
+            # Vectorized obstacle attenuation along blocked attractive paths
+            near_atten_indices = np.nonzero(dists_all < 10.0)[0]
+            for obs_idx in near_atten_indices:
+                obs = self.obstacles[obs_idx]
+                dist_o = float(dists_all[obs_idx])
+                closest_pt = closest_pts_all[obs_idx]
+                push = push_all[obs_idx]
+                push_norm = dist_o
                 unit_push = push / push_norm if push_norm > 1e-4 else (
                     obs.surface_normal(pos_i) if hasattr(obs, "surface_normal") else np.array([0.0, 0.0, 1.0])
                 )
                 gamma_obs = 0.0 if dist_o <= 2.5 else ((dist_o - 2.5) / (10.0 - 2.5)) ** 2
                 proj_o = max(0.0, float(np.dot(f_att, -unit_push)))
                 f_att -= proj_o * (1.0 - gamma_obs) * (-unit_push)
+        else:
+            closest_pts_all = None
+            push_all = None
+            dists_all = None
 
-        # 2. Inter-drone separation & alignment (Reynolds) & Downwash
+        # 2. Inter-drone separation & alignment (Reynolds) & Downwash (Vectorized via NumPy)
         f_sep = np.zeros(3, dtype=np.float64)
         f_align = np.zeros(3, dtype=np.float64)
         f_downwash = np.zeros(3, dtype=np.float64)
 
-        for other_id in sorted(self.drones.keys()):
-            if other_id == drone.id:
-                continue
-            other = self.drones[other_id]
-            delta = pos_i - other.position
-            dist = float(np.linalg.norm(delta))
+        if candidate_ids and dists is not None:
+            # Fast bounding rejection: candidate drones within 25.0m
+            valid_mask = dists <= 25.0
+            zero_mask = valid_mask & (dists <= 1e-4)
+            if np.any(zero_mask):
+                f_sep += np.array([1.0, 0.0, 0.0], dtype=np.float64) * (80.0 * float(np.sum(zero_mask)))
 
-            # Dynamic closing velocity repulsive horizon scaled by separation_radius
-            if dist > 1e-4:
-                r_hat = delta / dist
-                v_rel = vel_i - other.velocity
-                v_close = max(0.0, float(-np.dot(v_rel, r_hat)))
+            calc_mask = valid_mask & (dists > 1e-4)
+            if np.any(calc_mask):
+                sub_d = dists[calc_mask]
+                sub_delta = deltas[calc_mask]
+                sub_vel = cand_velocities[calc_mask]
+
+                r_hats = sub_delta / sub_d[:, None]
+                v_rels = vel_i - sub_vel
+                v_close = np.maximum(0.0, -np.sum(v_rels * r_hats, axis=1))
+
                 if r_sep_limit > 6.0:
-                    r_sep_dyn = max(r_sep_limit * 1.35, (v_close ** 2) / 4.0 + 1.2 * v_close + r_sep_limit * 1.1)
-                    if dist < r_sep_dyn:
-                        d_eff = max(dist - (r_sep_limit * 0.4), 0.1)
-                        r_eff = max(r_sep_dyn - (r_sep_limit * 0.4), 0.2)
-                        scale = max(1.0, (r_sep_dyn / 6.0) ** 2)
+                    r_sep_dyn = np.maximum(r_sep_limit * 1.35, (v_close ** 2) / 4.0 + 1.2 * v_close + r_sep_limit * 1.1)
+                    active = sub_d < r_sep_dyn
+                    if np.any(active):
+                        act_d = sub_d[active]
+                        act_dyn = r_sep_dyn[active]
+                        act_close = v_close[active]
+                        act_rhat = r_hats[active]
+
+                        d_eff = np.maximum(act_d - (r_sep_limit * 0.4), 0.1)
+                        r_eff = np.maximum(act_dyn - (r_sep_limit * 0.4), 0.2)
+                        scale = np.maximum(1.0, (act_dyn / 6.0) ** 2)
                         mag_apf = 60.0 * scale * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
-                        mag_damp = 18.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m_i
+                        mag_damp = 18.0 * act_close * ((act_dyn - act_d) / act_dyn) ** 2 * m_i
                         barrier_dist = r_sep_limit * 1.15
-                        mag_barrier = 150.0 * ((barrier_dist / max(dist, 0.1)) ** 3) if dist < barrier_dist else 0.0
-                        mag_total = min(mag_apf + mag_damp + mag_barrier, 400.0)
-                        f_sep += mag_total * r_hat
+                        mag_barrier = np.where(act_d < barrier_dist, 150.0 * ((barrier_dist / np.maximum(act_d, 0.1)) ** 3), 0.0)
+                        mag_total = np.minimum(mag_apf + mag_damp + mag_barrier, 400.0)
+                        f_sep += np.sum(mag_total[:, None] * act_rhat, axis=0)
                 else:
-                    r_sep_dyn = max(6.0, (v_close ** 2) / 6.0 + 0.8 * v_close + 2.5)
-                    if dist < r_sep_dyn:
-                        d_eff = max(dist - 1.8, 0.1)
-                        r_eff = max(r_sep_dyn - 1.8, 0.2)
+                    r_sep_dyn = np.maximum(6.0, (v_close ** 2) / 6.0 + 0.8 * v_close + 2.5)
+                    active = sub_d < r_sep_dyn
+                    if np.any(active):
+                        act_d = sub_d[active]
+                        act_dyn = r_sep_dyn[active]
+                        act_close = v_close[active]
+                        act_rhat = r_hats[active]
+
+                        d_eff = np.maximum(act_d - 1.8, 0.1)
+                        r_eff = np.maximum(act_dyn - 1.8, 0.2)
                         mag_apf = 45.0 * (1.0 / d_eff - 1.0 / r_eff) / (d_eff ** 2)
-                        mag_damp = 12.0 * v_close * ((r_sep_dyn - dist) / r_sep_dyn) ** 2 * m_i
-                        mag_barrier = 80.0 * ((2.2 / max(dist, 0.1)) ** 3) if dist < 2.5 else 0.0
-                        mag_total = min(mag_apf + mag_damp + mag_barrier, 250.0)
-                        f_sep += mag_total * r_hat
-            elif dist <= 1e-4:
-                f_sep += np.array([1.0, 0.0, 0.0], dtype=np.float64) * 80.0
+                        mag_damp = 12.0 * act_close * ((act_dyn - act_d) / act_dyn) ** 2 * m_i
+                        mag_barrier = np.where(act_d < 2.5, 80.0 * ((2.2 / np.maximum(act_d, 0.1)) ** 3), 0.0)
+                        mag_total = np.minimum(mag_apf + mag_damp + mag_barrier, 250.0)
+                        f_sep += np.sum(mag_total[:, None] * act_rhat, axis=0)
 
             # Alignment force (within 12.0m, same role)
-            if 0.0 < dist < 12.0 and other.role == drone.role and drone.flight_mode == FlightMode.TRANSIT:
-                f_align += 0.5 * (other.velocity - vel_i)
+            if drone.flight_mode == FlightMode.TRANSIT:
+                same_role_mask = np.array([r == drone.role for r in cand_roles], dtype=bool)
+                align_mask = (dists > 0.0) & (dists < 12.0) & same_role_mask
+                if np.any(align_mask):
+                    f_align += np.sum(0.5 * (cand_velocities[align_mask] - vel_i), axis=0)
 
             # Aerodynamic downwash cone avoidance
             if self.config.enable_downwash:
-                dz = pos_i[2] - other.position[2]
-                d_xy = float(np.linalg.norm(delta[:2]))
-                # If drone_i is below other drone within 25-degree opening cone
-                if -8.0 <= dz <= -0.5 and d_xy <= (abs(dz) * 0.4663 + 1.0):
-                    if d_xy > 1e-3:
-                        lateral_dir = delta[:2] / d_xy
-                    else:
-                        lateral_dir = np.array([1.0, 0.0], dtype=np.float64)
-                    mag_dw = 35.0 * math.exp(-(d_xy ** 2) / 8.0)
-                    f_downwash[0] += lateral_dir[0] * mag_dw
-                    f_downwash[1] += lateral_dir[1] * mag_dw
-                    f_downwash[2] -= 4.0 * math.exp(-(d_xy ** 2) / 2.0)
+                dz = pos_i[2] - cand_positions[:, 2]
+                d_xy = np.linalg.norm(deltas[:, :2], axis=1)
+                dw_mask = (dz >= -8.0) & (dz <= -0.5) & (d_xy <= (np.abs(dz) * 0.4663 + 1.0))
+                if np.any(dw_mask):
+                    sub_dxy = d_xy[dw_mask]
+                    sub_delta = deltas[dw_mask, :2]
+                    lat_dir = np.where(sub_dxy[:, None] > 1e-3, sub_delta / np.maximum(sub_dxy[:, None], 1e-6), np.array([1.0, 0.0]))
+                    mag_dw = 35.0 * np.exp(-(sub_dxy ** 2) / 8.0)
+                    f_downwash[:2] += np.sum(lat_dir * mag_dw[:, None], axis=0)
+                    f_downwash[2] -= np.sum(4.0 * np.exp(-(sub_dxy ** 2) / 2.0))
 
         # 3. Obstacle repulsion forces
         f_obs = np.zeros(3, dtype=np.float64)
-        for obs in self.obstacles:
-            if hasattr(obs, "distance_and_closest_point"):
-                dist_obs, closest_pt = obs.distance_and_closest_point(pos_i)
-            elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
-                closest_pt = np.clip(pos_i, obs.min_bound, obs.max_bound)
-                dist_obs = float(np.linalg.norm(pos_i - closest_pt))
-            elif hasattr(obs, "min_pt") and hasattr(obs, "max_pt"):
-                closest_pt = np.clip(pos_i, obs.min_pt, obs.max_pt)
-                dist_obs = float(np.linalg.norm(pos_i - closest_pt))
-            else:
-                continue
+        if self._cached_obs_min_pts is not None and dists_all is not None:
+            rep_indices = np.nonzero(dists_all < 35.0)[0]
+            for obs_idx in rep_indices:
+                obs = self.obstacles[obs_idx]
+                dist_obs = float(dists_all[obs_idx])
+                closest_pt = closest_pts_all[obs_idx]
+                push_dir = push_all[obs_idx]
+                norm_push = dist_obs
+                if norm_push > 1e-4:
+                    unit_push = push_dir / norm_push
+                elif hasattr(obs, "surface_normal"):
+                    unit_push = obs.surface_normal(pos_i)
+                else:
+                    unit_push = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-            push_dir = pos_i - closest_pt
-            norm_push = float(np.linalg.norm(push_dir))
-            if norm_push > 1e-4:
-                unit_push = push_dir / norm_push
-            elif hasattr(obs, "surface_normal"):
-                unit_push = obs.surface_normal(pos_i)
-            else:
-                unit_push = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                # Dynamic sensing horizon based on approach speed
+                v_approach = max(0.0, float(-np.dot(vel_i, unit_push)))
+                rho_0_dyn = max(8.0, (v_approach ** 2) / (2.0 * drone.limits.max_accel) + 0.6 * v_approach + 2.5)
 
-            # Dynamic sensing horizon based on approach speed
-            v_approach = max(0.0, float(-np.dot(vel_i, unit_push)))
-            rho_0_dyn = max(8.0, (v_approach ** 2) / (2.0 * drone.limits.max_accel) + 0.6 * v_approach + 2.5)
+                if dist_obs < rho_0_dyn:
+                    d_eff = max(dist_obs - 2.0, 0.1)
+                    rho_eff = max(rho_0_dyn - 2.0, 0.2)
+                    mag_apf = 60.0 * (1.0 / d_eff - 1.0 / rho_eff) / (d_eff ** 2)
+                    mag_damp = 15.0 * v_approach * ((rho_0_dyn - dist_obs) / rho_0_dyn) ** 2 * m_i
+                    mag_barrier = 100.0 * ((2.5 / max(dist_obs, 0.1)) ** 3) if dist_obs < 3.0 else 0.0
+                    mag = min(mag_apf + mag_damp + mag_barrier, 300.0)
+                    f_obs += mag * unit_push
 
-            if dist_obs < rho_0_dyn:
-                d_eff = max(dist_obs - 2.0, 0.1)
-                rho_eff = max(rho_0_dyn - 2.0, 0.2)
-                mag_apf = 60.0 * (1.0 / d_eff - 1.0 / rho_eff) / (d_eff ** 2)
-                mag_damp = 15.0 * v_approach * ((rho_0_dyn - dist_obs) / rho_0_dyn) ** 2 * m_i
-                mag_barrier = 100.0 * ((2.5 / max(dist_obs, 0.1)) ** 3) if dist_obs < 3.0 else 0.0
-                mag = min(mag_apf + mag_damp + mag_barrier, 300.0)
-                f_obs += mag * unit_push
+                    # Tangential vortex force to prevent saddle-point stagnation
+                    vortex = np.cross(unit_push, np.array([0.0, 0.0, 1.0]))
+                    if np.linalg.norm(vortex) > 1e-4:
+                        f_obs += (vortex / np.linalg.norm(vortex)) * 20.0
+        else:
+            for obs in self.obstacles:
+                if hasattr(obs, "distance_and_closest_point"):
+                    dist_obs, closest_pt = obs.distance_and_closest_point(pos_i)
+                elif hasattr(obs, "min_pt") and hasattr(obs, "max_pt"):
+                    closest_pt = np.clip(pos_i, obs.min_pt, obs.max_pt)
+                    dist_obs = float(np.linalg.norm(pos_i - closest_pt))
+                elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
+                    closest_pt = np.clip(pos_i, obs.min_bound, obs.max_bound)
+                    dist_obs = float(np.linalg.norm(pos_i - closest_pt))
+                else:
+                    continue
 
-                # Tangential vortex force to prevent saddle-point stagnation
-                vortex = np.cross(unit_push, np.array([0.0, 0.0, 1.0]))
-                if np.linalg.norm(vortex) > 1e-4:
-                    f_obs += (vortex / np.linalg.norm(vortex)) * 20.0
+                push_dir = pos_i - closest_pt
+                norm_push = float(np.linalg.norm(push_dir))
+                if norm_push > 1e-4:
+                    unit_push = push_dir / norm_push
+                elif hasattr(obs, "surface_normal"):
+                    unit_push = obs.surface_normal(pos_i)
+                else:
+                    unit_push = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+                v_approach = max(0.0, float(-np.dot(vel_i, unit_push)))
+                rho_0_dyn = max(8.0, (v_approach ** 2) / (2.0 * drone.limits.max_accel) + 0.6 * v_approach + 2.5)
+
+                if dist_obs < rho_0_dyn:
+                    d_eff = max(dist_obs - 2.0, 0.1)
+                    rho_eff = max(rho_0_dyn - 2.0, 0.2)
+                    mag_apf = 60.0 * (1.0 / d_eff - 1.0 / rho_eff) / (d_eff ** 2)
+                    mag_damp = 15.0 * v_approach * ((rho_0_dyn - dist_obs) / rho_0_dyn) ** 2 * m_i
+                    mag_barrier = 100.0 * ((2.5 / max(dist_obs, 0.1)) ** 3) if dist_obs < 3.0 else 0.0
+                    mag = min(mag_apf + mag_damp + mag_barrier, 300.0)
+                    f_obs += mag * unit_push
+
+                    vortex = np.cross(unit_push, np.array([0.0, 0.0, 1.0]))
+                    if np.linalg.norm(vortex) > 1e-4:
+                        f_obs += (vortex / np.linalg.norm(vortex)) * 20.0
 
         # 4. Soft boundary containment force
         f_bound = np.zeros(3, dtype=np.float64)
@@ -386,6 +615,127 @@ class SwarmSimulationCore:
                 target_pos = np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64)
                 relay.set_target_waypoint(target_pos)
 
+    def set_swarm_formation(self, formation_name: str) -> bool:
+        """
+        Switch swarm tactical formation geometry:
+        - 'AUTONOMOUS': Standard distributed autonomous exploration & relay mesh.
+        - 'V_FORMATION': Aerodynamic wedge / chevron with leader at apex and staggered wingmen.
+        - 'LINE_SWEEP': Lateral line-abreast wall sweep across the operational area.
+        - 'PERIMETER_ORBIT': Orbital surveillance ring encircling the disaster core.
+        """
+        valid_formations = {"AUTONOMOUS", "V_FORMATION", "LINE_SWEEP", "PERIMETER_ORBIT"}
+        norm = str(formation_name).strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "V": "V_FORMATION",
+            "V_SHAPE": "V_FORMATION",
+            "CHEVRON": "V_FORMATION",
+            "WEDGE": "V_FORMATION",
+            "LINE": "LINE_SWEEP",
+            "SWEEP": "LINE_SWEEP",
+            "WALL": "LINE_SWEEP",
+            "ORBIT": "PERIMETER_ORBIT",
+            "PERIMETER": "PERIMETER_ORBIT",
+            "RING": "PERIMETER_ORBIT",
+            "AUTO": "AUTONOMOUS",
+        }
+        if norm in aliases:
+            norm = aliases[norm]
+        if norm not in valid_formations:
+            return False
+        self.active_formation = norm
+        if self.mission_manager is not None and hasattr(self.mission_manager, "emit_tactical_comms"):
+            self.mission_manager.emit_tactical_comms(
+                "INFO",
+                "SWARM",
+                f"🛡️ FORMATION RECONFIGURED: Swarm engaged in [{self.active_formation}]",
+                "OPERATIONS"
+            )
+        return True
+
+    def update_formation_setpoints(self) -> None:
+        """
+        Compute coordinated formation setpoints when active_formation != 'AUTONOMOUS'.
+        Applies kinematic offsets relative to the fleet leader or mission center,
+        dynamically feeding attractive APF setpoints while Reynolds separation
+        and obstacle repulsion guarantee collision safety.
+        """
+        if self.active_formation == "AUTONOMOUS":
+            return
+
+        # Select airborne participating drones
+        airborne_drones = [
+            d for d in sorted(self.drones.values(), key=lambda d: d.id)
+            if d.flight_mode in (FlightMode.TAKEOFF, FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.DATA_TX)
+            and not getattr(d, "is_manual_override", False)
+            and not getattr(d, "is_fault_injected", False)
+            and not getattr(d, "is_low_battery_rtb", False)
+        ]
+        if not airborne_drones:
+            return
+
+        leader = airborne_drones[0]
+        pos_lead = leader.position
+        tgt_lead = leader.get_target_waypoint()
+        if tgt_lead is not None and np.linalg.norm(tgt_lead[:2] - pos_lead[:2]) > 2.0:
+            h_dir = tgt_lead[:2] - pos_lead[:2]
+            h_dir = h_dir / np.linalg.norm(h_dir)
+        elif np.linalg.norm(leader.velocity[:2]) > 0.5:
+            h_dir = leader.velocity[:2] / np.linalg.norm(leader.velocity[:2])
+        else:
+            h_dir = np.array([0.0, 1.0], dtype=np.float64)
+
+        # Lateral right vector perpendicular to heading
+        right_dir = np.array([h_dir[1], -h_dir[0]], dtype=np.float64)
+
+        if self.active_formation == "V_FORMATION":
+            # Apex leader stays on course; wingmen stagger in V-shape
+            for idx, drone in enumerate(airborne_drones):
+                if idx == 0:
+                    continue
+                rank = (idx + 1) // 2
+                side = -1.0 if (idx % 2 == 1) else 1.0
+                lateral_dist = side * rank * 16.0
+                long_dist = -rank * 14.0
+                target_xy = pos_lead[:2] + h_dir * long_dist + right_dir * lateral_dist
+                target_z = max(24.0, pos_lead[2] + ((rank - 1) % 3) * 2.5)
+                drone.set_target_waypoint(np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64))
+                if drone.flight_mode in (FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.DATA_TX):
+                    drone.flight_mode = FlightMode.TRANSIT
+                # V-formation wingmen draft in the upwash vortices
+                drone.is_drafting = True
+                drone.drafting_leader_id = leader.id
+                drone.drafting_saving_pct = round(12.0 + (rank % 3) * 4.0, 1)
+
+        elif self.active_formation == "LINE_SWEEP":
+            # Lateral wall sweep perpendicular to heading
+            n_drones = len(airborne_drones)
+            spacing = 18.0
+            mid_pt = pos_lead[:2]
+            for idx, drone in enumerate(airborne_drones):
+                offset_lat = (idx - (n_drones - 1) / 2.0) * spacing
+                target_xy = mid_pt + right_dir * offset_lat
+                target_z = max(25.0, 32.0 + (idx % 3) * 3.0)
+                drone.set_target_waypoint(np.array([target_xy[0], target_xy[1], target_z], dtype=np.float64))
+                if drone.flight_mode in (FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.DATA_TX):
+                    drone.flight_mode = FlightMode.TRANSIT
+                drone.is_drafting = False
+
+        elif self.active_formation == "PERIMETER_ORBIT":
+            # Orbital ring encircling the disaster core at (0, 0)
+            n_drones = len(airborne_drones)
+            radius = 80.0
+            omega = 0.08  # rad/s slow rotation
+            base_angle = self.sim_time * omega
+            for idx, drone in enumerate(airborne_drones):
+                theta = base_angle + (2.0 * math.pi * idx / max(1, n_drones))
+                target_x = radius * math.cos(theta)
+                target_y = radius * math.sin(theta)
+                target_z = 35.0 + (idx % 4) * 4.0
+                drone.set_target_waypoint(np.array([target_x, target_y, target_z], dtype=np.float64))
+                if drone.flight_mode in (FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.DATA_TX):
+                    drone.flight_mode = FlightMode.TRANSIT
+                drone.is_drafting = False
+
     # -------------------------------------------------------------------------
     # Master Step Execution Loop
     # -------------------------------------------------------------------------
@@ -403,19 +753,35 @@ class SwarmSimulationCore:
         self.sim_time += step_dt
         self.step_count += 1
 
-        # Phase 1: Dynamic Relay Positioning (VSM)
-        self.update_vsm_relay_setpoints()
+        # Phase 1: Dynamic Relay Positioning (VSM) or Tactical Swarm Formations
+        if self.active_formation == "AUTONOMOUS":
+            self.update_vsm_relay_setpoints()
+        else:
+            self.update_formation_setpoints()
+
+        # Update spatial grid for accelerated proximity queries
+        if self.spatial_grid is not None:
+            self.spatial_grid.build(list(self.drones.values()))
+
+        drone_ids = sorted(self.drones.keys())
+        self._cached_drone_ids = drone_ids
+        if drone_ids:
+            self._cached_drone_positions = np.array([self.drones[did].position for did in drone_ids], dtype=np.float64)
+            self._cached_drone_velocities = np.array([self.drones[did].velocity for did in drone_ids], dtype=np.float64)
+            self._cached_drone_roles = [self.drones[did].role for did in drone_ids]
+            self._cached_drone_idx_map = {did: i for i, did in enumerate(drone_ids)}
 
         # Phase 2: Compute steering forces (double-buffered) and advance physics
+        self._update_cached_obstacles()
         forces = {}
-        for drone_id in sorted(self.drones.keys()):
+        for drone_id in drone_ids:
             drone = self.drones[drone_id]
             if drone.flight_mode not in (FlightMode.IDLE, FlightMode.LANDED, FlightMode.COMPLETED):
                 forces[drone_id] = self.compute_steering_forces(drone)
             else:
                 forces[drone_id] = np.zeros(3, dtype=np.float64)
 
-        for drone_id in sorted(self.drones.keys()):
+        for drone_id in drone_ids:
             drone = self.drones[drone_id]
             accel = forces[drone_id] / drone.limits.mass_kg
             if self.config.enable_weather:
@@ -425,26 +791,46 @@ class SwarmSimulationCore:
             drone.step(step_dt, desired_accel=accel, obstacles=self.obstacles, ambient_wind=w_vec)
 
         # Phase 3: Enforce hard ground collision, world boundary & obstacle clamping
-        for drone_id in sorted(self.drones.keys()):
+        for drone_id in drone_ids:
             drone = self.drones[drone_id]
             self.environment.enforce_bounds(drone)
-            for obs in self.obstacles:
-                if hasattr(obs, "contains_point") and obs.contains_point(drone.position, margin=0.0):
-                    normal = obs.surface_normal(drone.position) if hasattr(obs, "surface_normal") else np.array([0.0, 0.0, 1.0])
-                    min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
-                    max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
-                    if min_p is not None and max_p is not None:
+            if self._cached_obs_min_pts is not None and self._cached_obs_max_pts is not None:
+                inside_mask = np.all((drone.position >= self._cached_obs_min_pts) & (drone.position <= self._cached_obs_max_pts), axis=1)
+                if np.any(inside_mask):
+                    for obs_idx in np.nonzero(inside_mask)[0]:
+                        obs = self.obstacles[obs_idx]
+                        normal = obs.surface_normal(drone.position) if hasattr(obs, "surface_normal") else np.array([0.0, 0.0, 1.0])
+                        min_p = self._cached_obs_min_pts[obs_idx]
+                        max_p = self._cached_obs_max_pts[obs_idx]
                         for axis in range(3):
                             if normal[axis] > 0.5:
                                 drone.position[axis] = max_p[axis] + 0.02
                             elif normal[axis] < -0.5:
                                 drone.position[axis] = min_p[axis] - 0.02
-                    v_dot_n = float(np.dot(drone.velocity, normal))
-                    if v_dot_n < 0.0:
-                        drone.velocity -= v_dot_n * normal
-                    a_dot_n = float(np.dot(drone.acceleration, normal))
-                    if a_dot_n < 0.0:
-                        drone.acceleration -= a_dot_n * normal
+                        v_dot_n = float(np.dot(drone.velocity, normal))
+                        if v_dot_n < 0.0:
+                            drone.velocity -= v_dot_n * normal
+                        a_dot_n = float(np.dot(drone.acceleration, normal))
+                        if a_dot_n < 0.0:
+                            drone.acceleration -= a_dot_n * normal
+            else:
+                for obs in self.obstacles:
+                    if hasattr(obs, "contains_point") and obs.contains_point(drone.position, margin=0.0):
+                        normal = obs.surface_normal(drone.position) if hasattr(obs, "surface_normal") else np.array([0.0, 0.0, 1.0])
+                        min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
+                        max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
+                        if min_p is not None and max_p is not None:
+                            for axis in range(3):
+                                if normal[axis] > 0.5:
+                                    drone.position[axis] = max_p[axis] + 0.02
+                                elif normal[axis] < -0.5:
+                                    drone.position[axis] = min_p[axis] - 0.02
+                        v_dot_n = float(np.dot(drone.velocity, normal))
+                        if v_dot_n < 0.0:
+                            drone.velocity -= v_dot_n * normal
+                        a_dot_n = float(np.dot(drone.acceleration, normal))
+                        if a_dot_n < 0.0:
+                            drone.acceleration -= a_dot_n * normal
 
             # Touchdown detection for descending drones
             if drone.flight_mode in (FlightMode.LANDING, FlightMode.EMERGENCY_LAND):
@@ -454,9 +840,37 @@ class SwarmSimulationCore:
                     drone.acceleration[:] = 0.0
                     drone.rotor_speeds[:] = 0.0
                     drone.set_flight_mode(FlightMode.LANDED)
+                    drone._landed_for_recharge = True
                     drone.target_position = None
                     drone.assigned_poi_id = None
                     drone.is_transmitting = False
+
+            # GCS Automated Rapid Battery Charging & Continuous Mission Persistence
+            if drone.flight_mode == FlightMode.LANDED and drone.position[2] <= 0.4:
+                if hasattr(drone, "battery") and drone.battery is not None:
+                    if drone.battery.soc < 0.999:
+                        drone.battery.soc = min(1.0, drone.battery.soc + 0.05 * step_dt)
+                        drone._is_charging = True
+                    if drone.battery.soc >= 0.999:
+                        drone._is_charging = False
+                        if getattr(drone, "_landed_for_recharge", False) or getattr(drone, "is_low_battery_rtb", False):
+                            is_retreat = False
+                            if self.mission_manager and getattr(self.mission_manager, "retreat_all_requested", False):
+                                is_retreat = True
+                            if not is_retreat and getattr(drone, "auto_relaunch", True):
+                                drone._landed_for_recharge = False
+                                drone.is_low_battery_rtb = False
+                                drone.is_comms_loss_rtl = False
+                                drone.set_flight_mode(FlightMode.TAKEOFF)
+                                relaunch_target = np.array([drone.position[0], drone.position[1], 35.0], dtype=np.float64)
+                                drone.set_target_waypoint(relaunch_target)
+                                if self.mission_manager and hasattr(self.mission_manager, "emit_tactical_comms"):
+                                    self.mission_manager.emit_tactical_comms(
+                                        "SUCCESS",
+                                        drone.id,
+                                        f"🔋 RECHARGED (100% SoC) — Auto-relaunching to continuous disaster patrol",
+                                        "GCS_CHARGER"
+                                    )
 
         # Phase 4: Subsystem updates (Network, Mission & Dynamic POI Spawner)
         if hasattr(self, "poi_spawner") and self.poi_spawner is not None:
@@ -481,6 +895,7 @@ class SwarmSimulationCore:
                 pois=self.pois,
                 dt=step_dt,
                 network_engine=self.network_engine,
+                obstacles=self.obstacles,
             )
 
         # Phase 5: Generate and buffer telemetry snapshot
@@ -498,7 +913,12 @@ class SwarmSimulationCore:
         Guarantees strict schema adherence for both visualization and testing.
         """
         drones_list = []
-        for drone_id in sorted(self.drones.keys()):
+        drone_ids = getattr(self, "_cached_drone_ids", None)
+        if drone_ids is None or len(drone_ids) != len(self.drones):
+            drone_ids = sorted(self.drones.keys())
+            self._cached_drone_ids = drone_ids
+
+        for drone_id in drone_ids:
             d = self.drones[drone_id]
             st = d.get_state()
             role_str = st.role.name if hasattr(st.role, "name") else str(st.role)
@@ -524,6 +944,10 @@ class SwarmSimulationCore:
                 "drafting_leader_id": st.drafting_leader_id,
                 "drafting_saving_pct": float(st.drafting_saving_pct),
             }
+            if getattr(d, "assigned_sector_id", None) is not None:
+                drone_entry["sector"] = d.assigned_sector_id
+            if d.flight_mode == FlightMode.LANDED and d.position[2] <= 0.4 and (getattr(d, "_is_charging", False) or d.battery.soc < 0.99):
+                drone_entry["is_charging"] = True
             if getattr(self.config, "include_estimates", False) and st.estimated_position is not None:
                 drone_entry["estimated_position"] = [round(float(c), 3) for c in st.estimated_position]
                 drone_entry["estimated_velocity"] = [round(float(v), 3) for v in st.estimated_velocity] if st.estimated_velocity is not None else None
@@ -549,13 +973,10 @@ class SwarmSimulationCore:
                 "progress": progress,
                 "is_completed": poi["is_completed"],
                 "assigned_drone": poi["assigned_drone_id"],
+                "is_spawned": poi.get("is_spawned", True),
+                "is_detected": poi.get("is_detected", False),
+                "is_reported": poi.get("is_reported", False),
             }
-            if "is_spawned" in poi:
-                p_dict["is_spawned"] = poi["is_spawned"]
-            if "is_detected" in poi:
-                p_dict["is_detected"] = poi["is_detected"]
-            if "is_reported" in poi:
-                p_dict["is_reported"] = poi["is_reported"]
             if "reporting_latency_s" in poi:
                 p_dict["reporting_latency_s"] = poi["reporting_latency_s"]
             if "is_sla_compliant" in poi:
@@ -618,6 +1039,8 @@ class SwarmSimulationCore:
         survivors_data = self.mission_manager.get_survivors_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_survivors_telemetry")) else None
         tactical_comms_data = self.mission_manager.get_tactical_comms_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_tactical_comms_telemetry")) else None
         charging_pads_data = self.mission_manager.get_charging_pads_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_charging_pads_telemetry")) else None
+        sectors_data = self.mission_manager.get_sectors_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_sectors_telemetry")) else None
+        abnormalities_data = self.mission_manager.get_abnormalities_telemetry() if (self.mission_manager and hasattr(self.mission_manager, "get_abnormalities_telemetry")) else None
 
         challenge_data = None
         if hasattr(self, "challenge_monitor") and self.challenge_monitor is not None:
@@ -645,6 +1068,9 @@ class SwarmSimulationCore:
             tactical_comms=tactical_comms_data,
             charging_pads=charging_pads_data,
             challenge_constraints=challenge_data,
+            active_formation=self.active_formation,
+            sectors=sectors_data,
+            abnormalities=abnormalities_data,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -663,6 +1089,7 @@ class SwarmSimulationCore:
         """Reset simulation clock and drone states to initial configurations."""
         self.sim_time = 0.0
         self.step_count = 0
+        self.active_formation = "AUTONOMOUS"
         self.history.clear()
         self.collision_events.clear()
         self.flight_events.clear()
@@ -715,4 +1142,43 @@ class SwarmSimulationCore:
         drone = self.drones[drone_id]
         drone.set_manual_control(vx, vy, vz, yaw_rate, enabled=enabled)
         return True
+
+    def dispatch_drone_waypoint(self, drone_id: str, target_pos: Sequence[float]) -> bool:
+        """
+        Interactive 3D Click-to-Dispatch:
+        Directly assign an operational 3D waypoint to any UAV in the fleet.
+        """
+        if drone_id not in self.drones:
+            return False
+        drone = self.drones[drone_id]
+        tgt = np.asarray(target_pos, dtype=np.float64).flatten()
+        if tgt.shape[0] == 2:
+            target = np.array([tgt[0], tgt[1], 35.0], dtype=np.float64)
+        elif tgt.shape[0] >= 3:
+            target = np.array([tgt[0], tgt[1], max(15.0, float(tgt[2]))], dtype=np.float64)
+        else:
+            return False
+
+        if hasattr(drone, "set_waypoint_path"):
+            curr_pos = drone.position
+            mid_pt = 0.5 * (curr_pos + target) + np.array([0.0, 0.0, 2.0], dtype=np.float64)
+            drone.set_waypoint_path([curr_pos, mid_pt, target], smooth=True)
+        else:
+            drone.set_target_waypoint(target)
+        if drone.flight_mode in (FlightMode.IDLE, FlightMode.LANDED):
+            drone.flight_mode = FlightMode.TAKEOFF
+        elif drone.flight_mode != FlightMode.TAKEOFF:
+            drone.flight_mode = FlightMode.TRANSIT
+        drone.is_manual_override = False
+        drone.manual_vel_cmd = None
+
+        if self.mission_manager is not None and hasattr(self.mission_manager, "emit_tactical_comms"):
+            self.mission_manager.emit_tactical_comms(
+                "INFO",
+                drone.id,
+                f"🎯 TACTICAL DISPATCH: {drone.id} routed to ({target[0]:.0f}, {target[1]:.0f}, {target[2]:.0f}m)",
+                "OPERATOR"
+            )
+        return True
+
 

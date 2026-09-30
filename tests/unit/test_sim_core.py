@@ -352,3 +352,59 @@ def test_downwash_dynamic_lateral_escape_step():
 
     # Lower drone must have moved significantly along +X (> 0.5 meter)
     assert d_bot.position[0] - initial_x > 0.5, f"Lower drone failed to dynamically escape downwash cone: {d_bot.position}"
+
+
+def test_spatial_grid_acceleration():
+    """Verify 3D spatial grid construction and proximity queries in SwarmSimulationCore."""
+    cfg = SimulationConfig(enable_spatial_grid=True)
+    core = SwarmSimulationCore(cfg)
+    assert core.enable_spatial_grid is True
+    assert core.spatial_grid is not None
+
+    d1 = Drone("UAV_1", initial_position=np.array([10.0, 10.0, 30.0]))
+    d2 = Drone("UAV_2", initial_position=np.array([12.0, 10.0, 30.0]))
+    d3 = Drone("UAV_3", initial_position=np.array([100.0, 100.0, 30.0]))
+    for d in [d1, d2, d3]:
+        d.set_flight_mode(FlightMode.SURVEYING)
+        core.add_drone(d)
+
+    core.step(0.05)
+    nearby = core.spatial_grid.query_nearby_peers(d1, search_radius=15.0)
+    assert len(nearby) == 1
+    assert nearby[0].id == "UAV_2"
+
+    forces = core.compute_steering_forces(d1)
+    assert np.all(np.isfinite(forces))
+
+
+def test_batched_swarm_physics():
+    """Verify vectorized batched Reynolds separation forces and batched kinematics updates."""
+    from sim.swarm_sim import batched_reynolds_separation_forces, batched_update_kinematics
+
+    # 3 drones: D0 and D1 are close (2m), D2 is distant (50m)
+    positions = np.array([
+        [10.0, 10.0, 20.0],
+        [12.0, 10.0, 20.0],
+        [50.0, 50.0, 20.0],
+    ], dtype=np.float64)
+    velocities = np.zeros((3, 3), dtype=np.float64)
+    accelerations = np.zeros((3, 3), dtype=np.float64)
+    masses = np.array([1.5, 1.5, 1.5], dtype=np.float64)
+
+    # 1. Batched Reynolds separation
+    f_sep = batched_reynolds_separation_forces(positions, velocities, r_sep=6.0)
+    assert f_sep.shape == (3, 3)
+    # D0 should be pushed left (-X), D1 should be pushed right (+X), D2 has 0 separation force
+    assert f_sep[0, 0] < -1.0
+    assert f_sep[1, 0] > 1.0
+    assert np.allclose(f_sep[2], 0.0)
+
+    # 2. Batched kinematics update
+    new_pos, new_vel, new_acc = batched_update_kinematics(
+        positions, velocities, accelerations, f_sep, masses, dt=0.05
+    )
+    assert new_pos.shape == (3, 3)
+    assert new_vel.shape == (3, 3)
+    assert new_pos[0, 0] < positions[0, 0]  # Moved -X
+    assert new_pos[1, 0] > positions[1, 0]  # Moved +X
+    assert np.allclose(new_pos[2], positions[2])  # Remained stationary

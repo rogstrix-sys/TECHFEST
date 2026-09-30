@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from sim.types import DroneRole, FlightMode, TacticalCommsEvent, SurvivorRecord
+from sim.planning import compute_conical_fov_radius, is_line_of_sight_blocked
 
 
 class DisasterSitePriorityQueue:
@@ -51,8 +52,9 @@ class DisasterSitePriorityQueue:
         time_budget: float,
         drones: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Sorts pending disaster sites by priority weight, deadline urgency, and completion status."""
+        """Sorts disaster sites by priority weight, deadline urgency, keeping all sites in queue."""
         pending = [p for p in pois.values() if not p.get("is_completed", False)]
+        completed = [p for p in pois.values() if p.get("is_completed", False)]
         time_remaining = max(0.1, time_budget - current_time)
         urgency_factor = max(1.0, 1.0 + (current_time / time_remaining))
 
@@ -65,24 +67,26 @@ class DisasterSitePriorityQueue:
             return -score  # Negative for descending priority
 
         pending.sort(key=scoring_fn)
-        self.queue = pending
+        self.queue = pending + completed
         return self.queue
 
     def peek(self) -> Optional[Dict[str, Any]]:
-        return self.queue[0] if self.queue else None
+        return next((p for p in self.queue if not p.get("is_completed", False)), None)
 
     def get_ordered_queue_telemetry(self) -> List[Dict[str, Any]]:
         """Returns structured data for HUD priority queue display."""
         items = []
         for rank, p in enumerate(self.queue, start=1):
+            is_done = bool(p.get("is_completed", False) or (p.get("current_dwell_time", 0.0) >= p.get("required_dwell_time", 10.0)))
             items.append({
                 "rank": rank,
                 "id": p["id"],
                 "priority": p.get("priority", "MEDIUM"),
                 "dwell_time": p.get("required_dwell_time", 10.0),
-                "progress": round(float(min(1.0, p.get("current_dwell_time", 0.0) / max(0.1, p.get("required_dwell_time", 10.0))) * 100.0), 1),
+                "progress": 100.0 if is_done else round(float(min(1.0, p.get("current_dwell_time", 0.0) / max(0.1, p.get("required_dwell_time", 10.0))) * 100.0), 1),
                 "assigned_drone": p.get("assigned_drone_id"),
-                "status": "SURVEYING" if p.get("assigned_drone_id") else "PENDING",
+                "status": "COMPLETED" if is_done else ("SURVEYING" if p.get("assigned_drone_id") else "PENDING"),
+                "is_completed": is_done,
             })
         return items
 
@@ -152,6 +156,14 @@ class DisasterMissionManager:
         self.survivors: Dict[str, SurvivorRecord] = {}
         self._survivors_initialized: bool = False
 
+        # Predictive Survivor Thermal Probability Heatmap
+        from sim.mapping import BayesianThermalGrid
+        self.thermal_grid = BayesianThermalGrid(bounds_x=(-350.0, 350.0), bounds_y=(-350.0, 350.0), cell_size=20.0)
+
+        # Dedicated Sector Partitioning & Systematic Search Area Manager
+        from sim.planning import SectorPartitionManager
+        self.sector_manager = SectorPartitionManager(is_challenge_mode=(self.gcs_position[0] < -50.0))
+
     def emit_tactical_comms(self, level: str, callsign: str, message: str, category: str = "MISSION") -> None:
         """Log a real-time tactical comms chatter event for visual HUD display."""
         evt = TacticalCommsEvent(
@@ -188,6 +200,24 @@ class DisasterMissionManager:
                     discovered=False,
                 )
                 s_count += 1
+
+        if hasattr(self, "thermal_grid") and self.thermal_grid is not None:
+            self.thermal_grid.seed_priors([poi["position"] for poi in pois.values()])
+
+        if hasattr(self, "sector_manager") and self.sector_manager is not None:
+            self.sector_manager.populate_initial_abnormalities(pois, self.survivors)
+
+    def get_sectors_telemetry(self) -> List[Dict[str, Any]]:
+        """Returns serialized scanning sectors for 3D Cockpit and HUD display."""
+        if hasattr(self, "sector_manager") and self.sector_manager is not None:
+            return self.sector_manager.get_sectors_telemetry()
+        return []
+
+    def get_abnormalities_telemetry(self) -> List[Dict[str, Any]]:
+        """Returns serialized detected abnormalities for 3D Cockpit and HUD display."""
+        if hasattr(self, "sector_manager") and self.sector_manager is not None:
+            return self.sector_manager.get_abnormalities_telemetry()
+        return []
 
     def get_survivors_telemetry(self) -> Dict[str, Any]:
         """Returns structured survivor counts and discovered locations for HUD and UI."""
@@ -358,6 +388,7 @@ class DisasterMissionManager:
         pois: Dict[str, Dict[str, Any]],
         dt: float,
         network_engine: Optional[Any] = None,
+        obstacles: Optional[Sequence[Any]] = None,
     ) -> None:
         """
         Advance mission state by dt seconds.
@@ -366,6 +397,15 @@ class DisasterMissionManager:
         """
         self.total_mission_time += dt
         self._last_pois = pois
+
+        # Resolve obstacles from self or fleet drones if not provided
+        if obstacles is None:
+            obstacles = getattr(self, "obstacles", None)
+        if obstacles is None:
+            for d in drones.values():
+                if hasattr(d, "obstacles") and d.obstacles:
+                    obstacles = d.obstacles
+                    break
 
         # 0. Initialize trapped survivor heat signatures at disaster sites if not already seeded
         if not self._survivors_initialized and pois:
@@ -391,6 +431,13 @@ class DisasterMissionManager:
         # 3. Ensure role allocation for fleet
         self._ensure_role_allocation(drones)
 
+        # 3b. Spatial search sector allocation and systematic abnormality detection
+        if hasattr(self, "sector_manager") and self.sector_manager is not None:
+            if not self.sector_manager.abnormalities and pois:
+                self.sector_manager.populate_initial_abnormalities(pois, getattr(self, "survivors", None))
+            self.sector_manager.assign_sectors(drones)
+            self.sector_manager.update(drones, pois, dt, self.total_mission_time, obstacles=obstacles)
+
         # 4. Check dynamic relay battery relief rotation
         handover = self.relief_manager.evaluate_relief_rotation(drones, self.total_mission_time)
         if handover:
@@ -402,6 +449,78 @@ class DisasterMissionManager:
 
         # 5b. Evaluate aerodynamic wake drafting in V-formation corridors
         self._apply_formation_drafting(drones)
+
+        # 5c. Update Predictive Bayesian Thermal Belief Grid with active drone FLIR sweeps
+        if hasattr(self, "thermal_grid") and self.thermal_grid is not None:
+            active_survs = [s.position for s in self.survivors.values() if not s.discovered]
+            for d in drones.values():
+                if d.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.TAKEOFF, FlightMode.RELAY) and d.position[2] > 2.0:
+                    self.thermal_grid.update_flir_scan(d.position, active_survs, fov_radius=55.0)
+
+        # Batch Vectorized Survivor & POI Footprint Detection across Swarm
+        active_airborne_drones = [
+            d for d in drones.values()
+            if d.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.TAKEOFF) and float(d.position[2]) >= 3.0
+        ]
+        if active_airborne_drones and hasattr(self, "survivors"):
+            undisc_survs = [s for s in self.survivors.values() if not s.discovered]
+            if undisc_survs:
+                d_pos = np.array([d.position for d in active_airborne_drones], dtype=np.float64)
+                s_pos = np.array([s.position for s in undisc_survs], dtype=np.float64)
+                delta_z = d_pos[:, None, 2] - s_pos[None, :, 2]
+                r_footprint = np.minimum(55.0, np.maximum(12.0, delta_z * 0.7673269879789604))
+                diff_xy = d_pos[:, None, :2] - s_pos[None, :, :2]
+                dists_xy = np.linalg.norm(diff_xy, axis=-1)
+                diff_3d = d_pos[:, None, :] - s_pos[None, :, :]
+                dists_3d = np.linalg.norm(diff_3d, axis=-1)
+                hits = np.argwhere((dists_xy <= r_footprint) & (dists_3d <= 55.0))
+                for d_i, s_i in hits:
+                    surv = undisc_survs[s_i]
+                    if not surv.discovered:
+                        drone = active_airborne_drones[d_i]
+                        if not is_line_of_sight_blocked(drone.position, surv.position, obstacles):
+                            surv.discovered = True
+                            surv.discovery_time = self.total_mission_time
+                            surv.discovered_by = drone.id
+                            self.emit_tactical_comms(
+                                "SUCCESS",
+                                drone.id,
+                                f"👤 SURVIVOR LOCATED at [{int(surv.position[0])}, {int(surv.position[1])}] (IR Heat {surv.heat_c}°C, Conf: {int(surv.confidence*100)}%)",
+                                "SAR"
+                            )
+
+        if active_airborne_drones and pois:
+            undet_pois = [p for p in pois.values() if not p.get("is_detected", False) and p.get("is_spawned", True)]
+            if undet_pois:
+                d_pos = np.array([d.position for d in active_airborne_drones], dtype=np.float64)
+                p_pos = np.array([p.get("position", [0, 0, 0]) for p in undet_pois], dtype=np.float64)
+                delta_z = d_pos[:, None, 2] - p_pos[None, :, 2]
+                r_footprint = np.minimum(55.0, np.maximum(12.0, delta_z * 0.7673269879789604))
+                diff_xy = d_pos[:, None, :2] - p_pos[None, :, :2]
+                dists_xy = np.linalg.norm(diff_xy, axis=-1)
+                diff_3d = d_pos[:, None, :] - p_pos[None, :, :]
+                dists_3d = np.linalg.norm(diff_3d, axis=-1)
+                hits = np.argwhere((dists_xy <= r_footprint) & (dists_3d <= 55.0))
+                for d_i, p_i in hits:
+                    poi = undet_pois[p_i]
+                    if not poi.get("is_detected", False):
+                        drone = active_airborne_drones[d_i]
+                        if not is_line_of_sight_blocked(drone.position, p_pos[p_i], obstacles):
+                            poi["is_detected"] = True
+                            poi["detection_time"] = self.total_mission_time
+                            poi["detected_by"] = drone.id
+                            mesh_connected = (drone.comms_loss_duration < 1.0)
+                            reporting_delay = min(0.40, 0.05 + 0.03 * float(np.linalg.norm(drone.position - self.gcs_position)) / 100.0) if mesh_connected else 1.2
+                            poi["is_reported"] = True
+                            poi["report_time"] = self.total_mission_time + reporting_delay
+                            poi["reporting_latency_s"] = reporting_delay
+                            poi["is_sla_compliant"] = (reporting_delay <= 10.0)
+                            self.emit_tactical_comms(
+                                "SUCCESS",
+                                drone.id,
+                                f"🎯 POI {poi.get('id', 'POI')} DETECTED at [{int(p_pos[p_i, 0])}, {int(p_pos[p_i, 1])}] — Reported to Ops Center in {reporting_delay:.2f}s (SLA <= 10s: PASS)",
+                                "RECON"
+                            )
 
         # 6. Assign available survey drones to pending PoIs in strict priority order
         self._assign_pending_pois(drones, pois)
@@ -719,8 +838,20 @@ class DisasterMissionManager:
 
             for idx, drone in enumerate(available_surveyors):
                 if drone.flight_mode not in (FlightMode.IDLE, FlightMode.TAKEOFF, FlightMode.LANDED):
-                    sec_pt = target_points[(idx + int(self.total_mission_time // 12)) % len(target_points)]
-                    target_pt = np.array(sec_pt, dtype=np.float64).copy()
+                    # Prioritize highest entropy thermal belief hotspot if unvisited
+                    thermal_target = None
+                    if hasattr(self, "thermal_grid") and self.thermal_grid is not None:
+                        thermal_target = self.thermal_grid.get_highest_entropy_target(drone.position)
+
+                    if thermal_target is not None and idx == 0:
+                        target_pt = thermal_target
+                    elif hasattr(self, "sector_manager") and self.sector_manager is not None:
+                        # Systematic spatial search sector sweep
+                        target_pt = self.sector_manager.get_next_waypoint_for_drone(drone.id, drone.position)
+                    else:
+                        sec_pt = target_points[(idx + int(self.total_mission_time // 12)) % len(target_points)]
+                        target_pt = np.array(sec_pt, dtype=np.float64).copy()
+
                     if getattr(drone, "cruise_altitude", None) is not None:
                         target_pt[2] = drone.cruise_altitude
                     drone.set_target_waypoint(target_pt)
@@ -928,11 +1059,23 @@ class DisasterMissionManager:
                 return
 
         # Comprehensive Sensor Footprint Survivor Detection (FLIR & LiDAR across active modes)
+        obs_list = getattr(self, "obstacles", getattr(drone, "obstacles", None))
         if hasattr(self, "survivors") and drone.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.TAKEOFF):
             for s_id, surv in self.survivors.items():
                 if not surv.discovered:
                     dist_to_surv = float(np.linalg.norm(drone.position - np.array(surv.position)))
-                    if dist_to_surv <= 55.0:
+                    dist_xy = float(np.hypot(drone.position[0] - surv.position[0], drone.position[1] - surv.position[1]))
+                    r_fp = compute_conical_fov_radius(drone.position[2], surv.position[2])
+                    can_detect = False
+                    if drone.position[2] >= 3.0:
+                        if dist_xy <= r_fp and dist_to_surv <= 55.0:
+                            if not is_line_of_sight_blocked(drone.position, surv.position, obs_list):
+                                can_detect = True
+                    elif dist_to_surv <= 2.0:
+                        if not is_line_of_sight_blocked(drone.position, surv.position, obs_list):
+                            can_detect = True
+
+                    if can_detect:
                         surv.discovered = True
                         surv.discovery_time = self.total_mission_time
                         surv.discovered_by = drone.id
@@ -948,7 +1091,18 @@ class DisasterMissionManager:
             if not poi.get("is_detected", False) and poi.get("is_spawned", True):
                 p_pos = np.array(poi.get("position", [0, 0, 0]), dtype=np.float64)
                 dist_to_poi = float(np.linalg.norm(drone.position - p_pos))
-                if dist_to_poi <= 55.0 and drone.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.TAKEOFF):
+                dist_xy = float(np.hypot(drone.position[0] - p_pos[0], drone.position[1] - p_pos[1]))
+                r_fp = compute_conical_fov_radius(drone.position[2], p_pos[2])
+                can_detect = False
+                if drone.position[2] >= 3.0:
+                    if dist_xy <= r_fp and dist_to_poi <= 55.0:
+                        if not is_line_of_sight_blocked(drone.position, p_pos, obs_list):
+                            can_detect = True
+                elif dist_to_poi <= 2.0:
+                    if not is_line_of_sight_blocked(drone.position, p_pos, obs_list):
+                        can_detect = True
+
+                if can_detect and drone.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.TAKEOFF):
                     poi["is_detected"] = True
                     poi["detection_time"] = self.total_mission_time
                     poi["detected_by"] = drone.id
@@ -1026,9 +1180,14 @@ class DisasterMissionManager:
                 else:
                     # In TRANSIT without active assignment: check if pending tasks exist
                     all_done = all(p.get("is_completed", False) for p in pois.values())
-                    all_survs_found = (len(self.survivors) > 0 and all(s.discovered for s in self.survivors.values()))
-                    if all_done and all_survs_found:
+                    if all_done and all_survivors_found:
                         self._initiate_drone_rtl(drone)
+                    elif hasattr(self, "sector_manager") and self.sector_manager is not None:
+                        sec_wp = self.sector_manager.get_next_waypoint_for_drone(drone.id, drone.position)
+                        target_pt = np.array(sec_wp, dtype=np.float64).copy()
+                        if getattr(drone, "cruise_altitude", None) is not None:
+                            target_pt[2] = drone.cruise_altitude
+                        drone.set_target_waypoint(target_pt)
 
             elif drone.flight_mode == FlightMode.SURVEYING:
                 if drone.assigned_poi_id is not None and drone.assigned_poi_id in pois:
@@ -1053,9 +1212,8 @@ class DisasterMissionManager:
 
                         # Trigger D: Survey complete check
                         all_done = all(p.get("is_completed", False) for p in pois.values())
-                        all_survs_found = (len(self.survivors) > 0 and all(s.discovered for s in self.survivors.values()))
 
-                        if all_done and all_survs_found:
+                        if all_done and all_survivors_found:
                             # Assigned survey is complete & all surveillance area covered & all survivors located!
                             self._initiate_drone_rtl(drone)
                         else:

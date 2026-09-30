@@ -66,15 +66,19 @@ class TelemetryDict(dict):
             return super().__getitem__("active_routes")
         if key == "timestamp":
             return super().__getitem__("sim_time")
+        if key == "wind":
+            return super().get("weather")
+        if key in ("formation", "active_formation"):
+            return super().get("active_formation", "AUTONOMOUS")
         return super().__getitem__(key)
 
     def __contains__(self, key: Any) -> bool:
-        if key in ("swarm", "routes", "timestamp"):
+        if key in ("swarm", "routes", "timestamp", "wind", "formation", "active_formation"):
             return True
         return super().__contains__(key)
 
     def get(self, key: Any, default: Any = None) -> Any:
-        if key in ("swarm", "routes", "timestamp"):
+        if key in ("swarm", "routes", "timestamp", "wind", "formation", "active_formation"):
             return self[key]
         return super().get(key, default)
 
@@ -355,6 +359,65 @@ class SurvivorRecord:
 
 
 @dataclass
+class ScanningSector:
+    """
+    Geographic operational search sector allocated to a specific drone for systematic scanning.
+    """
+    id: str                               # e.g. "SECTOR_1_NW"
+    name: str                             # e.g. "Northwest Research & Bio Sector"
+    bounds: List[float]                   # [x_min, x_max, y_min, y_max, z_min, z_max]
+    center: List[float]                   # [cx, cy, cz]
+    assigned_drone_id: Optional[str] = None
+    patrol_waypoints: List[List[float]] = field(default_factory=list)
+    scan_progress: float = 0.0            # 0.0 to 100.0%
+    detected_abnormalities: List[str] = field(default_factory=list)
+    status: str = "PENDING"               # "PENDING" | "SCANNING" | "INSPECTING" | "CLEARED"
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
+            "id": self.id,
+            "b": [int(b) for b in self.bounds[:4]],
+            "s": self.status,
+            "p": round(float(self.scan_progress), 1),
+        }
+        if self.assigned_drone_id:
+            d["d"] = self.assigned_drone_id
+        return d
+
+
+@dataclass
+class AbnormalityRecord:
+    """
+    Abnormality or target site identified within a drone's scanning sector.
+    """
+    id: str                               # e.g. "ANOMALY_COLLAPSE_01", "POI_HOSPITAL"
+    sector_id: str                        # e.g. "SECTOR_5_WEST"
+    type: str                             # "TARGET_SITE" | "SURVIVOR" | "STRUCTURAL_COLLAPSE" | "HAZARD_LEAK"
+    position: List[float]                 # [x, y, z]
+    severity: str = "HIGH"                # "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"
+    description: str = ""
+    detected: bool = False
+    detection_time: Optional[float] = None
+    detected_by: Optional[str] = None
+    confidence: float = 0.95
+    inspected: bool = False
+    inspection_dwell: float = 0.0
+    required_dwell: float = 6.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "sector": self.sector_id,
+            "type": self.type,
+            "pos": [round(float(c), 1) for c in self.position],
+            "severity": self.severity,
+            "detected": bool(self.detected),
+            "inspected": bool(self.inspected),
+            "progress": round(min(100.0, (self.inspection_dwell / max(0.1, self.required_dwell)) * 100.0), 1),
+        }
+
+
+@dataclass
 class TelemetrySnapshot:
     """
     Complete simulation state snapshot conforming to PROJECT.md Contract #4.
@@ -375,6 +438,9 @@ class TelemetrySnapshot:
     tactical_comms: Optional[List[Dict[str, Any]]] = None
     charging_pads: Optional[List[Dict[str, Any]]] = None
     challenge_constraints: Optional[Dict[str, Any]] = None
+    active_formation: Optional[str] = "AUTONOMOUS"
+    sectors: Optional[List[Dict[str, Any]]] = None
+    abnormalities: Optional[List[Dict[str, Any]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes snapshot to dictionary with Three.js cockpit compatible aliases."""
@@ -390,7 +456,6 @@ class TelemetrySnapshot:
         }
         if self.weather is not None:
             d["weather"] = self.weather
-            d["wind"] = self.weather
         if self.priority_queue is not None:
             d["priority_queue"] = self.priority_queue
         if self.mission_budget is not None:
@@ -403,6 +468,12 @@ class TelemetrySnapshot:
             d["charging_pads"] = self.charging_pads
         if self.challenge_constraints is not None:
             d["challenge_constraints"] = self.challenge_constraints
+        if self.active_formation is not None and self.active_formation != "AUTONOMOUS":
+            d["active_formation"] = self.active_formation
+        if self.sectors is not None:
+            d["sectors"] = self.sectors
+        if self.abnormalities:
+            d["abnormalities"] = self.abnormalities
         return TelemetryDict(d)
 
 

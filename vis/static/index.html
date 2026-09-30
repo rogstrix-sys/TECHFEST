@@ -23,7 +23,7 @@
             </div>
             <div class="theater-nav-hint" id="theater-nav-hint">
                 <span class="pulse-dot cyan" style="width:5px;height:5px;"></span>
-                <span><b>NAVIGATION:</b> Left-Click to Rotate &bull; <b>Right-Click Drag</b> (or <span class="hint-pill">&#9995; DRAG</span>) to Move Screen &bull; <b>Double-Click</b> to Center &bull; <b>WASD / Arrows</b> to Pan</span>
+                <span><b>NAVIGATION:</b> Left-Click to Rotate &bull; <b>Right-Click Drag</b> to Move &bull; <b>Shift+Click</b> on City to Dispatch Drone &bull; <b>WASD</b> to Pan</span>
             </div>
             <div id="canvas-theater-container" class="canvas-holder"></div>
             <!-- Military Aerospace Heads-Up Display (MIL-STD-1787D) Overlay Layer -->
@@ -39,9 +39,13 @@
             </div>
             <div class="slam-stats-overlay">
                 <div class="slam-stat-item"><span class="lbl">FOCUS:</span> <span id="slam-drone-id" class="val text-cyan">UAV_1</span></div>
-                <div class="slam-stat-item"><span class="lbl">LIDAR PTS:</span> <span id="slam-pts-count" class="val text-neon-green">0</span></div>
-                <div class="slam-stat-item"><span class="lbl">OCCUPIED VOXELS:</span> <span id="slam-voxels-count" class="val text-neon-yellow">0</span></div>
+                <div class="slam-stat-item"><span class="lbl">DENSE PTS:</span> <span id="slam-pts-count" class="val text-neon-green">0</span></div>
+                <div class="slam-stat-item"><span class="lbl">OCTOMAP VOXELS:</span> <span id="slam-voxels-count" class="val text-neon-yellow">0</span></div>
                 <div class="slam-stat-item"><span class="lbl">SURVEY VOLUME:</span> <span id="slam-vol-count" class="val text-purple">0 m³</span></div>
+                <div class="slam-actions-group" style="pointer-events: auto; display: flex; gap: 6px; align-items: center;">
+                    <button id="btn-slam-colormap" class="btn btn-sm btn-outline text-cyan" style="padding: 1px 6px; font-size: 8px;" title="Toggle Colormap: Turbo Elevation / Surface Intensity / Cyber Matrix">COLOR: TURBO</button>
+                    <button id="btn-slam-clear" class="btn btn-sm btn-outline text-neon-yellow" style="padding: 1px 6px; font-size: 8px;" title="Reset Accumulated 3D Point Cloud">CLEAR SLAM</button>
+                </div>
             </div>
             <div id="canvas-slam-container" class="canvas-holder"></div>
         </div>
@@ -72,15 +76,26 @@
                 <div class="metric-card" id="metric-card-challenge" style="display:none;" title="MeitY / IIT Bombay / IISER Bhopal Challenge Compliance"><span class="metric-label">IIT-B SLA</span><span class="badge badge-active" id="badge-challenge-status" style="color:#00ff88;border-color:#00ff88;">COMPLIANT (11/11)</span></div>
                 <div class="metric-card" id="metric-card-mesh"><span class="metric-label">MESH</span><span class="badge badge-active" id="badge-network">16 NODES</span></div>
                 <div class="metric-card" id="metric-card-gpu"><span class="metric-label">GPU</span><span class="badge badge-active" id="badge-gpu-hw" style="color:#76b900;border-color:#76b900;background:rgba(118,185,0,0.12);">RTX 4050</span></div>
+                <div class="metric-card" id="metric-card-bft" title="Byzantine Fault Tolerant Consensus Status"><span class="metric-label">BFT</span><span class="badge badge-active" id="badge-bft" style="color:#00e5ff;border-color:#00e5ff;">CONSENSUS OK</span></div>
             </div>
         </div>
         <!-- ROW 2: Controls (always fully visible) -->
         <div class="hud-header-row2">
             <button id="btn-investor" class="btn btn-investor" title="Launch 4-Phase Executive Swarm Demonstration">&#9733; DEMO</button>
-            
+            <button id="btn-dispatch" class="btn btn-outline text-cyan" title="Click anywhere on the 3D City map (or Shift+Click) to dispatch selected UAV to custom waypoint">🎯 DISPATCH</button>
             <button id="btn-night" class="btn btn-outline text-neon-yellow" title="Toggle Tactical Night Operations & Searchlights">NIGHT</button>
             <button id="btn-chaos" class="btn btn-outline btn-chaos" title="Dynamic Fault Injection: Swarm Self-Healing Test">⚡ CHAOS</button>
-            <button id="btn-export-ply" class="btn btn-outline text-purple" title="1-Click 3D Point Cloud Export (.PLY for CloudCompare/Blender)">PLY</button>
+            <button id="btn-collapse" class="btn btn-outline text-neon-yellow" title="Dynamic Obstacle Collapse: Mid-mission structural failure & emergency reroute">💥 COLLAPSE</button>
+            <button id="btn-byzantine" class="btn btn-outline text-purple" title="Byzantine Fault Tolerant (BFT) Swarm Consensus Test: Inject adversarial bid">🛡️ BFT TEST</button>
+            <button id="btn-heatmap" class="btn btn-outline text-cyan" title="Toggle Predictive Survivor Thermal Probability Heatmap Overlay">🔥 HEATMAP</button>
+            <button id="btn-toggle-voxels" class="btn btn-outline text-dim" title="Toggle 3D OctoMap Occupancy Voxels (Holographic Scan Cubes)">🧊 VOXELS: OFF</button>
+            <button id="btn-export-ply" class="btn btn-outline text-purple" title="1-Click Net 3D Point Cloud Export (.PLY fused from all UAV LiDAR sensors for CloudCompare/Blender)">PLY</button>
+            <select id="select-formation" class="select-control text-neon-yellow" title="Swarm Tactical Formations" style="border-color: rgba(255, 214, 0, 0.4); font-weight: 700; font-size: 11px;">
+                <option value="AUTONOMOUS">FORMATION: AUTO</option>
+                <option value="V_FORMATION">FORMATION: V-SHAPE</option>
+                <option value="LINE_SWEEP">FORMATION: LINE SWEEP</option>
+                <option value="PERIMETER_ORBIT">FORMATION: PERIMETER ORBIT</option>
+            </select>
             <button id="btn-manual" class="btn btn-outline text-cyan" title="Manual FPV Controller Mode (WASD / Gamepad)">FPV: AUTO</button>
             <button id="btn-toggle-hud" class="btn btn-outline text-dim" title="Toggle Military HUD (H)">HUD: OFF</button>
             <button id="btn-toggle-comms" class="btn btn-outline text-cyan" title="Toggle Tactical Radio Comms Feed">COMMS</button>
@@ -98,10 +113,11 @@
             <button id="btn-reset" class="btn btn-outline" title="Reset Simulation">RESET</button>
             <button id="btn-retreat" class="btn btn-outline text-neon-yellow" title="Autonomous Fleet RTL">RETREAT (RTL)</button>
             <button id="btn-export-csv" class="btn btn-outline text-neon-yellow" title="Export Telemetry CSV">CSV</button>
-            <select id="select-speed" class="select-control" title="Simulation Speed">
-                <option value="1.0">1.0x</option>
-                <option value="2.0">2.0x</option>
-                <option value="5.0">5.0x</option>
+            <select id="select-speed" class="select-control text-neon-yellow" title="Simulation Speed Multiplier" style="font-weight: 700; font-size: 11px;">
+                <option value="1.0">SPEED: 1.0x</option>
+                <option value="2.0">SPEED: 2.0x</option>
+                <option value="5.0">SPEED: 5.0x</option>
+                <option value="10.0">SPEED: 10.0x</option>
             </select>
         </div>
     </header>

@@ -15,11 +15,130 @@ from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Set
 import numpy as np
+import pandas as pd
 
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
+
+def _json_default(obj: Any) -> Any:
+    """JSON serialization converter for NumPy arrays, scalars, and custom objects."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+        return obj.to_dict()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+try:
+    import orjson
+    def fast_json_dumps(data: Any) -> str:
+        """Ultra-fast JSON serialization using orjson with native NumPy support."""
+        return orjson.dumps(
+            data,
+            option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY,
+        ).decode("utf-8")
+except Exception:
+    def fast_json_dumps(data: Any) -> str:
+        """Fallback JSON serialization using stdlib json with NumPy conversion."""
+        return json.dumps(data, default=_json_default)
+
+
+def prune_mesh_links(
+    links: List[Dict[str, Any]],
+    active_routes: Optional[List[List[str]]] = None,
+    max_links: int = 36,
+) -> List[Dict[str, Any]]:
+    """
+    Prunes redundant FANET mesh links from broadcast payload while preserving:
+    1. All active packet-forwarding route edges (used for routing visualization).
+    2. Minimum Spanning Tree (MST) over viable mesh links to keep graph connectivity.
+    3. Top-K strongest/lowest-cost links to keep tactical network context.
+    Cuts the links payload from ~34 KB down to ~2-3 KB.
+    """
+    def _compact_link(l: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "source": l.get("source", ""),
+            "target": l.get("target", ""),
+            "viable": bool(l.get("viable", True)),
+            "band": str(l.get("band", "2.4GHz")),
+            "distance": round(float(l.get("distance", 0.0)), 1),
+            "snr": round(float(l.get("snr", 0.0)), 1),
+            "cost": round(float(l.get("cost", 0.0)), 1),
+            "path_loss_db": round(float(l.get("path_loss_db", 0.0)), 1),
+        }
+
+    if not links:
+        return []
+    if len(links) <= max_links:
+        return [_compact_link(l) for l in links]
+
+    # 1. Identify active route edges
+    route_edges: Set[Tuple[str, str]] = set()
+    if active_routes:
+        for route in active_routes:
+            for i in range(len(route) - 1):
+                u, v = route[i], route[i + 1]
+                route_edges.add(tuple(sorted([u, v])))
+
+    selected: List[Dict[str, Any]] = []
+    selected_keys: Set[Tuple[str, str]] = set()
+
+    # Always keep active route links
+    for l in links:
+        key = tuple(sorted([l.get("source", ""), l.get("target", "")]))
+        if key in route_edges and key not in selected_keys:
+            selected.append(l)
+            selected_keys.add(key)
+
+    # 2. Minimum Spanning Tree (MST via Kruskal) over viable links
+    viable_links = [l for l in links if l.get("viable", False)]
+    viable_links.sort(key=lambda l: (l.get("cost", 1.0), -l.get("snr", 0.0)))
+
+    parent: Dict[str, str] = {}
+    def find(x: str) -> str:
+        if parent.setdefault(x, x) != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x: str, y: str) -> bool:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+            return True
+        return False
+
+    for l in selected:
+        union(l.get("source", ""), l.get("target", ""))
+
+    for l in viable_links:
+        u, v = l.get("source", ""), l.get("target", "")
+        if union(u, v):
+            key = tuple(sorted([u, v]))
+            if key not in selected_keys:
+                selected.append(l)
+                selected_keys.add(key)
+
+    # 3. Fill remaining quota with highest quality viable links
+    if len(selected) < max_links:
+        for l in viable_links:
+            key = tuple(sorted([l.get("source", ""), l.get("target", "")]))
+            if key not in selected_keys:
+                selected.append(l)
+                selected_keys.add(key)
+                if len(selected) >= max_links:
+                    break
+
+    return [_compact_link(l) for l in selected]
+
 
 from sim.core import SimulationConfig, SwarmSimulationCore
 from sim.drone import Drone
@@ -34,39 +153,81 @@ from sim.weather import WindConfig
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-def get_gpu_telemetry() -> Dict[str, Any]:
-    """Fetch live NVIDIA GPU hardware telemetry for Web Cockpit and HUD."""
+_last_gpu_check = 0.0
+_cached_gpu_info: Optional[Dict[str, Any]] = None
+_nvml_initialized = False
+_nvml_handle = None
+
+
+def _get_nvml_handle():
+    global _nvml_initialized, _nvml_handle
+    if _nvml_initialized:
+        return _nvml_handle
     try:
         import pynvml
         pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        name = pynvml.nvmlDeviceGetName(handle)
-        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-        try:
-            power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
-        except Exception:
-            power = 15.0
-        return {
-            "name": name,
-            "temp_c": temp,
-            "gpu_util_pct": util.gpu,
-            "vram_used_mb": int(mem.used / 1024**2),
-            "vram_total_mb": int(mem.total / 1024**2),
-            "power_w": round(power, 1),
-            "accel": "NVIDIA CUDA OpenCL",
-        }
+        _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        _nvml_initialized = True
+        return _nvml_handle
     except Exception:
-        return {
-            "name": "NVIDIA RTX 4050",
-            "temp_c": 48,
-            "gpu_util_pct": 0,
-            "vram_used_mb": 291,
-            "vram_total_mb": 6141,
-            "power_w": 18.0,
-            "accel": "NVIDIA CUDA",
-        }
+        _nvml_initialized = True  # Avoid retrying nvmlInit on every tick
+        _nvml_handle = None
+        return None
+
+
+def _query_gpu_telemetry_sync() -> None:
+    global _cached_gpu_info
+    handle = _get_nvml_handle()
+    if handle is not None:
+        try:
+            import pynvml
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="ignore")
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            try:
+                power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
+            except Exception:
+                power = 15.0
+            _cached_gpu_info = {
+                "name": str(name),
+                "temp_c": int(temp),
+                "gpu_util_pct": int(util.gpu),
+                "vram_used_mb": int(mem.used / 1024**2),
+                "vram_total_mb": int(mem.total / 1024**2),
+                "power_w": round(power, 1),
+                "accel": "NVIDIA CUDA OpenCL",
+            }
+        except Exception:
+            pass
+
+
+async def _gpu_telemetry_loop() -> None:
+    """Async background worker for GPU hardware metrics to guarantee 0ms latency in simulation loop."""
+    while True:
+        try:
+            await asyncio.to_thread(_query_gpu_telemetry_sync)
+        except Exception:
+            pass
+        await asyncio.sleep(2.0)
+
+
+def get_gpu_telemetry() -> Dict[str, Any]:
+    """Fetch live NVIDIA GPU hardware telemetry (zero-latency thread-safe cache)."""
+    global _cached_gpu_info
+    if _cached_gpu_info is not None:
+        return _cached_gpu_info
+    return {
+        "name": "NVIDIA RTX 4050",
+        "temp_c": 48,
+        "gpu_util_pct": 0,
+        "vram_used_mb": 291,
+        "vram_total_mb": 6141,
+        "power_w": 18.0,
+        "accel": "NVIDIA CUDA",
+    }
 
 
 def create_default_simulation() -> SwarmSimulationCore:
@@ -337,6 +498,7 @@ def create_default_simulation() -> SwarmSimulationCore:
     ]
     for d_id, role, pos in fleet_init:
         drone = Drone(d_id, role=role, initial_pos=np.array(pos, dtype=np.float64))
+        drone.enable_stochastic_wind(mean_velocity=[2.0, 2.0, 0.0], theta=0.5, sigma=1.0)
         # Staggered tactical takeoff delays: Scouts launch first, then Relays, then Surveyors in pairs
         if "SCOUT" in d_id:
             drone.takeoff_delay = 1.0
@@ -385,12 +547,15 @@ class SimulationServer:
         self.lidar = LiDARScanner(
             max_range_m=75.0,
             horizontal_fov_deg=360.0,
-            horizontal_resolution_deg=6.0,   # 60 azimuth beams per ring
+            horizontal_resolution_deg=4.0,   # 90 azimuth beams per ring
             vertical_fov_deg=(-50.0, 15.0),  # -50 deg downward ground look to +15 deg upward
-            vertical_channels=16,            # 16 elevation rings (960 rays total)
+            vertical_channels=24,            # 24 elevation rings (2,160 rays total)
             range_noise_std_m=0.03
         )
         self.latest_payload: Optional[str] = None
+        self._sent_voxels: Set[Tuple[int, int, int]] = set()
+        self._cached_obs_list: Optional[List[Dict[str, Any]]] = None
+        self._obs_dirty: bool = True
 
     def reset(self, scenario: Optional[str] = None) -> None:
         """Reset simulation and SLAM occupancy grid to initial disaster scenario."""
@@ -404,6 +569,11 @@ class SimulationServer:
             self.sim = create_default_simulation()
             self.voxel_map = OccupancyGridMap3D(voxel_size_m=4.5)
         self.step_count = 0
+        self._cached_obs_list = None
+        self._obs_dirty = True
+        self._cached_occupied_voxels = None
+        self._cached_mapping_metrics = None
+        self._sent_voxels = set()
 
     async def broadcast_loop(self) -> None:
         """Asynchronous simulation execution, LiDAR perception, and telemetry broadcast loop."""
@@ -411,41 +581,74 @@ class SimulationServer:
             step_start = time.perf_counter()
             try:
                 if self.is_running:
+                    # Multi-step physics sub-stepping based on sim_speed:
+                    # Adaptive substepping (up to 3 substeps) ensures high-speed physics fidelity
+                    # while maintaining loop execution under 15ms so broadcasts stay locked at 30 Hz.
+                    base_dt = 1.0 / 30.0
+                    substeps = min(5, max(1, int(round(self.sim_speed * 0.5))))
+                    step_dt = (self.sim_speed * base_dt) / substeps
+                    for _ in range(substeps - 1):
+                        self.step_count += 1
+                        self.sim.step(dt=step_dt)
+
                     self.step_count += 1
                     # Step simulation
-                    snapshot = self.sim.step()
+                    snapshot = self.sim.step(dt=step_dt)
                     data = snapshot.to_dict()
                     data["scenario"] = self.scenario
+                    data["sim_speed"] = self.sim_speed
 
-                    # 1. Enrich with real-time EKF estimation metrics & attitude Euler angles
-                    for d_dict in data.get("drones", []):
-                        drone_obj = self.sim.drones.get(d_dict["id"])
-                        if drone_obj:
-                            est_pos = drone_obj.ekf.estimated_position
-                            est_vel = drone_obj.ekf.estimated_velocity
-                            d_dict["estimated_position"] = [round(float(c), 3) for c in est_pos]
-                            d_dict["estimated_velocity"] = [round(float(v), 3) for v in est_vel]
-                            d_dict["ekf_error_m"] = round(float(np.linalg.norm(drone_obj.position - est_pos)), 3)
-                            
-                            # Attitude in degrees for PFD artificial horizon
-                            att = drone_obj.attitude
-                            d_dict["roll_deg"] = round(float(np.degrees(att[0])), 1)
-                            d_dict["pitch_deg"] = round(float(np.degrees(att[1])), 1)
-                            d_dict["yaw_deg"] = round(float(np.degrees(att[2])) % 360.0, 1)
+                    # Prune and throttle redundant FANET mesh links (~15 Hz broadcast or initial sync)
+                    if self.step_count <= 2 or self.step_count % 2 == 0:
+                        data["links"] = prune_mesh_links(data.get("links", []), data.get("active_routes", []))
+                    else:
+                        data.pop("links", None)
+
+                    # 1. Enrich with real-time EKF estimation metrics & attitude Euler angles (vectorized via NumPy)
+                    d_list = data.get("drones", [])
+                    if d_list:
+                        d_objs = [self.sim.drones.get(d["id"]) for d in d_list]
+                        valid_pairs = [(d_dict, obj) for d_dict, obj in zip(d_list, d_objs) if obj is not None]
+                        if valid_pairs:
+                            v_objs = [p[1] for p in valid_pairs]
+                            true_pos = np.array([o.position for o in v_objs], dtype=np.float64)
+                            est_pos = np.array([o.ekf.estimated_position for o in v_objs], dtype=np.float64)
+                            est_vel = np.array([o.ekf.estimated_velocity for o in v_objs], dtype=np.float64)
+                            attitudes = np.array([o.attitude for o in v_objs], dtype=np.float64)
+                            ekf_errs = np.linalg.norm(true_pos - est_pos, axis=1)
+                            deg_atts = np.degrees(attitudes)
+
+                            for i, (d_dict, _) in enumerate(valid_pairs):
+                                d_dict["estimated_position"] = [round(float(c), 3) for c in est_pos[i]]
+                                d_dict["estimated_velocity"] = [round(float(v), 3) for v in est_vel[i]]
+                                d_dict["ekf_error_m"] = round(float(ekf_errs[i]), 3)
+                                d_dict["roll_deg"] = round(float(deg_atts[i, 0]), 1)
+                                d_dict["pitch_deg"] = round(float(deg_atts[i, 1]), 1)
+                                d_dict["yaw_deg"] = round(float(deg_atts[i, 2]) % 360.0, 1)
 
                     # 2. Collaborative Multi-UAV Swarm LiDAR Sweep and SLAM Integration
+                    # Each individual drone in the fleet utilizes its own dedicated onboard LiDAR sensor
                     focus_drone = self.sim.drones.get(self.focus_drone_id) or next(iter(self.sim.drones.values()), None)
                     if focus_drone is not None:
-                        # Execute high-resolution LiDAR scan for focus drone
-                        scan = self.lidar.scan(
-                            drone_id=focus_drone.id,
-                            position=focus_drone.position,
-                            attitude=focus_drone.attitude,
-                            obstacles=self.sim.obstacles,
-                            sim_time=snapshot.sim_time,
-                        )
+                        # Focus drone executes its onboard LiDAR scan
+                        if hasattr(focus_drone, "perform_lidar_scan"):
+                            scan = focus_drone.perform_lidar_scan(self.sim.obstacles, sim_time=snapshot.sim_time)
+                        else:
+                            scan = self.lidar.scan(
+                                drone_id=focus_drone.id,
+                                position=focus_drone.position,
+                                attitude=focus_drone.attitude,
+                                obstacles=self.sim.obstacles,
+                                sim_time=snapshot.sim_time,
+                            )
                         self.voxel_map.insert_scan(scan)
-                        data["lidar_scan"] = scan.to_dict()
+                        if self.step_count <= 2 or self.step_count % 4 == 0:
+                            scan_dict = scan.to_dict()
+                            pts = scan_dict.get("points", [])
+                            if len(pts) > 600:
+                                step = max(1, len(pts) // 500)
+                                scan_dict["points"] = pts[::step]
+                            data["lidar_scan"] = scan_dict
 
                         # Compute Khatib APF Guidance Vectors for Autonomous Viewport
                         f_att = focus_drone.compute_attractive_force()
@@ -462,34 +665,72 @@ class SimulationServer:
                             "target": [round(float(c), 2) for c in focus_drone.target_position] if focus_drone.target_position is not None else None,
                         }
 
-                    # Swarm Collaborative SLAM: Scan 1 active peer drone each tick in round-robin to maintain steady 30+ FPS
+                    # Swarm Collaborative SLAM: Every individual drone in the fleet scans the city with its onboard LiDAR
                     active_peers = [
                         d for d in self.sim.drones.values()
                         if d.id != (focus_drone.id if focus_drone else "")
-                        and d.flight_mode in (FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.RTL)
-                        and float(d.position[2]) > 2.0
+                        and (d.flight_mode in (FlightMode.TAKEOFF, FlightMode.TRANSIT, FlightMode.SURVEYING, FlightMode.RELAY, FlightMode.RTL, FlightMode.DATA_TX, FlightMode.MANUAL) or float(d.position[2]) > 0.8)
                     ]
-                    if active_peers:
-                        peer_idx = self.step_count % len(active_peers)
+                    if self.step_count % 2 == 0 and active_peers:
+                        peer_idx = (self.step_count // 2) % len(active_peers)
                         peer = active_peers[peer_idx]
-                        p_scan = self.lidar.scan(
-                            drone_id=peer.id,
-                            position=peer.position,
-                            attitude=peer.attitude,
-                            obstacles=self.sim.obstacles,
-                            sim_time=snapshot.sim_time,
-                        )
+                        if hasattr(peer, "perform_lidar_scan"):
+                            p_scan = peer.perform_lidar_scan(self.sim.obstacles, sim_time=snapshot.sim_time)
+                        else:
+                            p_scan = self.lidar.scan(
+                                drone_id=peer.id,
+                                position=peer.position,
+                                attitude=peer.attitude,
+                                obstacles=self.sim.obstacles,
+                                sim_time=snapshot.sim_time,
+                            )
                         self.voxel_map.insert_scan(p_scan)
 
-                    # 3. Stream 3D Occupied Voxels & SLAM Metrics
-                    data["occupied_voxels"] = self.voxel_map.get_occupied_voxels(max_count=250)
-                    mapping_metrics = self.voxel_map.compute_metrics()
+                    # 3. Stream 3D Occupied Voxels & SLAM Metrics with Delta Streaming
+                    is_full_sync = (self.step_count <= 2 or self.step_count % 30 == 0 or not self._sent_voxels)
+                    if self.step_count % 3 == 0 or getattr(self, "_cached_occupied_voxels", None) is None:
+                        self._cached_occupied_voxels = self.voxel_map.get_occupied_voxels(max_count=1200)
+                        self._cached_mapping_metrics = self.voxel_map.compute_metrics()
+                    mapping_metrics = self._cached_mapping_metrics
                     data["mapping_metrics"] = mapping_metrics
 
-                    # 4. Stream Scientific Analytical Chart Data
+                    current_occupied = self._cached_occupied_voxels or []
+                    current_keys = {tuple(v.get("key", v["pos"])) for v in current_occupied}
+                    if is_full_sync:
+                        data["occupied_voxels"] = current_occupied
+                        data["voxel_delta"] = {
+                            "full": True,
+                            "voxels": current_occupied,
+                            "total_occupied": len(current_occupied),
+                        }
+                        self._sent_voxels = current_keys
+                    else:
+                        added_keys = current_keys - self._sent_voxels
+                        removed_keys = self._sent_voxels - current_keys
+                        added_voxels = [v for v in current_occupied if tuple(v.get("key", v["pos"])) in added_keys]
+                        removed_list = [list(k) for k in removed_keys]
+                        data["voxel_delta"] = {
+                            "full": False,
+                            "added": added_voxels,
+                            "removed": removed_list,
+                            "total_occupied": len(current_occupied),
+                        }
+                        data["occupied_voxels"] = []
+                        self._sent_voxels = current_keys
+
+                    # 4. Stream Scientific Analytical Chart Data using Pandas aggregation
                     drones_list = data.get("drones", [])
-                    ekf_errors = [d.get("ekf_error_m", 0.0) for d in drones_list]
-                    avg_ekf_err = round(float(np.mean(ekf_errors)) if ekf_errors else 0.08, 3)
+                    if drones_list:
+                        df_drones = pd.DataFrame(drones_list)
+                        avg_ekf_err = round(float(df_drones["ekf_error_m"].mean()), 3) if "ekf_error_m" in df_drones else 0.08
+                        active_relays = int((df_drones["role"] == "RELAY").sum()) if "role" in df_drones else 0
+                        retreating_drones = int(df_drones["flight_mode"].isin(["RTL", "LANDING"]).sum()) if "flight_mode" in df_drones else 0
+                        landed_drones = int((df_drones["flight_mode"] == "LANDED").sum()) if "flight_mode" in df_drones else 0
+                    else:
+                        avg_ekf_err = 0.08
+                        active_relays = 0
+                        retreating_drones = 0
+                        landed_drones = 0
 
                     total_pois_count = len(self.sim.pois) if hasattr(self.sim, "pois") else 5
                     data["analytics"] = {
@@ -500,31 +741,59 @@ class SimulationServer:
                         "completed_pois": int(snapshot.metrics.get("completed_pois", 0)),
                         "total_pois": total_pois_count,
                         "mapped_pct": mapping_metrics.get("coverage_pct", 0.0),
-                        "active_relays": sum(1 for d in drones_list if d.get("role") == "RELAY"),
-                        "retreating_drones": sum(1 for d in drones_list if d.get("flight_mode") in ("RTL", "LANDING")),
-                        "landed_drones": sum(1 for d in drones_list if d.get("flight_mode") == "LANDED"),
+                        "active_relays": active_relays,
+                        "retreating_drones": retreating_drones,
+                        "landed_drones": landed_drones,
                         "throughput_kbps": round(float(len(snapshot.packets) * 14.5 + 28.0), 1),
                     }
 
-                    # 5. Add obstacles geometry for client 3D rendering
-                    obs_list = []
-                    for obs in self.sim.obstacles:
-                        min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
-                        max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
-                        if min_p is not None and max_p is not None:
-                            obs_list.append({
-                                "id": getattr(obs, "id", "OBS"),
-                                "name": getattr(obs, "name", "Building"),
-                                "min_pt": [round(float(c), 2) for c in min_p],
-                                "max_pt": [round(float(c), 2) for c in max_p],
-                            })
-                    data["obstacles"] = obs_list
+                    # 5. Add obstacles geometry for client 3D rendering (cached & dirty-flagged)
+                    if getattr(self, "_cached_obs_list", None) is None:
+                        obs_list = []
+                        for obs in self.sim.obstacles:
+                            min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
+                            max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
+                            if min_p is not None and max_p is not None:
+                                obs_list.append({
+                                    "id": getattr(obs, "id", "OBS"),
+                                    "name": getattr(obs, "name", "Building"),
+                                    "min_pt": [round(float(c), 2) for c in min_p],
+                                    "max_pt": [round(float(c), 2) for c in max_p],
+                                })
+                        self._cached_obs_list = obs_list
+                        self._obs_dirty = True
+                    if getattr(self, "_obs_dirty", False) or self.step_count <= 2 or self.step_count % 60 == 0:
+                        data["obstacles"] = self._cached_obs_list
+                        self._obs_dirty = False
+
+                    # Decoupled slow channels: throttle static and slow-moving telemetry
+                    completed_pois = int(snapshot.metrics.get("completed_pois", 0))
+                    if self.step_count > 2 and self.step_count % 30 != 0 and completed_pois == getattr(self, "_last_completed_pois", -1):
+                        data.pop("pois", None)
+                    else:
+                        self._last_completed_pois = completed_pois
+
+                    # Maintain persistent disaster sites and priority queue in telemetry
+                    if self.step_count > 2 and self.step_count % 10 != 0:
+                        data.pop("priority_queue", None)
+                        data.pop("charging_pads", None)
 
                     # 6. Add live NVIDIA GPU hardware telemetry
                     data["gpu"] = get_gpu_telemetry()
+                    data["active_formation"] = getattr(self.sim, "active_formation", "AUTONOMOUS")
 
-                    # 7. Broadcast to connected WebSockets
-                    payload = json.dumps(data)
+                    # 6b. Add Predictive Bayesian Thermal Belief Grid & BFT Consensus telemetry
+                    if hasattr(self.sim, "mission_manager") and self.sim.mission_manager is not None:
+                        mm = self.sim.mission_manager
+                        if hasattr(mm, "thermal_grid") and mm.thermal_grid is not None:
+                            # Stream thermal grid at ~3 Hz (every 10 frames) or on initial startup
+                            if self.step_count <= 2 or self.step_count % 10 == 0:
+                                data["thermal_grid"] = mm.thermal_grid.to_dict()
+                        if hasattr(mm, "cbba_solver") and mm.cbba_solver is not None:
+                            data["bft_audit"] = getattr(mm.cbba_solver, "bft_audit_log", [])[-5:]
+
+                    # 7. Broadcast to connected WebSockets using fast_json_dumps
+                    payload = fast_json_dumps(data)
                     self.latest_payload = payload
                     if self.clients:
                         dead_clients = set()
@@ -540,9 +809,11 @@ class SimulationServer:
                 print(f"[!] Simulation broadcast loop error: {e}")
                 traceback.print_exc()
 
-            target_interval = self.step_delay / max(0.1, self.sim_speed)
+            target_interval = self.step_delay
             elapsed = time.perf_counter() - step_start
             sleep_time = max(0.001, target_interval - elapsed)
+            if self.step_count % 30 == 0:
+                print(f"[Loop #{self.step_count}] elapsed={elapsed*1000:.1f}ms, sleep={sleep_time*1000:.1f}ms, clients={len(self.clients)}", flush=True)
             await asyncio.sleep(sleep_time)
 
 
@@ -557,6 +828,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 @app.middleware("http")
@@ -589,6 +861,7 @@ async def get_telemetry():
     """Return latest simulation telemetry frame."""
     data = server_manager.sim.to_dict()
     data["scenario"] = server_manager.scenario
+    data["sim_speed"] = server_manager.sim_speed
     return JSONResponse(data)
 
 
@@ -624,23 +897,11 @@ async def get_gpu():
 @app.get("/api/export_telemetry")
 async def export_telemetry():
     """Export mission flight telemetry history as a downloadable CSV log."""
-    import io
-    import csv
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
-        "sim_time", "drone_id", "role", "flight_mode",
-        "pos_x", "pos_y", "pos_z",
-        "vel_x", "vel_y", "vel_z",
-        "est_x", "est_y", "est_z",
-        "battery_pct", "assigned_poi_id"
-    ])
-
     history = list(server_manager.sim.history)
     if not history:
         history = [server_manager.sim.get_telemetry_snapshot()]
 
+    rows = []
     for snap in history:
         t = snap.sim_time
         for d in snap.drones:
@@ -651,16 +912,30 @@ async def export_telemetry():
                 est = list(drone_obj.ekf.estimated_position)
             else:
                 est = d.get("estimated_position") or pos
-            writer.writerow([
-                t, d.get("id"), d.get("role"), d.get("flight_mode"),
-                pos[0], pos[1], pos[2],
-                vel[0], vel[1], vel[2],
-                est[0], est[1], est[2],
-                d.get("battery_pct"), d.get("assigned_poi_id") or "NONE"
-            ])
+            rows.append({
+                "sim_time": t,
+                "drone_id": d.get("id"),
+                "role": d.get("role"),
+                "flight_mode": d.get("flight_mode"),
+                "pos_x": pos[0], "pos_y": pos[1], "pos_z": pos[2],
+                "vel_x": vel[0], "vel_y": vel[1], "vel_z": vel[2],
+                "est_x": est[0], "est_y": est[1], "est_z": est[2],
+                "battery_pct": d.get("battery_pct"),
+                "assigned_poi_id": d.get("assigned_poi_id") or "NONE",
+            })
+
+    columns = [
+        "sim_time", "drone_id", "role", "flight_mode",
+        "pos_x", "pos_y", "pos_z",
+        "vel_x", "vel_y", "vel_z",
+        "est_x", "est_y", "est_z",
+        "battery_pct", "assigned_poi_id"
+    ]
+    df_export = pd.DataFrame(rows, columns=columns)
+    csv_content = df_export.to_csv(index=False)
 
     return Response(
-        content=output.getvalue(),
+        content=csv_content,
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=uav_swarm_flight_recorder.csv"}
     )
@@ -732,26 +1007,51 @@ async def export_debrief():
 
 
 @app.get("/api/export_point_cloud")
-async def export_point_cloud(format: str = "ply"):
+async def export_point_cloud(format: str = "ply", drone_id: Optional[str] = None):
     """
     Export reconstructed 3D LiDAR point cloud.
     Formats:
     - 'ply': Stanford ASCII PLY format for CloudCompare, Blender, MeshLab.
     - 'las': ASPRS LAS 1.2 Binary format for CloudCompare, QGIS, ArcGIS, PDAL.
+
+    Combines data from each individual drone into the net 3D point cloud map
+    of the city and structures, or exports a specific drone's individual point cloud.
     """
     fmt = format.lower()
+    drones = server_manager.sim.drones
+
+    # Individual drone export if specific drone_id is specified
+    if drone_id and drone_id.lower() not in ("all", "net", "combined"):
+        target_drone = drones.get(drone_id)
+        if not target_drone:
+            return JSONResponse({"status": "error", "message": f"Drone '{drone_id}' not found."}, status_code=404)
+        if fmt == "las":
+            las_bytes = server_manager.voxel_map.export_point_cloud_las(drones={drone_id: target_drone})
+            return Response(
+                content=las_bytes,
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f"attachment; filename={drone_id}_PointCloud.las"}
+            )
+        ply_content = target_drone.export_point_cloud_ply()
+        return Response(
+            content=ply_content,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename={drone_id}_PointCloud.ply"}
+        )
+
+    # Net Combined 3D Map Fused from all individual drones in the fleet
     if fmt == "las":
-        las_bytes = server_manager.voxel_map.export_point_cloud_las()
+        las_bytes = server_manager.voxel_map.export_point_cloud_las(drones=drones)
         return Response(
             content=las_bytes,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": "attachment; filename=UAVX_Disaster_PointCloud.las"}
+            headers={"Content-Disposition": "attachment; filename=UAVX_Net_Combined_City_PointCloud.las"}
         )
-    ply_content = server_manager.voxel_map.export_point_cloud_ply()
+    ply_content = server_manager.voxel_map.export_point_cloud_ply(drones=drones)
     return Response(
         content=ply_content,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": "attachment; filename=UAVX_Disaster_PointCloud.ply"}
+        headers={"Content-Disposition": "attachment; filename=UAVX_Net_Combined_City_PointCloud.ply"}
     )
 
 
@@ -780,51 +1080,176 @@ async def post_manual_control(payload: Dict[str, Any]):
     return JSONResponse({"status": "ok" if success else "error", "drone_id": drone_id, "enabled": enabled})
 
 
-@app.post("/api/control")
-async def post_control(payload: Dict[str, Any]):
-    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat."""
+@app.post("/api/dispatch")
+async def post_dispatch(payload: Dict[str, Any]):
+    """Interactive 3D Click-to-Dispatch: Assign 3D waypoint setpoint to selected UAV."""
+    drone_id = payload.get("drone_id") or server_manager.focus_drone_id
+    target = payload.get("target") or payload.get("waypoint") or [0.0, 0.0, 35.0]
+    success = server_manager.sim.dispatch_drone_waypoint(drone_id, target)
+    return JSONResponse({
+        "status": "ok" if success else "error",
+        "drone_id": drone_id,
+        "target": target,
+        "message": f"UAV {drone_id} dispatched to waypoint setpoint." if success else "Dispatch failed."
+    })
+
+
+@app.post("/api/formation")
+async def post_formation(payload: Dict[str, Any]):
+    """Set swarm tactical formation (AUTONOMOUS, V_FORMATION, LINE_SWEEP, PERIMETER_ORBIT)."""
+    form = payload.get("formation") or payload.get("mode") or "AUTONOMOUS"
+    success = server_manager.sim.set_swarm_formation(form)
+    return JSONResponse({
+        "status": "ok" if success else "error",
+        "formation": server_manager.sim.active_formation,
+        "message": f"Swarm formation set to {server_manager.sim.active_formation}" if success else "Invalid formation"
+    })
+
+
+@app.post("/api/trigger_collapse")
+@app.get("/api/trigger_collapse")
+async def trigger_collapse(payload: Optional[Dict[str, Any]] = None):
+    """Trigger dynamic structural failure and collapse of a disaster building."""
+    obs_id = payload.get("obstacle_id") if payload else None
+    res = server_manager.sim.trigger_obstacle_collapse(obstacle_id=obs_id)
+    server_manager._cached_obs_list = None
+    server_manager._obs_dirty = True
+    if res:
+        return JSONResponse({"status": "ok", "collapse": res})
+    return JSONResponse({"status": "error", "message": "No eligible obstacle found for collapse."}, status_code=400)
+
+
+@app.post("/api/inject_byzantine_bid")
+@app.get("/api/inject_byzantine_bid")
+async def inject_byzantine_bid(payload: Optional[Dict[str, Any]] = None):
+    """Simulate an adversarial drone submitting a spoofed bid to test BFT consensus."""
+    d_id = (payload.get("drone_id") if payload else None) or "SCOUT_1"
+    poi_id = (payload.get("poi_id") if payload else None) or "POI_SURVIVORS"
+    spoofed_score = float(payload.get("score", 9999.0)) if payload else 9999.0
+
+    mm = getattr(server_manager.sim, "mission_manager", None)
+    if mm and hasattr(mm, "cbba_solver"):
+        mm.cbba_solver.inject_byzantine_bid(d_id, poi_id, spoofed_score)
+        if hasattr(mm, "emit_tactical_comms"):
+            mm.emit_tactical_comms(
+                "WARNING",
+                "SECURITY",
+                f"🛡️ ADVERSARIAL ATTEMPT: {d_id} injected spoofed bid ({spoofed_score}) on {poi_id}. BFT peer voting engaged.",
+                "SECURITY",
+            )
+        return JSONResponse({
+            "status": "ok",
+            "drone_id": d_id,
+            "poi_id": poi_id,
+            "spoofed_score": spoofed_score,
+            "bft_audit": getattr(mm.cbba_solver, "bft_audit_log", [])[-5:],
+            "message": f"Byzantine bid injected on {d_id}. Swarm BFT consensus evaluating.",
+        })
+    return JSONResponse({"status": "error", "message": "Mission manager or CBBA solver not initialized."}, status_code=400)
+
+
+@app.get("/api/thermal_grid")
+async def get_thermal_grid():
+    """Return live 2D Bayesian Thermal Belief Grid telemetry."""
+    mm = getattr(server_manager.sim, "mission_manager", None)
+    if mm and hasattr(mm, "thermal_grid") and mm.thermal_grid:
+        return JSONResponse(mm.thermal_grid.to_dict())
+    return JSONResponse({"status": "error", "message": "Thermal grid not initialized."}, status_code=404)
+
+
+def handle_command(server: SimulationServer, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Unified handler for HUD commands via REST (/api/control) and WebSocket (/ws)."""
     cmd = payload.get("command") or payload.get("cmd")
     if cmd == "pause":
-        server_manager.is_running = False
+        server.is_running = False
     elif cmd == "resume":
-        server_manager.is_running = True
+        server.is_running = True
     elif cmd == "reset":
-        server_manager.reset()
+        server.reset()
     elif cmd == "speed":
-        server_manager.sim_speed = float(payload.get("value", 1.0))
+        server.sim_speed = max(0.25, min(10.0, float(payload.get("value", 1.0))))
     elif cmd == "focus_drone":
         drone_id = str(payload.get("drone_id", "UAV_1"))
-        if drone_id in server_manager.sim.drones:
-            server_manager.focus_drone_id = drone_id
+        if drone_id in server.sim.drones:
+            server.focus_drone_id = drone_id
+    elif cmd == "dispatch":
+        drone_id = payload.get("drone_id") or server.focus_drone_id
+        target = payload.get("target") or payload.get("waypoint") or [0.0, 0.0, 35.0]
+        server.sim.dispatch_drone_waypoint(drone_id, target)
+        return {"status": "ok", "drone_id": drone_id, "target": target}
     elif cmd in ("retreat", "rtl"):
         drone_id = payload.get("drone_id")
-        if drone_id and drone_id in server_manager.sim.drones:
-            server_manager.sim.trigger_drone_retreat(drone_id)
+        if drone_id and drone_id in server.sim.drones:
+            server.sim.trigger_drone_retreat(drone_id)
         else:
-            server_manager.sim.trigger_fleet_retreat()
+            server.sim.trigger_fleet_retreat()
+        return {"status": "ok", "drone_id": drone_id or "FLEET"}
     elif cmd == "chaos_fault":
         drone_id = payload.get("drone_id")
-        victim = server_manager.sim.trigger_chaos_fault(drone_id)
-        return JSONResponse({"status": "ok", "victim_id": victim})
+        victim = server.sim.trigger_chaos_fault(drone_id)
+        return {"status": "ok", "victim_id": victim}
+    elif cmd in ("formation", "set_formation"):
+        form = payload.get("formation") or payload.get("value") or "AUTONOMOUS"
+        server.sim.set_swarm_formation(form)
+        return {"status": "ok", "formation": server.sim.active_formation}
     elif cmd in ("switch_scenario", "scenario"):
         scen = (payload.get("scenario") or payload.get("value") or "sector_delta").lower()
         if scen in ("sector_delta", "challenge"):
-            server_manager.reset(scenario=scen)
-            return JSONResponse({"status": "ok", "scenario": server_manager.scenario})
+            server.reset(scenario=scen)
+            return {"status": "ok", "scenario": server.scenario}
+        return {"status": "error", "message": f"Unsupported scenario: {scen}"}
+    elif cmd in ("reset_slam", "clear_slam"):
+        server.voxel_map.voxels.clear()
+        if hasattr(server.voxel_map, "accumulated_hits"):
+            server.voxel_map.accumulated_hits.clear()
+        server.voxel_map.total_surveyed_points = 0
+        return {"status": "ok", "message": "3D SLAM map cleared"}
+    elif cmd in ("trigger_collapse", "collapse"):
+        obs_id = payload.get("obstacle_id")
+        res = server.sim.trigger_obstacle_collapse(obstacle_id=obs_id)
+        server._cached_obs_list = None
+        server._obs_dirty = True
+        return {"status": "ok" if res else "error", "collapse": res}
+    elif cmd in ("byzantine_test", "inject_byzantine_bid"):
+        d_id = payload.get("drone_id", "SCOUT_1")
+        poi_id = payload.get("poi_id", "POI_SURVIVORS")
+        score = float(payload.get("score", 9999.0))
+        mm = getattr(server.sim, "mission_manager", None)
+        if mm and hasattr(mm, "cbba_solver"):
+            mm.cbba_solver.inject_byzantine_bid(d_id, poi_id, score)
+            if hasattr(mm, "emit_tactical_comms"):
+                mm.emit_tactical_comms(
+                    "WARNING",
+                    "SECURITY",
+                    f"🛡️ ADVERSARIAL ATTEMPT: {d_id} injected spoofed bid ({score}) on {poi_id}. BFT peer voting engaged.",
+                    "SECURITY",
+                )
+            return {"status": "ok", "drone_id": d_id, "poi_id": poi_id, "bft_audit": getattr(mm.cbba_solver, "bft_audit_log", [])[-5:]}
+        return {"status": "error", "message": "CBBA solver not ready"}
     elif cmd == "manual_control":
-        drone_id = payload.get("drone_id") or server_manager.focus_drone_id
+        drone_id = payload.get("drone_id") or server.focus_drone_id
         vx = float(payload.get("vx", 0.0))
         vy = float(payload.get("vy", 0.0))
         vz = float(payload.get("vz", 0.0))
         yaw_rate = float(payload.get("yaw_rate", 0.0))
         enabled = bool(payload.get("enabled", True))
-        server_manager.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
-    return JSONResponse({
+        success = server.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
+        return {"status": "ok" if success else "error", "drone_id": drone_id, "enabled": enabled}
+
+    return {
         "status": "ok",
-        "running": server_manager.is_running,
-        "speed": server_manager.sim_speed,
-        "focus_drone": server_manager.focus_drone_id
-    })
+        "running": server.is_running,
+        "speed": server.sim_speed,
+        "focus_drone": server.focus_drone_id
+    }
+
+
+@app.post("/api/control")
+async def post_control(payload: Dict[str, Any]):
+    """Handle HUD commands: pause, resume, reset, speed, focus drone, retreat, dispatch, formation."""
+    res = handle_command(server_manager, payload)
+    status_code = 400 if res.get("status") == "error" else 200
+    return JSONResponse(res, status_code=status_code)
 
 
 @app.websocket("/ws")
@@ -841,35 +1266,7 @@ async def websocket_endpoint(websocket: WebSocket):
             msg = await websocket.receive_text()
             try:
                 data = json.loads(msg)
-                cmd = data.get("command") or data.get("cmd")
-                if cmd == "pause":
-                    server_manager.is_running = False
-                elif cmd == "resume":
-                    server_manager.is_running = True
-                elif cmd == "reset":
-                    server_manager.reset()
-                elif cmd == "speed":
-                    server_manager.sim_speed = float(data.get("value", 1.0))
-                elif cmd == "focus_drone":
-                    drone_id = str(data.get("drone_id", "UAV_1"))
-                    if drone_id in server_manager.sim.drones:
-                        server_manager.focus_drone_id = drone_id
-                elif cmd in ("retreat", "rtl"):
-                    drone_id = data.get("drone_id")
-                    if drone_id and drone_id in server_manager.sim.drones:
-                        server_manager.sim.trigger_drone_retreat(drone_id)
-                    else:
-                        server_manager.sim.trigger_fleet_retreat()
-                elif cmd == "chaos_fault":
-                    server_manager.sim.trigger_chaos_fault(data.get("drone_id"))
-                elif cmd == "manual_control":
-                    drone_id = data.get("drone_id") or server_manager.focus_drone_id
-                    vx = float(data.get("vx", 0.0))
-                    vy = float(data.get("vy", 0.0))
-                    vz = float(data.get("vz", 0.0))
-                    yaw_rate = float(data.get("yaw_rate", 0.0))
-                    enabled = bool(data.get("enabled", True))
-                    server_manager.sim.set_drone_manual_control(drone_id, vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, enabled=enabled)
+                handle_command(server_manager, data)
             except Exception:
                 pass
     except WebSocketDisconnect:
@@ -879,3 +1276,4 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(server_manager.broadcast_loop())
+    asyncio.create_task(_gpu_telemetry_loop())

@@ -70,3 +70,7 @@ venv.bak/
 Thumbs.db
 desktop.ini
 *.tmp
+
+# Media & Demonstration Video Outputs
+*.mp4
+scripts/video_preview/

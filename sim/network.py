@@ -54,13 +54,13 @@ class DTNBuffer:
     """Delay-Tolerant Networking (DTN) FIFO Store-and-Forward Ring Buffer."""
     def __init__(self, capacity: int = 250) -> None:
         self.capacity = capacity
-        self.buffer: List[NetworkPacket] = []
+        self.buffer: deque[NetworkPacket] = deque()
         self.total_dropped: int = 0
 
     def push(self, packet: NetworkPacket) -> bool:
         """Push packet to buffer. If full, drops oldest (FIFO overflow)."""
         if len(self.buffer) >= self.capacity:
-            self.buffer.pop(0)
+            self.buffer.popleft()
             self.total_dropped += 1
             self.buffer.append(packet)
             return False
@@ -68,10 +68,10 @@ class DTNBuffer:
         return True
 
     def pop(self) -> Optional[NetworkPacket]:
-        """Pop next queued packet."""
+        """Pop next queued packet in O(1) time."""
         if not self.buffer:
             return None
-        return self.buffer.pop(0)
+        return self.buffer.popleft()
 
     def peek(self) -> Optional[NetworkPacket]:
         return self.buffer[0] if self.buffer else None
@@ -222,6 +222,81 @@ class DualBandRFChannelModel:
                 "cost": 1e6,
             }
 
+    def evaluate_links_batch(
+        self,
+        distances: np.ndarray,
+        is_los_arr: np.ndarray,
+        num_occlusions_arr: np.ndarray,
+    ) -> List[Dict[str, Any]]:
+        """
+        Vectorized batch RF link evaluation across both 2.4 GHz and 915 MHz bands using NumPy.
+        """
+        n = len(distances)
+        if n == 0:
+            return []
+
+        d = np.maximum(1.0, distances)
+        # 2.4 GHz
+        eta_24 = np.where(is_los_arr, self.ch_24ghz.eta_los, self.ch_24ghz.eta_nlos)
+        pl_24 = self.ch_24ghz.pl0 + 10.0 * eta_24 * np.log10(d)
+        occ_loss_24 = np.where(~is_los_arr | (num_occlusions_arr > 0), np.maximum(1, num_occlusions_arr) * self.ch_24ghz.building_penetration_loss_db, 0.0)
+        pl_24 += occ_loss_24
+        snr_24 = self.ch_24ghz.p_tx_dbm - pl_24 - self.ch_24ghz.noise_floor_dbm
+        max_range_24 = np.where(is_los_arr, self.ch_24ghz.max_direct_los_range, self.ch_24ghz.max_direct_los_range * 0.5)
+        viable_24 = (snr_24 >= self.ch_24ghz.min_snr_threshold_db) & (distances <= max_range_24)
+
+        # 915 MHz
+        eta_915 = np.where(is_los_arr, self.ch_915mhz.eta_los, self.ch_915mhz.eta_nlos)
+        pl_915 = self.ch_915mhz.pl0 + 10.0 * eta_915 * np.log10(d)
+        occ_loss_915 = np.where(~is_los_arr | (num_occlusions_arr > 0), np.maximum(1, num_occlusions_arr) * self.ch_915mhz.building_penetration_loss_db, 0.0)
+        pl_915 += occ_loss_915
+        snr_915 = self.ch_915mhz.p_tx_dbm - pl_915 - self.ch_915mhz.noise_floor_dbm
+        max_range_915 = np.where(is_los_arr, self.ch_915mhz.max_direct_los_range, self.ch_915mhz.max_direct_los_range * 0.5)
+        viable_915 = (snr_915 >= self.ch_915mhz.min_snr_threshold_db) & (distances <= max_range_915)
+
+        # Vectorized ETX calculation
+        p_succ_24 = 1.0 / (1.0 + np.exp(-0.4 * (snr_24 - 3.5)))
+        etx_24 = 1.0 / (np.clip(p_succ_24, 0.05, 1.0) ** 2)
+        cost_24 = distances + etx_24 * 20.0 + np.maximum(0.0, 30.0 - snr_24) * 1.5 + (num_occlusions_arr * 400.0)
+
+        p_succ_915 = 1.0 / (1.0 + np.exp(-0.4 * (snr_915 - 3.5)))
+        etx_915 = 1.0 / (np.clip(p_succ_915, 0.05, 1.0) ** 2)
+        cost_915 = distances + etx_915 * 30.0 + 80.0 + (num_occlusions_arr * 80.0)
+
+        results = []
+        for k in range(n):
+            if viable_24[k]:
+                results.append({
+                    "viable": True,
+                    "band": "2.4GHz",
+                    "path_loss_db": float(pl_24[k]),
+                    "snr": float(snr_24[k]),
+                    "etx": float(etx_24[k]),
+                    "throughput_mbps": 54.0,
+                    "cost": float(cost_24[k]),
+                })
+            elif viable_915[k]:
+                results.append({
+                    "viable": True,
+                    "band": "915MHz",
+                    "path_loss_db": float(pl_915[k]),
+                    "snr": float(snr_915[k]),
+                    "etx": float(etx_915[k]),
+                    "throughput_mbps": 0.25,
+                    "cost": float(cost_915[k]),
+                })
+            else:
+                results.append({
+                    "viable": False,
+                    "band": "DISRUPTED",
+                    "path_loss_db": float(pl_24[k]),
+                    "snr": float(snr_24[k]),
+                    "etx": 20.0,
+                    "throughput_mbps": 0.0,
+                    "cost": 1e6,
+                })
+        return results
+
     # Backward compatibility with single-band interface
     def compute_path_loss(self, distance: float, is_los: bool = True, num_occlusions: int = 0) -> float:
         return self.ch_24ghz.compute_path_loss(distance, is_los, num_occlusions)
@@ -309,92 +384,188 @@ class FANETNetworkEngine:
         self._compute_dls_routes()
 
     def _recompute_links(self, obstacles: Sequence[Any]) -> None:
-        """Calculate RF link viability and composite cost for all node pairs."""
+        """Calculate RF link viability and composite cost for all node pairs using vectorized NumPy distance matrices."""
         self.link_cache.clear()
         nodes = sorted(self.node_positions.keys())
         n = len(nodes)
+        if n < 2:
+            return
+
+        coords = np.array([self.node_positions[k] for k in nodes], dtype=np.float64)
+        diff_matrix = coords[None, :, :] - coords[:, None, :]
+        dist_matrix = np.linalg.norm(diff_matrix, axis=-1)
+
+        pairs = []
+        pair_distances = []
+        pair_is_los = []
+        pair_occ_cnt = []
+
+        if not hasattr(self, "_los_cache"):
+            self._los_cache = {}
+
+        # Pre-extract obstacle bounding boxes for fast broadphase rejection
+        obs_min_pts = None
+        obs_max_pts = None
+        if obstacles:
+            om_list = [getattr(o, "min_pt", getattr(o, "min_bound", None)) for o in obstacles]
+            ox_list = [getattr(o, "max_pt", getattr(o, "max_bound", None)) for o in obstacles]
+            if om_list and om_list[0] is not None and ox_list[0] is not None:
+                obs_min_pts = np.vstack(om_list)
+                obs_max_pts = np.vstack(ox_list)
 
         for i in range(n):
             for j in range(i + 1, n):
                 n1, n2 = nodes[i], nodes[j]
-                p1, p2 = self.node_positions[n1], self.node_positions[n2]
-                diff = p2 - p1
-                dist = float(np.linalg.norm(diff))
+                p1, p2 = coords[i], coords[j]
+                dist = float(dist_matrix[i, j])
+                pair_key = (n1, n2)
 
-                # Check 3D building occlusions
-                is_los = True
-                occ_cnt = 0
-                if dist > 1e-4:
-                    dir_vec = diff / dist
-                    for obs in obstacles:
-                        # Duck-typing with obstacles.py or conftest AABB
-                        if hasattr(obs, "intersect_ray_segment"):
-                            res = obs.intersect_ray_segment(p1, p2)
-                            if res.hit:
-                                occ_cnt += 1
-                                is_los = False
-                        elif hasattr(obs, "ray_intersection"):
-                            if obs.ray_intersection(p1, dir_vec, dist):
-                                occ_cnt += 1
-                                is_los = False
-                        elif hasattr(obs, "contains_point"):
-                            # Check midpoint approximation if ray method not directly available
-                            mid = 0.5 * (p1 + p2)
-                            if obs.contains_point(mid):
-                                occ_cnt += 1
-                                is_los = False
-
-                if hasattr(self.channel, "evaluate_link"):
-                    eval_res = self.channel.evaluate_link(dist, is_los, occ_cnt)
-                    viable = eval_res["viable"]
-                    pl = eval_res["path_loss_db"]
-                    snr = eval_res["snr"]
-                    cost = eval_res["cost"]
-                    band = eval_res["band"]
-                    etx = eval_res["etx"]
-                    throughput = eval_res["throughput_mbps"]
+                cached = self._los_cache.get(pair_key)
+                if (cached is not None and
+                    abs(p1[0] - cached[0][0]) < 0.2 and abs(p1[1] - cached[0][1]) < 0.2 and abs(p1[2] - cached[0][2]) < 0.2 and
+                    abs(p2[0] - cached[1][0]) < 0.2 and abs(p2[1] - cached[1][1]) < 0.2 and abs(p2[2] - cached[1][2]) < 0.2):
+                    is_los = cached[2]
+                    occ_cnt = cached[3]
                 else:
-                    viable, pl, snr = self.channel.is_link_viable(dist, is_los, occ_cnt)
-                    cost = dist + max(0.0, 30.0 - snr) * 2.0 + (occ_cnt * 500.0)
-                    band = "2.4GHz"
-                    etx = 1.0
-                    throughput = 54.0
+                    is_los = True
+                    occ_cnt = 0
+                    if dist > 1e-4:
+                        diff = p2 - p1
+                        dir_vec = diff / dist
+                        seg_min = np.minimum(p1, p2)
+                        seg_max = np.maximum(p1, p2)
 
-                link_info = {
-                    "source": n1,
-                    "target": n2,
-                    "distance": dist,
-                    "is_los": is_los,
-                    "occlusion_count": occ_cnt,
-                    "path_loss_db": round(pl, 2),
-                    "snr": round(snr, 2),
-                    "viable": viable,
-                    "cost": cost,
-                    "band": band,
-                    "etx": round(etx, 2),
-                    "throughput_mbps": throughput,
-                    "status": "ACTIVE" if viable else "DISRUPTED",
+                        # Fast vectorized obstacle bounding box overlap test
+                        if obs_min_pts is not None:
+                            overlap_mask = ~np.any((seg_min[None, :] > obs_max_pts) | (seg_max[None, :] < obs_min_pts), axis=1)
+                            candidate_indices = np.nonzero(overlap_mask)[0]
+                        else:
+                            candidate_indices = range(len(obstacles))
+
+                        for obs_idx in candidate_indices:
+                            obs = obstacles[obs_idx]
+                            if hasattr(obs, "intersect_ray_segment"):
+                                res = obs.intersect_ray_segment(p1, p2)
+                                if res.hit:
+                                    occ_cnt += 1
+                                    is_los = False
+                            elif hasattr(obs, "ray_intersection"):
+                                if obs.ray_intersection(p1, dir_vec, dist):
+                                    occ_cnt += 1
+                                    is_los = False
+                            elif hasattr(obs, "contains_point"):
+                                mid = 0.5 * (p1 + p2)
+                                if obs.contains_point(mid):
+                                    occ_cnt += 1
+                                    is_los = False
+
+                    self._los_cache[pair_key] = (p1.copy(), p2.copy(), is_los, occ_cnt)
+
+                pairs.append((n1, n2))
+                pair_distances.append(dist)
+                pair_is_los.append(is_los)
+                pair_occ_cnt.append(occ_cnt)
+
+        # Batch channel evaluation via NumPy
+        if hasattr(self.channel, "evaluate_links_batch"):
+            eval_results = self.channel.evaluate_links_batch(
+                np.array(pair_distances, dtype=np.float64),
+                np.array(pair_is_los, dtype=bool),
+                np.array(pair_occ_cnt, dtype=np.int32),
+            )
+        else:
+            eval_results = [
+                self.channel.evaluate_link(d, los, occ) if hasattr(self.channel, "evaluate_link")
+                else {
+                    "viable": self.channel.is_link_viable(d, los, occ)[0],
+                    "path_loss_db": self.channel.is_link_viable(d, los, occ)[1],
+                    "snr": self.channel.is_link_viable(d, los, occ)[2],
+                    "cost": d + max(0.0, 30.0 - self.channel.is_link_viable(d, los, occ)[2]) * 2.0 + (occ * 500.0),
+                    "band": "2.4GHz",
+                    "etx": 1.0,
+                    "throughput_mbps": 54.0,
                 }
-                self.link_cache[(n1, n2)] = link_info
-                self.link_cache[(n2, n1)] = {**link_info, "source": n2, "target": n1}
+                for d, los, occ in zip(pair_distances, pair_is_los, pair_occ_cnt)
+            ]
+
+        for (n1, n2), dist, is_los, occ_cnt, eval_res in zip(pairs, pair_distances, pair_is_los, pair_occ_cnt, eval_results):
+            viable = eval_res["viable"]
+            pl = eval_res["path_loss_db"]
+            snr = eval_res["snr"]
+            cost = eval_res["cost"]
+            band = eval_res["band"]
+            etx = eval_res["etx"]
+            throughput = eval_res["throughput_mbps"]
+
+            link_info = {
+                "source": n1,
+                "target": n2,
+                "distance": dist,
+                "is_los": is_los,
+                "occlusion_count": occ_cnt,
+                "path_loss_db": round(pl, 2),
+                "snr": round(snr, 2),
+                "viable": viable,
+                "cost": cost,
+                "band": band,
+                "etx": round(etx, 2),
+                "throughput_mbps": throughput,
+                "status": "ACTIVE" if viable else "DISRUPTED",
+            }
+            self.link_cache[(n1, n2)] = link_info
+            self.link_cache[(n2, n1)] = {**link_info, "source": n2, "target": n1}
 
     def _compute_dls_routes(self) -> None:
         """
         Dijkstra Shortest Path Dynamic Link-State Routing (FANET-DLS).
-        Computes the optimal path from each UAV to the GCS.
+        Computes the optimal path from each UAV to the GCS using scipy/NumPy shortest path routing.
         """
         self.active_routes.clear()
-        nodes = list(self.node_positions.keys())
+        nodes = sorted(self.node_positions.keys())
         if self.gcs_id not in nodes:
             return
 
-        # Build adjacency graph of viable links
+        n = len(nodes)
+        node_to_idx = {name: i for i, name in enumerate(nodes)}
+        gcs_idx = node_to_idx[self.gcs_id]
+
+        # Build adjacency matrix
+        adj_matrix = np.zeros((n, n), dtype=np.float64)
+        for (u, v), link in self.link_cache.items():
+            if link.get("viable", False) and u in node_to_idx and v in node_to_idx:
+                adj_matrix[node_to_idx[u], node_to_idx[v]] = float(link["cost"])
+
+        try:
+            from scipy.sparse import csr_matrix
+            from scipy.sparse.csgraph import dijkstra
+            csr = csr_matrix(adj_matrix)
+            dist_matrix, predecessors = dijkstra(csr, directed=False, indices=gcs_idx, return_predecessors=True)
+            for node in nodes:
+                if node == self.gcs_id:
+                    continue
+                u_idx = node_to_idx[node]
+                if dist_matrix[u_idx] == np.inf:
+                    continue
+                path = [node]
+                curr_idx = u_idx
+                visited_steps = 0
+                while curr_idx != gcs_idx and curr_idx >= 0 and visited_steps < n:
+                    curr_idx = int(predecessors[curr_idx])
+                    if curr_idx >= 0:
+                        path.append(nodes[curr_idx])
+                    visited_steps += 1
+                if path and path[-1] == self.gcs_id:
+                    self.active_routes[node] = path
+            return
+        except Exception:
+            pass
+
+        # Fallback to standard graph dijkstra
         adj: Dict[str, List[Tuple[str, float]]] = {n: [] for n in nodes}
         for (u, v), link in self.link_cache.items():
             if link["viable"]:
                 adj[u].append((v, link["cost"]))
 
-        # For each drone, find shortest path to GCS
         for node in nodes:
             if node == self.gcs_id:
                 continue
@@ -566,7 +737,7 @@ class FANETNetworkEngine:
 
     def get_active_packets(self) -> List[Dict[str, Any]]:
         """Return serialized list of recent active in-flight or delivered packets."""
-        recent = self.active_packets[-25:] + self.delivered_packets[-25:]
+        recent = self.active_packets[-8:] + self.delivered_packets[-8:]
         return [p.to_dict() for p in recent]
 
     def get_metrics(self) -> Dict[str, float]:
