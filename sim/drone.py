@@ -89,6 +89,10 @@ class Drone:
         self.drafting_leader_id: Optional[str] = None
         self.drafting_saving_pct: float = 0.0
 
+        # Assigned operational scanning sector & coverage metrics
+        self.assigned_sector_id: Optional[str] = None
+        self.sector_scan_progress: float = 0.0
+
         # Physical constants
         self.g = 9.80665
 
@@ -319,6 +323,8 @@ class Drone:
         self.actuator_glitch = False
         self.actuator_glitch_severity = 0.0
         self.is_low_battery_rtb = False
+        self.assigned_sector_id = None
+        self.sector_scan_progress = 0.0
         self.waypoint_queue.clear()
         self.target_yaw_filtered = float(self.attitude[2])
         self.battery.reset()
@@ -402,58 +408,117 @@ class Drone:
         m = self.limits.mass_kg
         a_max = self.limits.max_accel
 
-        for obs in obstacles:
-            if hasattr(obs, "distance_and_closest_point"):
-                dist, closest_pt = obs.distance_and_closest_point(self.position)
-            elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
-                closest_pt = np.clip(self.position, obs.min_bound, obs.max_bound)
-                dist = float(np.linalg.norm(self.position - closest_pt))
-            elif hasattr(obs, "min_pt") and hasattr(obs, "max_pt"):
-                closest_pt = np.clip(self.position, obs.min_pt, obs.max_pt)
-                dist = float(np.linalg.norm(self.position - closest_pt))
+        cached_min = getattr(self, "_cached_obs_min_pts", None)
+        cached_max = getattr(self, "_cached_obs_max_pts", None)
+        if cached_min is None or len(cached_min) != len(obstacles):
+            m_list = [getattr(o, "min_pt", getattr(o, "min_bound", None)) for o in obstacles]
+            x_list = [getattr(o, "max_pt", getattr(o, "max_bound", None)) for o in obstacles]
+            if m_list and m_list[0] is not None and x_list[0] is not None:
+                cached_min = np.vstack(m_list)
+                cached_max = np.vstack(x_list)
+                self._cached_obs_min_pts = cached_min
+                self._cached_obs_max_pts = cached_max
             else:
-                continue
+                cached_min = None
+                cached_max = None
 
-            push = self.position - closest_pt
-            push_norm = float(np.linalg.norm(push))
-            if push_norm > 1e-4:
-                n_hat = push / push_norm
-            elif hasattr(obs, "surface_normal"):
-                n_hat = obs.surface_normal(self.position)
-            else:
-                n_hat = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        if cached_min is not None:
+            closest_all = np.clip(self.position, cached_min, cached_max)
+            push_all = self.position - closest_all
+            dists_all = np.linalg.norm(push_all, axis=1)
+            near_indices = np.nonzero(dists_all < 35.0)[0]
+            for idx in near_indices:
+                obs = obstacles[idx]
+                dist = float(dists_all[idx])
+                push = push_all[idx]
+                push_norm = dist
+                if push_norm > 1e-4:
+                    n_hat = push / push_norm
+                elif hasattr(obs, "surface_normal"):
+                    n_hat = obs.surface_normal(self.position)
+                else:
+                    n_hat = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-            # Dynamic sensing horizon based on approach speed
-            v_approach = max(0.0, float(-np.dot(self.velocity, n_hat)))
-            rho_0_dyn = max(8.0, (v_approach ** 2) / (2.0 * a_max) + 0.6 * v_approach + 2.5)
+                v_approach = max(0.0, float(-np.dot(self.velocity, n_hat)))
+                rho_0_dyn = max(8.0, (v_approach ** 2) / (2.0 * a_max) + 0.6 * v_approach + 2.5)
 
-            if dist < rho_0_dyn:
-                d_eff = max(dist - 2.0, 0.1)
-                rho_eff = max(rho_0_dyn - 2.0, 0.2)
-                mag_apf = 60.0 * (1.0 / d_eff - 1.0 / rho_eff) / (d_eff ** 2)
-                mag_damp = 15.0 * v_approach * ((rho_0_dyn - dist) / rho_0_dyn) ** 2 * m
-                mag_barrier = 100.0 * ((2.5 / max(dist, 0.1)) ** 3) if dist < 3.0 else 0.0
-                mag = min(mag_apf + mag_damp + mag_barrier, 300.0)
-                f_obs += mag * n_hat
+                if dist < rho_0_dyn:
+                    d_eff = max(dist - 2.0, 0.1)
+                    rho_eff = max(rho_0_dyn - 2.0, 0.2)
+                    mag_apf = 60.0 * (1.0 / d_eff - 1.0 / rho_eff) / (d_eff ** 2)
+                    mag_damp = 15.0 * v_approach * ((rho_0_dyn - dist) / rho_0_dyn) ** 2 * m
+                    mag_barrier = 100.0 * ((2.5 / max(dist, 0.1)) ** 3) if dist < 3.0 else 0.0
+                    mag = min(mag_apf + mag_damp + mag_barrier, 300.0)
+                    f_obs += mag * n_hat
 
-                # Lateral tangential circulatory force to bypass obstacles without head-on stagnation
-                t_vec = np.array([-n_hat[1], n_hat[0], 0.0], dtype=np.float64)
-                t_norm = float(np.linalg.norm(t_vec))
-                if t_norm > 1e-4:
-                    t_hat = t_vec / t_norm
-                    if self.target_position is not None:
-                        to_target = self.target_position[:2] - self.position[:2]
-                        if float(np.dot(to_target, t_hat[:2])) < 0.0:
-                            t_hat = -t_hat
-                    mag_circ = 22.0 if v_approach <= 1.0 else 25.0
-                    f_obs += t_hat * mag_circ
+                    t_vec = np.array([-n_hat[1], n_hat[0], 0.0], dtype=np.float64)
+                    t_norm = float(np.linalg.norm(t_vec))
+                    if t_norm > 1e-4:
+                        t_hat = t_vec / t_norm
+                        if self.target_position is not None:
+                            to_target = self.target_position[:2] - self.position[:2]
+                            if float(np.dot(to_target, t_hat[:2])) < 0.0:
+                                t_hat = -t_hat
+                        mag_circ = 22.0 if v_approach <= 1.0 else 25.0
+                        f_obs += t_hat * mag_circ
 
-                # Vertical clearance lift when approaching obstacle with accessible rooftop
-                obs_top = getattr(obs, 'max_pt', getattr(obs, 'max_bound', None))
-                if obs_top is not None:
+                    obs_top = cached_max[idx]
                     dz_top = float(obs_top[2]) - float(self.position[2])
                     if 0.0 < dz_top < 20.0:
                         f_obs[2] += min(30.0, (20.0 - dz_top) * 2.0)
+        else:
+            for obs in obstacles:
+                if hasattr(obs, "distance_and_closest_point"):
+                    dist, closest_pt = obs.distance_and_closest_point(self.position)
+                elif hasattr(obs, "min_bound") and hasattr(obs, "max_bound"):
+                    closest_pt = np.clip(self.position, obs.min_bound, obs.max_bound)
+                    dist = float(np.linalg.norm(self.position - closest_pt))
+                elif hasattr(obs, "min_pt") and hasattr(obs, "max_pt"):
+                    closest_pt = np.clip(self.position, obs.min_pt, obs.max_pt)
+                    dist = float(np.linalg.norm(self.position - closest_pt))
+                else:
+                    continue
+
+                push = self.position - closest_pt
+                push_norm = float(np.linalg.norm(push))
+                if push_norm > 1e-4:
+                    n_hat = push / push_norm
+                elif hasattr(obs, "surface_normal"):
+                    n_hat = obs.surface_normal(self.position)
+                else:
+                    n_hat = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+                # Dynamic sensing horizon based on approach speed
+                v_approach = max(0.0, float(-np.dot(self.velocity, n_hat)))
+                rho_0_dyn = max(8.0, (v_approach ** 2) / (2.0 * a_max) + 0.6 * v_approach + 2.5)
+
+                if dist < rho_0_dyn:
+                    d_eff = max(dist - 2.0, 0.1)
+                    rho_eff = max(rho_0_dyn - 2.0, 0.2)
+                    mag_apf = 60.0 * (1.0 / d_eff - 1.0 / rho_eff) / (d_eff ** 2)
+                    mag_damp = 15.0 * v_approach * ((rho_0_dyn - dist) / rho_0_dyn) ** 2 * m
+                    mag_barrier = 100.0 * ((2.5 / max(dist, 0.1)) ** 3) if dist < 3.0 else 0.0
+                    mag = min(mag_apf + mag_damp + mag_barrier, 300.0)
+                    f_obs += mag * n_hat
+
+                    # Lateral tangential circulatory force to bypass obstacles without head-on stagnation
+                    t_vec = np.array([-n_hat[1], n_hat[0], 0.0], dtype=np.float64)
+                    t_norm = float(np.linalg.norm(t_vec))
+                    if t_norm > 1e-4:
+                        t_hat = t_vec / t_norm
+                        if self.target_position is not None:
+                            to_target = self.target_position[:2] - self.position[:2]
+                            if float(np.dot(to_target, t_hat[:2])) < 0.0:
+                                t_hat = -t_hat
+                        mag_circ = 22.0 if v_approach <= 1.0 else 25.0
+                        f_obs += t_hat * mag_circ
+
+                    # Vertical clearance lift when approaching obstacle with accessible rooftop
+                    obs_top = getattr(obs, 'max_pt', getattr(obs, 'max_bound', None))
+                    if obs_top is not None:
+                        dz_top = float(obs_top[2]) - float(self.position[2])
+                        if 0.0 < dz_top < 20.0:
+                            f_obs[2] += min(30.0, (20.0 - dz_top) * 2.0)
 
         return f_obs
 
@@ -747,7 +812,7 @@ class Drone:
 
         # 1. Commanded Acceleration & Saturation
         a_cmd = commanded_force / m
-        a_mag = float(np.linalg.norm(a_cmd))
+        a_mag = math.sqrt(float(a_cmd[0] * a_cmd[0] + a_cmd[1] * a_cmd[1] + a_cmd[2] * a_cmd[2]))
         if a_mag > self.limits.max_accel:
             self.acceleration = (a_cmd / a_mag) * self.limits.max_accel
         else:
@@ -766,7 +831,7 @@ class Drone:
         self.velocity += a_net * dt
 
         # Horizontal speed clamp
-        v_xy = float(np.linalg.norm(self.velocity[:2]))
+        v_xy = math.hypot(float(self.velocity[0]), float(self.velocity[1]))
         if v_xy > self.limits.max_speed_xy:
             self.velocity[:2] = (self.velocity[:2] / v_xy) * self.limits.max_speed_xy
 
@@ -775,7 +840,7 @@ class Drone:
 
         # Optional strict 3D speed clamp (for competition constraint max speed 5 m/s)
         if getattr(self.limits, "clamp_3d_speed", False):
-            v_3d = float(np.linalg.norm(self.velocity))
+            v_3d = math.sqrt(float(self.velocity[0] * self.velocity[0] + self.velocity[1] * self.velocity[1] + self.velocity[2] * self.velocity[2]))
             if v_3d > self.limits.max_speed_xy:
                 self.velocity = (self.velocity / v_3d) * self.limits.max_speed_xy
 
@@ -800,23 +865,57 @@ class Drone:
                 return
 
         # 5. Hard Obstacle Surface Collision Clamping
-        for obs in obs_list:
-            if hasattr(obs, "contains_point") and obs.contains_point(self.position, margin=0.0):
-                normal = obs.surface_normal(self.position) if hasattr(obs, "surface_normal") else np.array([0.0, 0.0, 1.0])
-                min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
-                max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
-                if min_p is not None and max_p is not None:
+        cached_min = getattr(self, "_cached_obs_min_pts", None)
+        cached_max = getattr(self, "_cached_obs_max_pts", None)
+        if cached_min is None or len(cached_min) != len(obs_list):
+            m_list = [getattr(o, "min_pt", getattr(o, "min_bound", None)) for o in obs_list]
+            x_list = [getattr(o, "max_pt", getattr(o, "max_bound", None)) for o in obs_list]
+            if m_list and m_list[0] is not None and x_list[0] is not None:
+                cached_min = np.vstack(m_list)
+                cached_max = np.vstack(x_list)
+                self._cached_obs_min_pts = cached_min
+                self._cached_obs_max_pts = cached_max
+            else:
+                cached_min = None
+                cached_max = None
+
+        if cached_min is not None:
+            inside_mask = np.all((self.position >= cached_min) & (self.position <= cached_max), axis=1)
+            if np.any(inside_mask):
+                for obs_idx in np.nonzero(inside_mask)[0]:
+                    obs = obs_list[obs_idx]
+                    normal = obs.surface_normal(self.position) if hasattr(obs, "surface_normal") else np.array([0.0, 0.0, 1.0])
+                    min_p = cached_min[obs_idx]
+                    max_p = cached_max[obs_idx]
                     for axis in range(3):
                         if normal[axis] > 0.5:
                             self.position[axis] = max_p[axis] + 0.02
                         elif normal[axis] < -0.5:
                             self.position[axis] = min_p[axis] - 0.02
-                v_dot_n = float(np.dot(self.velocity, normal))
-                if v_dot_n < 0.0:
-                    self.velocity -= v_dot_n * normal
-                a_dot_n = float(np.dot(self.acceleration, normal))
-                if a_dot_n < 0.0:
-                    self.acceleration -= a_dot_n * normal
+                    v_dot_n = float(np.dot(self.velocity, normal))
+                    if v_dot_n < 0.0:
+                        self.velocity -= v_dot_n * normal
+                    a_dot_n = float(np.dot(self.acceleration, normal))
+                    if a_dot_n < 0.0:
+                        self.acceleration -= a_dot_n * normal
+        else:
+            for obs in obs_list:
+                if hasattr(obs, "contains_point") and obs.contains_point(self.position, margin=0.0):
+                    normal = obs.surface_normal(self.position) if hasattr(obs, "surface_normal") else np.array([0.0, 0.0, 1.0])
+                    min_p = getattr(obs, "min_pt", getattr(obs, "min_bound", None))
+                    max_p = getattr(obs, "max_pt", getattr(obs, "max_bound", None))
+                    if min_p is not None and max_p is not None:
+                        for axis in range(3):
+                            if normal[axis] > 0.5:
+                                self.position[axis] = max_p[axis] + 0.02
+                            elif normal[axis] < -0.5:
+                                self.position[axis] = min_p[axis] - 0.02
+                    v_dot_n = float(np.dot(self.velocity, normal))
+                    if v_dot_n < 0.0:
+                        self.velocity -= v_dot_n * normal
+                    a_dot_n = float(np.dot(self.acceleration, normal))
+                    if a_dot_n < 0.0:
+                        self.acceleration -= a_dot_n * normal
 
         # 6. Attitude Generation (Euler & Quaternion)
         self._update_attitude(dt)
@@ -842,11 +941,18 @@ class Drone:
 
         # 8. Avionics Sensor Suite Sampling & EKF State Estimation Update
         hdop = 1.0
-        for obs in obs_list:
-            if hasattr(obs, "distance_and_closest_point"):
-                d_o, _ = obs.distance_and_closest_point(self.position)
-                if d_o < 15.0:
-                    hdop = max(hdop, 1.0 + (15.0 - d_o) / 5.0)
+        if cached_min is not None:
+            closest_all = np.clip(self.position, cached_min, cached_max)
+            dists_all = np.linalg.norm(self.position - closest_all, axis=1)
+            near_mask = dists_all < 15.0
+            if np.any(near_mask):
+                hdop = float(np.max(1.0 + (15.0 - dists_all[near_mask]) / 5.0))
+        else:
+            for obs in obs_list:
+                if hasattr(obs, "distance_and_closest_point"):
+                    d_o, _ = obs.distance_and_closest_point(self.position)
+                    if d_o < 15.0:
+                        hdop = max(hdop, 1.0 + (15.0 - d_o) / 5.0)
 
         meas = self.sensor_suite.sample(
             true_pos=self.position,
@@ -863,7 +969,7 @@ class Drone:
             self.ekf.update_baro(meas["baro"])
 
         # 9. Battery State of Charge Depletion (Physics-based: airspeed, altitude, climb-rate & formation drafting)
-        speed = float(np.linalg.norm(self.velocity))
+        speed = math.sqrt(float(self.velocity[0] * self.velocity[0] + self.velocity[1] * self.velocity[1] + self.velocity[2] * self.velocity[2]))
         draft_frac = (self.drafting_saving_pct / 100.0) if self.is_drafting else 0.0
         self.battery.step(
             dt=dt,
@@ -879,13 +985,14 @@ class Drone:
     def _update_attitude(self, dt: float) -> None:
         """Calculates desired tilt from acceleration and smoothly tracks it."""
         g = self.g
+        max_tilt = self.limits.max_tilt_rad
         # Desired roll (bank angle proportional to lateral acceleration)
-        desired_roll = float(np.clip(self.acceleration[1] / g, -self.limits.max_tilt_rad, self.limits.max_tilt_rad))
+        desired_roll = max(-max_tilt, min(max_tilt, float(self.acceleration[1] / g)))
         # Desired pitch (pitch angle proportional to longitudinal acceleration)
-        desired_pitch = float(np.clip(-self.acceleration[0] / g, -self.limits.max_tilt_rad, self.limits.max_tilt_rad))
+        desired_pitch = max(-max_tilt, min(max_tilt, float(-self.acceleration[0] / g)))
 
         # Desired yaw: smoothly track horizontal velocity vector or target with deadband
-        v_xy = float(np.linalg.norm(self.velocity[:2]))
+        v_xy = math.hypot(float(self.velocity[0]), float(self.velocity[1]))
         if v_xy > 0.4:
             vel_yaw = math.atan2(self.velocity[1], self.velocity[0])
             if self.target_position is not None:

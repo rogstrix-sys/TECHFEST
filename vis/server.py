@@ -15,6 +15,7 @@ from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Set
 import numpy as np
+import pandas as pd
 
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -584,7 +585,7 @@ class SimulationServer:
                     # Adaptive substepping (up to 3 substeps) ensures high-speed physics fidelity
                     # while maintaining loop execution under 15ms so broadcasts stay locked at 30 Hz.
                     base_dt = 1.0 / 30.0
-                    substeps = min(3, max(1, int(round(self.sim_speed))))
+                    substeps = min(5, max(1, int(round(self.sim_speed * 0.5))))
                     step_dt = (self.sim_speed * base_dt) / substeps
                     for _ in range(substeps - 1):
                         self.step_count += 1
@@ -603,21 +604,27 @@ class SimulationServer:
                     else:
                         data.pop("links", None)
 
-                    # 1. Enrich with real-time EKF estimation metrics & attitude Euler angles
-                    for d_dict in data.get("drones", []):
-                        drone_obj = self.sim.drones.get(d_dict["id"])
-                        if drone_obj:
-                            est_pos = drone_obj.ekf.estimated_position
-                            est_vel = drone_obj.ekf.estimated_velocity
-                            d_dict["estimated_position"] = [round(float(c), 3) for c in est_pos]
-                            d_dict["estimated_velocity"] = [round(float(v), 3) for v in est_vel]
-                            d_dict["ekf_error_m"] = round(float(np.linalg.norm(drone_obj.position - est_pos)), 3)
-                            
-                            # Attitude in degrees for PFD artificial horizon
-                            att = drone_obj.attitude
-                            d_dict["roll_deg"] = round(float(np.degrees(att[0])), 1)
-                            d_dict["pitch_deg"] = round(float(np.degrees(att[1])), 1)
-                            d_dict["yaw_deg"] = round(float(np.degrees(att[2])) % 360.0, 1)
+                    # 1. Enrich with real-time EKF estimation metrics & attitude Euler angles (vectorized via NumPy)
+                    d_list = data.get("drones", [])
+                    if d_list:
+                        d_objs = [self.sim.drones.get(d["id"]) for d in d_list]
+                        valid_pairs = [(d_dict, obj) for d_dict, obj in zip(d_list, d_objs) if obj is not None]
+                        if valid_pairs:
+                            v_objs = [p[1] for p in valid_pairs]
+                            true_pos = np.array([o.position for o in v_objs], dtype=np.float64)
+                            est_pos = np.array([o.ekf.estimated_position for o in v_objs], dtype=np.float64)
+                            est_vel = np.array([o.ekf.estimated_velocity for o in v_objs], dtype=np.float64)
+                            attitudes = np.array([o.attitude for o in v_objs], dtype=np.float64)
+                            ekf_errs = np.linalg.norm(true_pos - est_pos, axis=1)
+                            deg_atts = np.degrees(attitudes)
+
+                            for i, (d_dict, _) in enumerate(valid_pairs):
+                                d_dict["estimated_position"] = [round(float(c), 3) for c in est_pos[i]]
+                                d_dict["estimated_velocity"] = [round(float(v), 3) for v in est_vel[i]]
+                                d_dict["ekf_error_m"] = round(float(ekf_errs[i]), 3)
+                                d_dict["roll_deg"] = round(float(deg_atts[i, 0]), 1)
+                                d_dict["pitch_deg"] = round(float(deg_atts[i, 1]), 1)
+                                d_dict["yaw_deg"] = round(float(deg_atts[i, 2]) % 360.0, 1)
 
                     # 2. Collaborative Multi-UAV Swarm LiDAR Sweep and SLAM Integration
                     # Each individual drone in the fleet utilizes its own dedicated onboard LiDAR sensor
@@ -635,8 +642,13 @@ class SimulationServer:
                                 sim_time=snapshot.sim_time,
                             )
                         self.voxel_map.insert_scan(scan)
-                        if self.step_count <= 2 or self.step_count % 2 == 0:
-                            data["lidar_scan"] = scan.to_dict()
+                        if self.step_count <= 2 or self.step_count % 4 == 0:
+                            scan_dict = scan.to_dict()
+                            pts = scan_dict.get("points", [])
+                            if len(pts) > 600:
+                                step = max(1, len(pts) // 500)
+                                scan_dict["points"] = pts[::step]
+                            data["lidar_scan"] = scan_dict
 
                         # Compute Khatib APF Guidance Vectors for Autonomous Viewport
                         f_att = focus_drone.compute_attractive_force()
@@ -706,10 +718,19 @@ class SimulationServer:
                         data["occupied_voxels"] = []
                         self._sent_voxels = current_keys
 
-                    # 4. Stream Scientific Analytical Chart Data
+                    # 4. Stream Scientific Analytical Chart Data using Pandas aggregation
                     drones_list = data.get("drones", [])
-                    ekf_errors = [d.get("ekf_error_m", 0.0) for d in drones_list]
-                    avg_ekf_err = round(float(np.mean(ekf_errors)) if ekf_errors else 0.08, 3)
+                    if drones_list:
+                        df_drones = pd.DataFrame(drones_list)
+                        avg_ekf_err = round(float(df_drones["ekf_error_m"].mean()), 3) if "ekf_error_m" in df_drones else 0.08
+                        active_relays = int((df_drones["role"] == "RELAY").sum()) if "role" in df_drones else 0
+                        retreating_drones = int(df_drones["flight_mode"].isin(["RTL", "LANDING"]).sum()) if "flight_mode" in df_drones else 0
+                        landed_drones = int((df_drones["flight_mode"] == "LANDED").sum()) if "flight_mode" in df_drones else 0
+                    else:
+                        avg_ekf_err = 0.08
+                        active_relays = 0
+                        retreating_drones = 0
+                        landed_drones = 0
 
                     total_pois_count = len(self.sim.pois) if hasattr(self.sim, "pois") else 5
                     data["analytics"] = {
@@ -720,9 +741,9 @@ class SimulationServer:
                         "completed_pois": int(snapshot.metrics.get("completed_pois", 0)),
                         "total_pois": total_pois_count,
                         "mapped_pct": mapping_metrics.get("coverage_pct", 0.0),
-                        "active_relays": sum(1 for d in drones_list if d.get("role") == "RELAY"),
-                        "retreating_drones": sum(1 for d in drones_list if d.get("flight_mode") in ("RTL", "LANDING")),
-                        "landed_drones": sum(1 for d in drones_list if d.get("flight_mode") == "LANDED"),
+                        "active_relays": active_relays,
+                        "retreating_drones": retreating_drones,
+                        "landed_drones": landed_drones,
                         "throughput_kbps": round(float(len(snapshot.packets) * 14.5 + 28.0), 1),
                     }
 
@@ -752,6 +773,7 @@ class SimulationServer:
                     else:
                         self._last_completed_pois = completed_pois
 
+                    # Maintain persistent disaster sites and priority queue in telemetry
                     if self.step_count > 2 and self.step_count % 10 != 0:
                         data.pop("priority_queue", None)
                         data.pop("charging_pads", None)
@@ -764,8 +786,8 @@ class SimulationServer:
                     if hasattr(self.sim, "mission_manager") and self.sim.mission_manager is not None:
                         mm = self.sim.mission_manager
                         if hasattr(mm, "thermal_grid") and mm.thermal_grid is not None:
-                            # Stream thermal grid at ~3 Hz (every 10 frames), on start, or if updated
-                            if self.step_count <= 2 or self.step_count % 10 == 0 or getattr(mm.thermal_grid, "_dirty", True):
+                            # Stream thermal grid at ~3 Hz (every 10 frames) or on initial startup
+                            if self.step_count <= 2 or self.step_count % 10 == 0:
                                 data["thermal_grid"] = mm.thermal_grid.to_dict()
                         if hasattr(mm, "cbba_solver") and mm.cbba_solver is not None:
                             data["bft_audit"] = getattr(mm.cbba_solver, "bft_audit_log", [])[-5:]
@@ -875,23 +897,11 @@ async def get_gpu():
 @app.get("/api/export_telemetry")
 async def export_telemetry():
     """Export mission flight telemetry history as a downloadable CSV log."""
-    import io
-    import csv
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
-        "sim_time", "drone_id", "role", "flight_mode",
-        "pos_x", "pos_y", "pos_z",
-        "vel_x", "vel_y", "vel_z",
-        "est_x", "est_y", "est_z",
-        "battery_pct", "assigned_poi_id"
-    ])
-
     history = list(server_manager.sim.history)
     if not history:
         history = [server_manager.sim.get_telemetry_snapshot()]
 
+    rows = []
     for snap in history:
         t = snap.sim_time
         for d in snap.drones:
@@ -902,16 +912,30 @@ async def export_telemetry():
                 est = list(drone_obj.ekf.estimated_position)
             else:
                 est = d.get("estimated_position") or pos
-            writer.writerow([
-                t, d.get("id"), d.get("role"), d.get("flight_mode"),
-                pos[0], pos[1], pos[2],
-                vel[0], vel[1], vel[2],
-                est[0], est[1], est[2],
-                d.get("battery_pct"), d.get("assigned_poi_id") or "NONE"
-            ])
+            rows.append({
+                "sim_time": t,
+                "drone_id": d.get("id"),
+                "role": d.get("role"),
+                "flight_mode": d.get("flight_mode"),
+                "pos_x": pos[0], "pos_y": pos[1], "pos_z": pos[2],
+                "vel_x": vel[0], "vel_y": vel[1], "vel_z": vel[2],
+                "est_x": est[0], "est_y": est[1], "est_z": est[2],
+                "battery_pct": d.get("battery_pct"),
+                "assigned_poi_id": d.get("assigned_poi_id") or "NONE",
+            })
+
+    columns = [
+        "sim_time", "drone_id", "role", "flight_mode",
+        "pos_x", "pos_y", "pos_z",
+        "vel_x", "vel_y", "vel_z",
+        "est_x", "est_y", "est_z",
+        "battery_pct", "assigned_poi_id"
+    ]
+    df_export = pd.DataFrame(rows, columns=columns)
+    csv_content = df_export.to_csv(index=False)
 
     return Response(
-        content=output.getvalue(),
+        content=csv_content,
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=uav_swarm_flight_recorder.csv"}
     )
@@ -1143,7 +1167,7 @@ def handle_command(server: SimulationServer, payload: Dict[str, Any]) -> Dict[st
     elif cmd == "reset":
         server.reset()
     elif cmd == "speed":
-        server.sim_speed = float(payload.get("value", 1.0))
+        server.sim_speed = max(0.25, min(10.0, float(payload.get("value", 1.0))))
     elif cmd == "focus_drone":
         drone_id = str(payload.get("drone_id", "UAV_1"))
         if drone_id in server.sim.drones:

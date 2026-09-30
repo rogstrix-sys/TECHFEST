@@ -84,15 +84,44 @@ let lidarTotalStored = 0;
 let activeLidarColormap = "turbo"; // "turbo", "intensity", "cyber"
 let isTheaterLidarActive = false;
 let theaterLidarPointsMesh = null;
+let isVoxelsActive = false; // Clean Holographic Mode: Off by default in Theater diorama
 let voxelMeshGroup = null;
 let voxelInstancedMesh = null;
+let voxelWireInstancedMesh = null;
+let theaterVoxelMeshGroup = null;
+let theaterVoxelInstancedMesh = null;
+let theaterVoxelWireInstancedMesh = null;
+let activeDustPuffs = []; // Legacy backward-compatibility reference
+
+// Pre-allocated Zero-GC Scratch Math Objects across animation and render loops
+const _scratchV1 = new THREE.Vector3();
+const _scratchV2 = new THREE.Vector3();
+const _scratchMat4 = new THREE.Matrix4();
+const _scratchCol = new THREE.Color();
+
+// Batched BufferGeometry Collapse Dust Particle System (Single Draw Call, Zero-GC)
+const MAX_COLLAPSE_DUST_PARTICLES = 600;
+let collapseDustMesh = null;
+const collapseDustPositions = new Float32Array(MAX_COLLAPSE_DUST_PARTICLES * 3);
+const collapseDustVelocities = new Float32Array(MAX_COLLAPSE_DUST_PARTICLES * 3);
+const collapseDustAges = new Float32Array(MAX_COLLAPSE_DUST_PARTICLES);
+const collapseDustLifetimes = new Float32Array(MAX_COLLAPSE_DUST_PARTICLES);
+const collapseDustActive = new Uint8Array(MAX_COLLAPSE_DUST_PARTICLES);
+let collapseDustHead = 0;
+
+// P5: Interactive 3D Drone HUD Selection Reticle & Route Visuals
+let selectionHaloMesh = null;
+let selectionRouteLine = null;
+const MAX_ROUTE_POINTS = 16;
 const maxInstancedVoxels = 5000;
 const voxelOccupancyCache = new Map();
 const slamFrustum = new THREE.Frustum();
 const slamProjScreenMatrix = new THREE.Matrix4();
 const voxelBoundingSphere = new THREE.Sphere(new THREE.Vector3(), 3.0);
-const voxelDummyMatrix = new THREE.Matrix4();
-const voxelDummyColor = new THREE.Color();
+const voxelDummyMatrix = _scratchMat4;
+const voxelDummyColor = _scratchCol;
+const _groundPlaneZ0 = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const _groundHitPoint = new THREE.Vector3();
 
 // Coverage Heatmap Overlay State (Item 15)
 let heatmapMesh = null;
@@ -114,6 +143,7 @@ let isAudioMuted = true;
 let lastSurveyedCount = 0;
 let lastFleetRenderTime = 0;
 let lastAnimateTime = performance.now();
+let lastParticleUpdate = 0;
 
 // Scientific Charts (Chart.js)
 let chartEKF = null;
@@ -207,7 +237,7 @@ function initTheaterViewport() {
     // 3. Renderer (High-Performance Hardware Context with ACES Filmic Tone Mapping)
     rendererTheater = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     rendererTheater.setSize(width, height);
-    rendererTheater.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    rendererTheater.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
     rendererTheater.shadowMap.enabled = true;
     rendererTheater.shadowMap.type = THREE.PCFSoftShadowMap;
     rendererTheater.toneMapping = THREE.ACESFilmicToneMapping;
@@ -250,8 +280,8 @@ function initTheaterViewport() {
     const sunLight = new THREE.DirectionalLight(0xfffaee, 1.35);
     sunLight.position.set(240, -190, 320); // Front-right sun casting crisp soft shadows
     sunLight.castShadow = true;
-    sunLight.shadow.mapSize.width = 2048;
-    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.mapSize.width = 1024;
+    sunLight.shadow.mapSize.height = 1024;
     sunLight.shadow.camera.near = 10;
     sunLight.shadow.camera.far = 1200;
     const d = 260;
@@ -310,6 +340,35 @@ function initTheaterViewport() {
     formationLatticeMesh = new THREE.LineSegments(formationGeo, formationMat);
     formationLatticeMesh.geometry.setDrawRange(0, 0);
     sceneTheater.add(formationLatticeMesh);
+
+    // 8c. P5: Interactive 3D Drone Selection Halo, Sensor Frustum & Multi-hop Route Line
+    const haloGeo = new THREE.RingGeometry(2.2, 2.6, 32);
+    const haloMat = new THREE.MeshBasicMaterial({
+        color: 0x00f0ff,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.85,
+        depthWrite: false
+    });
+    selectionHaloMesh = new THREE.Mesh(haloGeo, haloMat);
+    selectionHaloMesh.visible = false;
+    sceneTheater.add(selectionHaloMesh);
+
+    // Multi-hop Gold Route Highlight Path to GCS
+    const routePositions = new Float32Array(MAX_ROUTE_POINTS * 3);
+    const routeGeo = new THREE.BufferGeometry();
+    routeGeo.setAttribute('position', new THREE.BufferAttribute(routePositions, 3));
+    const routeMat = new THREE.LineBasicMaterial({
+        color: 0xffd700,
+        linewidth: 3,
+        transparent: true,
+        opacity: 0.95,
+        depthWrite: false
+    });
+    selectionRouteLine = new THREE.Line(routeGeo, routeMat);
+    selectionRouteLine.geometry.setDrawRange(0, 0);
+    selectionRouteLine.visible = false;
+    sceneTheater.add(selectionRouteLine);
 
     // 9. Interactive Raycasting Click-to-Inspect & Double-Click to Center
     rendererTheater.domElement.addEventListener("click", onTheaterCanvasClick);
@@ -705,6 +764,35 @@ function createTheaterTerrain() {
     const boundaryLine = new THREE.LineSegments(boundaryEdges, boundaryMat);
     boundaryLine.position.set(0, 0, 65);
     sceneTheater.add(boundaryLine);
+
+    // 6. 3D OctoMap Occupancy Voxel Grid for Theater Diorama (Clean Holographic Mode)
+    theaterVoxelMeshGroup = new THREE.Group();
+    theaterVoxelMeshGroup.visible = isVoxelsActive;
+    sceneTheater.add(theaterVoxelMeshGroup);
+
+    const thVoxelGeo = new THREE.BoxGeometry(1.0, 1.0, 1.0);
+    const thVoxelMat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.22,
+        depthWrite: false,
+    });
+    theaterVoxelInstancedMesh = new THREE.InstancedMesh(thVoxelGeo, thVoxelMat, maxInstancedVoxels);
+    theaterVoxelInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    theaterVoxelInstancedMesh.count = 0;
+    theaterVoxelInstancedMesh.visible = isVoxelsActive;
+    theaterVoxelMeshGroup.add(theaterVoxelInstancedMesh);
+
+    const thVoxelWireMat = new THREE.MeshBasicMaterial({
+        wireframe: true,
+        transparent: true,
+        opacity: 0.38,
+        depthWrite: false,
+    });
+    theaterVoxelWireInstancedMesh = new THREE.InstancedMesh(thVoxelGeo, thVoxelWireMat, maxInstancedVoxels);
+    theaterVoxelWireInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    theaterVoxelWireInstancedMesh.count = 0;
+    theaterVoxelWireInstancedMesh.visible = isVoxelsActive;
+    theaterVoxelMeshGroup.add(theaterVoxelWireInstancedMesh);
 }
 
 function createGCSBase(x, y, z) {
@@ -1226,10 +1314,8 @@ function onTheaterCanvasClick(event) {
         }
 
         if (!hitPoint) {
-            const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-            const groundHit = new THREE.Vector3();
-            if (raycasterTheater.ray.intersectPlane(groundPlane, groundHit)) {
-                hitPoint = groundHit;
+            if (raycasterTheater.ray.intersectPlane(_groundPlaneZ0, _groundHitPoint)) {
+                hitPoint = _groundHitPoint;
             }
         }
 
@@ -1329,10 +1415,8 @@ function onTheaterCanvasDblClick(event) {
     }
 
     if (!hitPoint) {
-        const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-        const groundHit = new THREE.Vector3();
-        if (raycaster.ray.intersectPlane(groundPlane, groundHit)) {
-            hitPoint = groundHit;
+        if (raycaster.ray.intersectPlane(_groundPlaneZ0, _groundHitPoint)) {
+            hitPoint = _groundHitPoint;
         }
     }
 
@@ -1362,7 +1446,7 @@ function initSLAMViewport() {
     // 3. Renderer (NVIDIA RTX 4050 High-Performance Hardware Context)
     rendererSLAM = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     rendererSLAM.setSize(width, height);
-    rendererSLAM.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    rendererSLAM.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
     container.appendChild(rendererSLAM.domElement);
 
     // 4. Controls
@@ -1411,22 +1495,34 @@ function initSLAMViewport() {
     lidarPointsMesh.visible = true;
     sceneSLAM.add(lidarPointsMesh);
 
-    // 8. 3D Occupancy Voxel Instanced Mesh (Ultra-Fast 60-144 FPS Hardware Acceleration)
+    // 8. 3D Occupancy Voxel Instanced Mesh (Clean Holographic Mode with Wireframe Edges)
     voxelMeshGroup = new THREE.Group();
-    voxelMeshGroup.visible = true;
+    voxelMeshGroup.visible = isVoxelsActive;
     sceneSLAM.add(voxelMeshGroup);
 
     const voxelGeo = new THREE.BoxGeometry(1.0, 1.0, 1.0);
     const voxelMat = new THREE.MeshBasicMaterial({
         transparent: true,
-        opacity: 0.42,
+        opacity: 0.22,
         depthWrite: false,
     });
     voxelInstancedMesh = new THREE.InstancedMesh(voxelGeo, voxelMat, maxInstancedVoxels);
     voxelInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     voxelInstancedMesh.count = 0;
-    voxelInstancedMesh.visible = true;
+    voxelInstancedMesh.visible = isVoxelsActive;
     voxelMeshGroup.add(voxelInstancedMesh);
+
+    const voxelWireMat = new THREE.MeshBasicMaterial({
+        wireframe: true,
+        transparent: true,
+        opacity: 0.38,
+        depthWrite: false,
+    });
+    voxelWireInstancedMesh = new THREE.InstancedMesh(voxelGeo, voxelWireMat, maxInstancedVoxels);
+    voxelWireInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    voxelWireInstancedMesh.count = 0;
+    voxelWireInstancedMesh.visible = isVoxelsActive;
+    voxelMeshGroup.add(voxelWireInstancedMesh);
 
     // 9. Khatib APF Guidance Vector 3D Arrows
     const dummyDir = new THREE.Vector3(1, 0, 0);
@@ -1845,6 +1941,193 @@ function updatePoIs(poisData) {
     }
 }
 
+let sectorMeshes = new Map();
+
+function createSectorLabelCanvas(text, color) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "rgba(10, 15, 25, 0.75)";
+    ctx.fillRect(0, 0, 256, 64);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(2, 2, 252, 60);
+    ctx.fillStyle = color;
+    ctx.font = "bold 20px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, 128, 32);
+    return canvas;
+}
+
+function updateSectors(sectorsData) {
+    if (!sectorsData || !Array.isArray(sectorsData) || !sceneTheater) return;
+
+    const activeIds = new Set();
+    sectorsData.forEach(sector => {
+        activeIds.add(sector.id);
+        let group = sectorMeshes.get(sector.id);
+
+        const status = sector.s || sector.status || "PENDING";
+        let statusColor = 0x00e5ff;
+        let statusHexStr = "#00e5ff";
+        if (status === "CLEARED") {
+            statusColor = 0x00e676;
+            statusHexStr = "#00e676";
+        } else if (status === "INSPECTING") {
+            statusColor = 0xffd600;
+            statusHexStr = "#ffd600";
+        } else if (status === "PENDING") {
+            statusColor = 0x4fc3f7;
+            statusHexStr = "#4fc3f7";
+        }
+
+        const b = sector.b || sector.bounds;
+        if (!b || b.length < 4) return;
+        const xMin = b[0], xMax = b[1], yMin = b[2], yMax = b[3];
+        const cx = (xMin + xMax) / 2;
+        const cy = (yMin + yMax) / 2;
+
+        const assignedDrone = sector.d || sector.drone || sector.assigned_drone_id || 'IDLE';
+        const progress = sector.p !== undefined ? sector.p : (sector.progress !== undefined ? sector.progress : (sector.scan_progress || 0));
+
+        if (!group) {
+            group = new THREE.Group();
+
+            // 1. Ground Rectangular Perimeter Outline
+            const rectGeo = new THREE.BufferGeometry();
+            const verts = new Float32Array([
+                xMin, yMin, 0.4,   xMax, yMin, 0.4,
+                xMax, yMin, 0.4,   xMax, yMax, 0.4,
+                xMax, yMax, 0.4,   xMin, yMax, 0.4,
+                xMin, yMax, 0.4,   xMin, yMin, 0.4,
+            ]);
+            rectGeo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+            const lineMat = new THREE.LineBasicMaterial({
+                color: statusColor,
+                transparent: true,
+                opacity: 0.35,
+            });
+            const line = new THREE.LineSegments(rectGeo, lineMat);
+            group.add(line);
+            group.line = line;
+
+            // 2. Corner Altitude Markers
+            const cornerGeo = new THREE.BufferGeometry();
+            const cornerVerts = new Float32Array([
+                xMin, yMin, 0.4,  xMin, yMin, 25.0,
+                xMax, yMin, 0.4,  xMax, yMin, 25.0,
+                xMax, yMax, 0.4,  xMax, yMax, 25.0,
+                xMin, yMax, 0.4,  xMin, yMax, 25.0,
+            ]);
+            cornerGeo.setAttribute("position", new THREE.BufferAttribute(cornerVerts, 3));
+            const cornerMat = new THREE.LineBasicMaterial({
+                color: statusColor,
+                transparent: true,
+                opacity: 0.15,
+            });
+            const corners = new THREE.LineSegments(cornerGeo, cornerMat);
+            group.add(corners);
+            group.corners = corners;
+
+            // 3. Central Tactical Sector Callout Billboard Sprite
+            const canvas = createSectorLabelCanvas(`${sector.id.replace('SEC_', 'S-')} [${assignedDrone}]`, statusHexStr);
+            const tex = new THREE.CanvasTexture(canvas);
+            const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.75 });
+            const sprite = new THREE.Sprite(spriteMat);
+            sprite.position.set(cx, cy, 3.5);
+            sprite.scale.set(18.0, 4.5, 1.0);
+            group.add(sprite);
+            group.sprite = sprite;
+            group.canvas = canvas;
+            group.lastText = "";
+            group.lastStatus = "";
+
+            sceneTheater.add(group);
+            sectorMeshes.set(sector.id, group);
+        }
+
+        // Dynamic status updates
+        if (group.line && group.line.material) {
+            group.line.material.color.setHex(statusColor);
+            group.line.material.opacity = (status === "SCANNING" || status === "INSPECTING") ? 0.55 : 0.25;
+        }
+        if (group.corners && group.corners.material) {
+            group.corners.material.color.setHex(statusColor);
+        }
+
+        // Update Label Text if assignment, progress, or status changed (Dirty-Flag Canvas Texture)
+        const labelText = `${sector.id.replace('SEC_', 'S-')} [${assignedDrone}] ${Math.round(progress)}%`;
+        const isDirty = (group.lastText !== labelText) || (group.lastStatus !== statusHexStr);
+        if (isDirty && group.canvas && group.sprite) {
+            group.lastText = labelText;
+            group.lastStatus = statusHexStr;
+            const ctx = group.canvas.getContext("2d");
+            ctx.clearRect(0, 0, 256, 64);
+            ctx.fillStyle = "rgba(10, 15, 25, 0.75)";
+            ctx.fillRect(0, 0, 256, 64);
+            ctx.strokeStyle = statusHexStr;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(2, 2, 252, 60);
+            ctx.fillStyle = statusHexStr;
+            ctx.font = "bold 20px monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(labelText, 128, 32);
+            group.sprite.material.map.needsUpdate = true;
+        }
+    });
+
+    for (const [secId, mesh] of sectorMeshes.entries()) {
+        if (!activeIds.has(secId)) {
+            sceneTheater.remove(mesh);
+            sectorMeshes.delete(secId);
+        }
+    }
+}
+
+let abnormalityMeshes = new Map();
+
+function updateAbnormalities(abnormalitiesData) {
+    if (!abnormalitiesData || !Array.isArray(abnormalitiesData) || !sceneTheater) return;
+
+    abnormalitiesData.forEach(anom => {
+        if (!anom.detected || anom.type === "TARGET_SITE") return;
+
+        let mesh = abnormalityMeshes.get(anom.id);
+        const pos = anom.pos || anom.position;
+        if (!pos) return;
+
+        if (!mesh) {
+            const isSurvivor = (anom.type === "SURVIVOR");
+            const isCollapse = (anom.type === "STRUCTURAL_COLLAPSE");
+            const color = isSurvivor ? 0xff9100 : (isCollapse ? 0xff1744 : 0xe040fb);
+
+            const geo = isSurvivor ? new THREE.OctahedronGeometry(1.4) : new THREE.BoxGeometry(2.2, 2.2, 1.2);
+            const mat = new THREE.MeshBasicMaterial({ color: color, wireframe: true });
+            mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(pos[0], pos[1], pos[2] + 1.2);
+
+            const ringGeo = new THREE.RingGeometry(1.6, 2.6, 16);
+            const ringMat = new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide, transparent: true, opacity: 0.65 });
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.position.set(pos[0], pos[1], 0.25);
+            sceneTheater.add(ring);
+            mesh.ring = ring;
+
+            sceneTheater.add(mesh);
+            abnormalityMeshes.set(anom.id, mesh);
+        }
+
+        mesh.rotation.z += 0.02;
+        if (anom.inspected && mesh.material) {
+            mesh.material.color.setHex(0x00ff66);
+            if (mesh.ring) mesh.ring.material.color.setHex(0x00ff66);
+        }
+    });
+}
+
 function updateLinks(linksData, routesData, dronesData) {
     const activeKeys = new Set();
     const nodeCoords = new Map();
@@ -1901,6 +2184,7 @@ function updateLinks(linksData, routesData, dronesData) {
                 depthWrite: false,
             });
             line = new THREE.Line(geo, mat);
+            line.frustumCulled = false;
             line.visible = true;
             sceneTheater.add(line);
             linkMeshes.set(key, line);
@@ -1915,7 +2199,6 @@ function updateLinks(linksData, routesData, dronesData) {
             positions[4] = p2[1];
             positions[5] = p2[2];
             posAttr.needsUpdate = true;
-            line.geometry.computeBoundingSphere();
             line.material.color.setHex(linkColor);
             line.material.opacity = linkOpacity;
             line.visible = true;
@@ -2003,6 +2286,7 @@ function getTurboRGB(val) {
 // Update 3D LiDAR Point Cloud in SLAM Viewport Only (Theater view remains clean)
 function updateLiDAR(scanData) {
     if (!scanData || !lidarPointsMesh) return;
+    if (activeViewportMode === "theater" && !isTheaterLidarActive) return;
     const pts = scanData.points || [];
     if (pts.length === 0) return;
 
@@ -2131,6 +2415,20 @@ function updateOccupancyVoxels(voxelsData, metricsData, voxelDelta) {
         return;
     }
 
+    const elVoxCount = document.getElementById("slam-voxels-count");
+    if (elVoxCount) elVoxCount.textContent = voxelOccupancyCache.size.toLocaleString();
+
+    // If voxels are disabled, skip the expensive 5000-instance matrix/color loop and 8 GPU buffer uploads
+    if (!isVoxelsActive) {
+        if (voxelInstancedMesh) voxelInstancedMesh.visible = false;
+        if (voxelWireInstancedMesh) voxelWireInstancedMesh.visible = false;
+        if (voxelMeshGroup) voxelMeshGroup.visible = false;
+        if (theaterVoxelInstancedMesh) theaterVoxelInstancedMesh.visible = false;
+        if (theaterVoxelWireInstancedMesh) theaterVoxelWireInstancedMesh.visible = false;
+        if (theaterVoxelMeshGroup) theaterVoxelMeshGroup.visible = false;
+        return;
+    }
+
     // 2. Camera Frustum and Distance-Based LOD Culling (Item 13)
     let activeCam = (activeViewportMode === "slam" || activeViewportMode === "split") ? cameraSLAM : cameraTheater;
     if (!activeCam) activeCam = cameraSLAM;
@@ -2143,9 +2441,12 @@ function updateOccupancyVoxels(voxelsData, metricsData, voxelDelta) {
         useFrustum = true;
     }
 
-    const camPos = activeCam ? activeCam.position : new THREE.Vector3(0, 0, 50);
+    const camPos = activeCam ? activeCam.position : _scratchV1.set(0, 0, 50);
     const maxLODDistance = 350.0; // Distance LOD boundary
     const maxLODDistSq = maxLODDistance * maxLODDistance;
+
+    const isSlamActive = (activeViewportMode === "slam" || activeViewportMode === "split");
+    const isTheaterActive = (activeViewportMode === "theater" || activeViewportMode === "split" || !activeViewportMode);
 
     let instanceIdx = 0;
     for (const v of voxelOccupancyCache.values()) {
@@ -2166,10 +2467,18 @@ function updateOccupancyVoxels(voxelsData, metricsData, voxelDelta) {
             if (!slamFrustum.intersectsSphere(voxelBoundingSphere)) continue;
         }
 
-        const scale = vSize * 0.96;
+        const scale = vSize * 0.94;
         voxelDummyMatrix.makeScale(scale, scale, scale);
         voxelDummyMatrix.setPosition(vx, vy, vz);
-        voxelInstancedMesh.setMatrixAt(instanceIdx, voxelDummyMatrix);
+
+        if (isSlamActive) {
+            if (voxelInstancedMesh) voxelInstancedMesh.setMatrixAt(instanceIdx, voxelDummyMatrix);
+            if (voxelWireInstancedMesh) voxelWireInstancedMesh.setMatrixAt(instanceIdx, voxelDummyMatrix);
+        }
+        if (isTheaterActive) {
+            if (theaterVoxelInstancedMesh) theaterVoxelInstancedMesh.setMatrixAt(instanceIdx, voxelDummyMatrix);
+            if (theaterVoxelWireInstancedMesh) theaterVoxelWireInstancedMesh.setMatrixAt(instanceIdx, voxelDummyMatrix);
+        }
 
         const zNorm = Math.min(1.0, Math.max(0.0, vz / 50.0));
         const prob = v.prob !== undefined ? v.prob : 0.8;
@@ -2180,16 +2489,43 @@ function updateOccupancyVoxels(voxelsData, metricsData, voxelDelta) {
             hexColor = zNorm > 0.3 ? 0xffd600 : 0x00e5ff;
         }
         voxelDummyColor.setHex(hexColor);
-        voxelInstancedMesh.setColorAt(instanceIdx, voxelDummyColor);
+        if (isSlamActive) {
+            if (voxelInstancedMesh) voxelInstancedMesh.setColorAt(instanceIdx, voxelDummyColor);
+            if (voxelWireInstancedMesh) voxelWireInstancedMesh.setColorAt(instanceIdx, voxelDummyColor);
+        }
+        if (isTheaterActive) {
+            if (theaterVoxelInstancedMesh) theaterVoxelInstancedMesh.setColorAt(instanceIdx, voxelDummyColor);
+            if (theaterVoxelWireInstancedMesh) theaterVoxelWireInstancedMesh.setColorAt(instanceIdx, voxelDummyColor);
+        }
         instanceIdx++;
     }
 
-    voxelInstancedMesh.count = instanceIdx;
-    voxelInstancedMesh.visible = true;
-    if (voxelMeshGroup) voxelMeshGroup.visible = true;
-    voxelInstancedMesh.instanceMatrix.needsUpdate = true;
-    if (voxelInstancedMesh.instanceColor) {
-        voxelInstancedMesh.instanceColor.needsUpdate = true;
+    if (isSlamActive && voxelInstancedMesh) {
+        voxelInstancedMesh.count = instanceIdx;
+        voxelInstancedMesh.visible = isVoxelsActive;
+        voxelInstancedMesh.instanceMatrix.needsUpdate = true;
+        if (voxelInstancedMesh.instanceColor) voxelInstancedMesh.instanceColor.needsUpdate = true;
+        if (voxelWireInstancedMesh) {
+            voxelWireInstancedMesh.count = instanceIdx;
+            voxelWireInstancedMesh.visible = isVoxelsActive;
+            voxelWireInstancedMesh.instanceMatrix.needsUpdate = true;
+            if (voxelWireInstancedMesh.instanceColor) voxelWireInstancedMesh.instanceColor.needsUpdate = true;
+        }
+        if (voxelMeshGroup) voxelMeshGroup.visible = isVoxelsActive;
+    }
+
+    if (isTheaterActive && theaterVoxelInstancedMesh) {
+        theaterVoxelInstancedMesh.count = instanceIdx;
+        theaterVoxelInstancedMesh.visible = isVoxelsActive;
+        theaterVoxelInstancedMesh.instanceMatrix.needsUpdate = true;
+        if (theaterVoxelInstancedMesh.instanceColor) theaterVoxelInstancedMesh.instanceColor.needsUpdate = true;
+        if (theaterVoxelWireInstancedMesh) {
+            theaterVoxelWireInstancedMesh.count = instanceIdx;
+            theaterVoxelWireInstancedMesh.visible = isVoxelsActive;
+            theaterVoxelWireInstancedMesh.instanceMatrix.needsUpdate = true;
+            if (theaterVoxelWireInstancedMesh.instanceColor) theaterVoxelWireInstancedMesh.instanceColor.needsUpdate = true;
+        }
+        if (theaterVoxelMeshGroup) theaterVoxelMeshGroup.visible = isVoxelsActive;
     }
 
     const elVox = document.getElementById("slam-voxels-count");
@@ -2217,6 +2553,18 @@ function resetSLAMMap() {
     if (voxelInstancedMesh) {
         voxelInstancedMesh.count = 0;
         voxelInstancedMesh.instanceMatrix.needsUpdate = true;
+    }
+    if (voxelWireInstancedMesh) {
+        voxelWireInstancedMesh.count = 0;
+        voxelWireInstancedMesh.instanceMatrix.needsUpdate = true;
+    }
+    if (theaterVoxelInstancedMesh) {
+        theaterVoxelInstancedMesh.count = 0;
+        theaterVoxelInstancedMesh.instanceMatrix.needsUpdate = true;
+    }
+    if (theaterVoxelWireInstancedMesh) {
+        theaterVoxelWireInstancedMesh.count = 0;
+        theaterVoxelWireInstancedMesh.instanceMatrix.needsUpdate = true;
     }
     const elPts = document.getElementById("slam-pts-count");
     if (elPts) elPts.textContent = "0";
@@ -2265,17 +2613,25 @@ function toggleTheaterLidar() {
 window.toggleTheaterLidar = toggleTheaterLidar;
 
 // Update Khatib APF Guidance Vectors in SLAM Viewport
+const _apfOrigin = new THREE.Vector3();
+const _apfVAtt = new THREE.Vector3();
+const _apfVRep = new THREE.Vector3();
+const _apfVNet = new THREE.Vector3();
+const _apfDir = new THREE.Vector3();
+
 function updateAPFVectors(apfData) {
     if (!apfData || !slamDroneMesh) return;
-    const origin = slamDroneMesh.position.clone();
+    if (activeViewportMode === "theater") return;
+    _apfOrigin.copy(slamDroneMesh.position);
 
     // 1. Attractive Force Arrow (Green)
     const f_att = apfData.f_att || [0, 0, 0];
-    const v_att = new THREE.Vector3(f_att[0], f_att[1], f_att[2]);
-    const len_att = v_att.length();
+    _apfVAtt.set(f_att[0], f_att[1], f_att[2]);
+    const len_att = _apfVAtt.length();
     if (len_att > 0.1 && apfArrowAtt) {
-        apfArrowAtt.position.copy(origin);
-        apfArrowAtt.setDirection(v_att.clone().normalize());
+        apfArrowAtt.position.copy(_apfOrigin);
+        _apfDir.copy(_apfVAtt).normalize();
+        apfArrowAtt.setDirection(_apfDir);
         apfArrowAtt.setLength(Math.min(22, Math.max(4, len_att * 0.8)), 2.5, 1.2);
         apfArrowAtt.visible = true;
     } else if (apfArrowAtt) {
@@ -2284,11 +2640,12 @@ function updateAPFVectors(apfData) {
 
     // 2. Repulsive Obstacle Force Arrow (Red)
     const f_rep = apfData.f_rep || [0, 0, 0];
-    const v_rep = new THREE.Vector3(f_rep[0], f_rep[1], f_rep[2]);
-    const len_rep = v_rep.length();
+    _apfVRep.set(f_rep[0], f_rep[1], f_rep[2]);
+    const len_rep = _apfVRep.length();
     if (len_rep > 0.1 && apfArrowRep) {
-        apfArrowRep.position.copy(origin);
-        apfArrowRep.setDirection(v_rep.clone().normalize());
+        apfArrowRep.position.copy(_apfOrigin);
+        _apfDir.copy(_apfVRep).normalize();
+        apfArrowRep.setDirection(_apfDir);
         apfArrowRep.setLength(Math.min(24, Math.max(4, len_rep * 0.6)), 2.5, 1.2);
         apfArrowRep.visible = true;
     } else if (apfArrowRep) {
@@ -2297,11 +2654,12 @@ function updateAPFVectors(apfData) {
 
     // 3. Resultant Commanded Acceleration Vector (Cyan)
     const f_net = apfData.f_net || [0, 0, 0];
-    const v_net = new THREE.Vector3(f_net[0], f_net[1], f_net[2]);
-    const len_net = v_net.length();
+    _apfVNet.set(f_net[0], f_net[1], f_net[2]);
+    const len_net = _apfVNet.length();
     if (len_net > 0.1 && apfArrowNet) {
-        apfArrowNet.position.copy(origin);
-        apfArrowNet.setDirection(v_net.clone().normalize());
+        apfArrowNet.position.copy(_apfOrigin);
+        _apfDir.copy(_apfVNet).normalize();
+        apfArrowNet.setDirection(_apfDir);
         apfArrowNet.setLength(Math.min(28, Math.max(5, len_net * 0.7)), 3, 1.5);
         apfArrowNet.visible = true;
     } else if (apfArrowNet) {
@@ -2350,6 +2708,14 @@ function selectDrone(droneId, openPanel = true) {
         smoothPanTo(targetMesh.position);
     }
 
+    // 2b. P5: Position 3D selection reticle halo on selected drone
+    if (targetMesh && selectionHaloMesh) {
+        selectionHaloMesh.position.copy(targetMesh.position);
+        selectionHaloMesh.position.z += 0.2;
+        selectionHaloMesh.visible = true;
+        updateSelectionRoute();
+    }
+
     // 3. Open Telemetry Inspect Panel
     if (openPanel && typeof toggleInspectPanel === "function") {
         toggleInspectPanel(true);
@@ -2362,6 +2728,69 @@ function selectDrone(droneId, openPanel = true) {
     }
 }
 window.selectDrone = selectDrone;
+
+// P5: Dynamic Multi-hop Route Line Update from Selected Drone to GCS
+function updateSelectionRoute() {
+    if (!selectionRouteLine) return;
+    if (!selectedDroneId || !latestTelemetry) {
+        selectionRouteLine.visible = false;
+        return;
+    }
+    const routes = latestTelemetry.active_routes || window._lastRoutes || [];
+    let route = routes.find(r => Array.isArray(r) && r[0] === selectedDroneId);
+    if (!route) {
+        route = routes.find(r => Array.isArray(r) && r.includes(selectedDroneId));
+    }
+    if (!route) {
+        selectionRouteLine.visible = false;
+        return;
+    }
+    const idx = route.indexOf(selectedDroneId);
+    const subRoute = route.slice(idx);
+    if (subRoute.length < 2) {
+        selectionRouteLine.visible = false;
+        return;
+    }
+
+    const gcsCoords = (currentScenario === "challenge") ? [-75, 0, 16] : [0, -145, 26];
+    const posAttr = selectionRouteLine.geometry.attributes.position;
+    let ptCount = 0;
+
+    for (let i = 0; i < subRoute.length; i++) {
+        const nodeId = subRoute[i];
+        let px, py, pz;
+        if (nodeId === "GCS") {
+            [px, py, pz] = gcsCoords;
+        } else {
+            const mesh = droneMeshes.get(nodeId);
+            if (mesh) {
+                px = mesh.position.x;
+                py = mesh.position.y;
+                pz = mesh.position.z;
+            } else {
+                const dData = (latestTelemetry.drones || []).find(d => d.id === nodeId);
+                if (dData && dData.position) {
+                    [px, py, pz] = dData.position;
+                }
+            }
+        }
+        if (px !== undefined && ptCount < MAX_ROUTE_POINTS) {
+            posAttr.array[ptCount * 3] = px;
+            posAttr.array[ptCount * 3 + 1] = py;
+            posAttr.array[ptCount * 3 + 2] = pz;
+            ptCount++;
+        }
+    }
+
+    if (ptCount >= 2) {
+        posAttr.needsUpdate = true;
+        selectionRouteLine.geometry.setDrawRange(0, ptCount);
+        selectionRouteLine.visible = true;
+    } else {
+        selectionRouteLine.visible = false;
+    }
+}
+window.updateSelectionRoute = updateSelectionRoute;
 
 // ============================================================================
 // Scientific Analytics Dashboard (Chart.js)
@@ -2680,7 +3109,9 @@ function renderFleetList(drones) {
                     <div>ALT: <span class="stat-alt">${d.position[2].toFixed(1)}m</span></div>
                     <div>BAT: <span class="stat-bat ${batClass}">${d.battery_pct.toFixed(0)}%${isCharging ? ' ⚡' : ''}</span></div>
                     <div>SPD: <span class="stat-spd">${speed} m/s</span></div>
+                    <div>SEC: <span class="stat-sec text-cyan">${d.assigned_sector ? d.assigned_sector.replace('SEC_', 'S-') : 'NONE'}</span></div>
                     <div>POI: <span class="stat-poi">${d.assigned_poi_id || 'NONE'}</span></div>
+                    <div>SCN: <span class="stat-scn text-neon-green">${(d.sector_progress || 0).toFixed(0)}%</span></div>
                     <div>PWR: <span class="stat-pwr text-neon-yellow">${pwr}</span></div>
                     <div>COM: <span class="stat-com ${comClass}">${comText}</span></div>
                 </div>
@@ -2737,6 +3168,18 @@ function renderFleetList(drones) {
                 if (spdSpan.textContent !== spdText) spdSpan.textContent = spdText;
             }
 
+            const secSpan = card.querySelector(".stat-sec");
+            if (secSpan) {
+                const secText = d.assigned_sector ? d.assigned_sector.replace('SEC_', 'S-') : 'NONE';
+                if (secSpan.textContent !== secText) secSpan.textContent = secText;
+            }
+
+            const scnSpan = card.querySelector(".stat-scn");
+            if (scnSpan) {
+                const scnText = `${(d.sector_progress || 0).toFixed(0)}%`;
+                if (scnSpan.textContent !== scnText) scnSpan.textContent = scnText;
+            }
+
             const poiSpan = card.querySelector(".stat-poi");
             if (poiSpan) {
                 const poiText = d.assigned_poi_id || 'NONE';
@@ -2779,11 +3222,21 @@ function renderPoiList(poiItems) {
         const drone = p.assigned_drone || 'UNASSIGNED';
         const deadline = p.deadline_s !== undefined ? `D-LINE: ${p.deadline_s.toFixed(0)}s` : '';
 
+        let detBadge = '<span style="color:#ff1744; font-size:7px; border:1px solid rgba(255,23,68,0.4); padding:0 3px; border-radius:2px;">SEARCHING</span>';
+        if (isDone) {
+            detBadge = '<span style="color:#00ff66; font-size:7px; border:1px solid rgba(0,255,102,0.4); padding:0 3px; border-radius:2px;">SURVEYED</span>';
+        } else if (p.is_reported) {
+            detBadge = '<span style="color:#00e5ff; font-size:7px; border:1px solid rgba(0,229,255,0.4); padding:0 3px; border-radius:2px;">REPORTED</span>';
+        } else if (p.is_detected) {
+            detBadge = '<span style="color:#ffd600; font-size:7px; border:1px solid rgba(255,214,0,0.4); padding:0 3px; border-radius:2px;">DETECTED</span>';
+        }
+
         return `<div class="poi-card ${pClass}" data-poi-id="${p.id}" data-drone-id="${p.assigned_drone || ''}" role="button" tabindex="0" title="Disaster Site ${p.id} - Click to track drone">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div style="display:flex; align-items:center; gap:5px;">
                     <span class="badge" style="font-size:7.5px; padding:1px 4px; background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.15);">${priority === 'CRITICAL' ? '⚡ P' : 'P'}${rank} ${priority}</span>
                     <strong style="color:var(--text-primary); font-size:10px;">${p.id}</strong>
+                    ${detBadge}
                 </div>
                 <span class="${isDone ? 'text-neon-green' : 'text-neon-yellow'}" style="font-weight:bold; font-size:10px;">${isDone ? 'COMPLETED' : progressPct + '%'}</span>
             </div>
@@ -2925,10 +3378,12 @@ function updateHUD(telemetry) {
     const elEkf = document.getElementById("metric-ekf-err");
     if (elEkf) elEkf.textContent = `${(analytics.avg_ekf_error_m || 0.08).toFixed(2)} m`;
 
-    if (telemetry.pois) window._lastPois = telemetry.pois;
-    const pois = telemetry.pois || window._lastPois || [];
-    const completedCount = pois.filter(p => p.is_completed).length;
-    document.getElementById("metric-pois").textContent = `${completedCount} / ${pois.length}`;
+    if (telemetry.pois && telemetry.pois.length > 0) window._lastPois = telemetry.pois;
+    const pois = (telemetry.pois && telemetry.pois.length > 0) ? telemetry.pois : (window._lastPois || []);
+    if (pois.length > 0) {
+        const completedCount = pois.filter(p => p.is_completed).length;
+        document.getElementById("metric-pois").textContent = `${completedCount} / ${pois.length}`;
+    }
 
     // Survivors Located (Thermal SAR)
     const elSurvivors = document.getElementById("metric-survivors");
@@ -3466,8 +3921,12 @@ function initHeatmapOverlay() {
     }
 }
 
+let lastHeatmapPaint = 0;
 function updateHeatmap(drones) {
-    if (!heatmapCtx || !heatmapTexture || !drones) return;
+    if (!isHeatmapActive || !heatmapCtx || !heatmapTexture || !drones) return;
+    const now = performance.now();
+    if (now - lastHeatmapPaint < 80) return; // Throttle to ~12 Hz
+    lastHeatmapPaint = now;
 
     // Gradual soft decay for dynamic visit intensity
     heatmapCtx.fillStyle = "rgba(0, 0, 0, 0.004)";
@@ -3521,6 +3980,8 @@ function renderTelemetryFrame(telemetry) {
     }
     if (telemetry.obstacles) updateObstacles(telemetry.obstacles);
     if (telemetry.pois) updatePoIs(telemetry.pois);
+    if (telemetry.sectors) updateSectors(telemetry.sectors);
+    if (telemetry.abnormalities) updateAbnormalities(telemetry.abnormalities);
     if (telemetry.links && telemetry.drones) updateLinks(telemetry.links, telemetry.active_routes, telemetry.drones);
     if (telemetry.drones) updateFormationLattice(telemetry.drones, telemetry.active_formation || activeSwarmFormation);
     if (telemetry.active_formation) {
@@ -3551,6 +4012,7 @@ function renderTelemetryFrame(telemetry) {
             selSpd.value = window.activeSimSpeed.toFixed(1);
         }
     }
+    if (typeof updateSelectionRoute === "function") updateSelectionRoute();
     updateHUD(telemetry);
 }
 
@@ -3828,10 +4290,80 @@ function toggleThermalHeatmap() {
 }
 window.toggleThermalHeatmap = toggleThermalHeatmap;
 
+function toggleVoxels() {
+    isVoxelsActive = !isVoxelsActive;
+    const btn = document.getElementById("btn-toggle-voxels");
+    if (btn) {
+        btn.classList.toggle("active", isVoxelsActive);
+        btn.textContent = isVoxelsActive ? "🧊 VOXELS: ON" : "🧊 VOXELS: OFF";
+        btn.classList.toggle("text-neon-yellow", isVoxelsActive);
+        btn.classList.toggle("text-dim", !isVoxelsActive);
+    }
+    if (voxelMeshGroup) voxelMeshGroup.visible = isVoxelsActive;
+    if (theaterVoxelMeshGroup) theaterVoxelMeshGroup.visible = isVoxelsActive;
+    if (isVoxelsActive && voxelOccupancyCache.size > 0) {
+        updateOccupancyVoxels(null, null, null);
+    }
+    playTacticalSound("radar_ping");
+}
+window.toggleVoxels = toggleVoxels;
+
+// P2: Batched Building Collapse Dust Particles (Single Draw Call, Zero-GC)
+function ensureCollapseDustMesh() {
+    if (collapseDustMesh || !sceneTheater) return;
+    const geo = new THREE.BufferGeometry();
+    for (let i = 0; i < MAX_COLLAPSE_DUST_PARTICLES; i++) {
+        collapseDustPositions[i * 3 + 2] = -999.0;
+    }
+    geo.setAttribute('position', new THREE.BufferAttribute(collapseDustPositions, 3));
+    const mat = new THREE.PointsMaterial({
+        color: 0x8a7b6a,
+        size: 5.0,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+    });
+    collapseDustMesh = new THREE.Points(geo, mat);
+    collapseDustMesh.frustumCulled = false;
+    sceneTheater.add(collapseDustMesh);
+}
+
+function spawnCollapseDustPuff(cx, cy, cz) {
+    if (!sceneTheater) return;
+    ensureCollapseDustMesh();
+    const count = 75;
+    for (let i = 0; i < count; i++) {
+        const idx = (collapseDustHead + i) % MAX_COLLAPSE_DUST_PARTICLES;
+        const angle = Math.random() * Math.PI * 2;
+        const rad = 2.0 + Math.random() * 14.0;
+        collapseDustPositions[idx * 3] = cx + Math.cos(angle) * rad;
+        collapseDustPositions[idx * 3 + 1] = cy + Math.sin(angle) * rad;
+        collapseDustPositions[idx * 3 + 2] = Math.max(0.5, (cz || 5.0) * 0.15 + (Math.random() - 0.5) * 3.0);
+
+        const speed = 0.12 + Math.random() * 0.28;
+        collapseDustVelocities[idx * 3] = Math.cos(angle) * speed;
+        collapseDustVelocities[idx * 3 + 1] = Math.sin(angle) * speed;
+        collapseDustVelocities[idx * 3 + 2] = 0.08 + Math.random() * 0.22;
+
+        collapseDustAges[idx] = 0.0;
+        collapseDustLifetimes[idx] = 2.6;
+        collapseDustActive[idx] = 1;
+    }
+    collapseDustHead = (collapseDustHead + count) % MAX_COLLAPSE_DUST_PARTICLES;
+    if (collapseDustMesh) {
+        collapseDustMesh.geometry.attributes.position.needsUpdate = true;
+        collapseDustMesh.visible = true;
+    }
+}
+window.spawnCollapseDustPuff = spawnCollapseDustPuff;
+
 function triggerObstacleCollapse() {
     playTacticalSound("alarm");
     const btn = document.getElementById("btn-collapse");
     if (btn) btn.textContent = "💥 COLLAPSING...";
+
+    // Spawn immediate subtle dust puff around target disaster tower
+    spawnCollapseDustPuff(25.0, 45.0, 10.0);
 
     const payload = { command: "trigger_collapse" };
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -3848,6 +4380,17 @@ function triggerObstacleCollapse() {
         if (btn) {
             btn.textContent = "💥 COLLAPSED!";
             setTimeout(() => { btn.textContent = "💥 COLLAPSE"; }, 3500);
+        }
+        if (data.collapse) {
+            const col = data.collapse;
+            const c = col.center || (col.new_min_pt && col.new_max_pt ? [
+                (col.new_min_pt[0] + col.new_max_pt[0]) * 0.5,
+                (col.new_min_pt[1] + col.new_max_pt[1]) * 0.5,
+                (col.new_min_pt[2] + col.new_max_pt[2]) * 0.25
+            ] : (col.spawned_survivor ? col.spawned_survivor.position : null));
+            if (c) {
+                spawnCollapseDustPuff(c[0], c[1], Math.max(1.0, c[2] || 0));
+            }
         }
         const ticker = document.getElementById("hud-comms-ticker");
         const tickerBadge = document.getElementById("ticker-badge");
@@ -4100,6 +4643,14 @@ function initUIControls() {
         });
     }
 
+    // 3D OctoMap Occupancy Voxel Grid Toggle (Clean Holographic Mode)
+    const btnVoxels = document.getElementById("btn-toggle-voxels");
+    if (btnVoxels) {
+        btnVoxels.addEventListener("click", () => {
+            toggleVoxels();
+        });
+    }
+
     // 1-Click 3D Point Cloud Export (.PLY)
     const btnExportPly = document.getElementById("btn-export-ply");
     if (btnExportPly) {
@@ -4316,12 +4867,24 @@ function initUIControls() {
 
     // Military HUD Overlay Toggle Button & Keybind
     const btnToggleHud = document.getElementById("btn-toggle-hud");
-    if (btnToggleHud) {
-        btnToggleHud.addEventListener("click", () => {
-            isHudEnabled = !isHudEnabled;
+    function setHudEnabled(enabled) {
+        isHudEnabled = enabled;
+        if (btnToggleHud) {
             btnToggleHud.textContent = isHudEnabled ? "HUD: ON" : "HUD: OFF";
             btnToggleHud.classList.toggle("text-neon-green", isHudEnabled);
             btnToggleHud.classList.toggle("text-dim", !isHudEnabled);
+        }
+        if (!isHudEnabled) {
+            const canvas = document.getElementById("web-military-hud");
+            if (canvas) {
+                const ctx = canvas.getContext("2d");
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+        }
+    }
+    if (btnToggleHud) {
+        btnToggleHud.addEventListener("click", () => {
+            setHudEnabled(!isHudEnabled);
         });
     }
 
@@ -4329,12 +4892,7 @@ function initUIControls() {
         if (e.key === "h" || e.key === "H") {
             // Avoid triggering when user is in input box
             if (e.target && e.target.tagName === "INPUT") return;
-            isHudEnabled = !isHudEnabled;
-            if (btnToggleHud) {
-                btnToggleHud.textContent = isHudEnabled ? "HUD: ON" : "HUD: OFF";
-                btnToggleHud.classList.toggle("text-neon-green", isHudEnabled);
-                btnToggleHud.classList.toggle("text-dim", !isHudEnabled);
-            }
+            setHudEnabled(!isHudEnabled);
         }
     });
 
@@ -4645,11 +5203,28 @@ function onWindowResize() {
             rendererSLAM.setSize(w, h);
         }
     }
+
+    const canvasHud = document.getElementById("web-military-hud");
+    if (canvasHud && canvasHud.parentElement) {
+        hudCanvasW = canvasHud.parentElement.clientWidth || 800;
+        hudCanvasH = canvasHud.parentElement.clientHeight || 600;
+    }
 }
 
 // ============================================================================
 // Animation Loop & Investor Presentation Mode
 // ============================================================================
+
+// Module-level reusable scratch vectors to eliminate per-frame GC allocations in animate()
+const _fpvForward = new THREE.Vector3();
+const _fpvCamPos = new THREE.Vector3();
+const _fpvTarget = new THREE.Vector3();
+const _slamOffset = new THREE.Vector3(0, -45, 30);
+const _slamDesiredPos = new THREE.Vector3();
+const _smoothPanDelta = new THREE.Vector3();
+const _navForward = new THREE.Vector3();
+const _navRight = new THREE.Vector3();
+const _navMoveVec = new THREE.Vector3();
 
 function animate() {
     requestAnimationFrame(animate);
@@ -4695,7 +5270,7 @@ function animate() {
                 mesh.reticle.visible = true;
                 const localGroundZ = -pz;
                 const posAttr = mesh.altLine.geometry.attributes.position;
-                if (posAttr) {
+                if (posAttr && Math.abs(posAttr.array[5] - localGroundZ) > 0.05) {
                     posAttr.array[0] = 0; posAttr.array[1] = 0; posAttr.array[2] = 0;
                     posAttr.array[3] = 0; posAttr.array[4] = 0; posAttr.array[5] = localGroundZ;
                     posAttr.needsUpdate = true;
@@ -4716,9 +5291,50 @@ function animate() {
         slamDroneMesh.quaternion.copy(activeSelectedMesh.quaternion);
     }
 
+    // P5: Update 3D Drone HUD Selection Reticle Halo & Multi-hop Route
+    if (selectionHaloMesh) {
+        if (activeSelectedMesh && activeSelectedMesh.visible) {
+            selectionHaloMesh.position.copy(activeSelectedMesh.position);
+            selectionHaloMesh.position.z += 0.2;
+            selectionHaloMesh.rotation.z += 0.025;
+            selectionHaloMesh.material.opacity = 0.70 + 0.20 * Math.sin(performance.now() * 0.005);
+            selectionHaloMesh.visible = true;
+        } else {
+            selectionHaloMesh.visible = false;
+            if (selectionRouteLine) selectionRouteLine.visible = false;
+        }
+    }
+
     // Update Sector Delta Sparkling Photon Particle Streams
     if (typeof SectorDelta !== "undefined") {
         SectorDelta.animate(0.016);
+    }
+
+    // P2: Update Dynamic Collapse Dust Puffs (Batched Single-Draw Zero-GC)
+    if (collapseDustMesh) {
+        let hasActive = false;
+        for (let i = 0; i < MAX_COLLAPSE_DUST_PARTICLES; i++) {
+            if (!collapseDustActive[i]) continue;
+            hasActive = true;
+            collapseDustAges[i] += 0.016;
+            if (collapseDustAges[i] >= collapseDustLifetimes[i]) {
+                collapseDustActive[i] = 0;
+                collapseDustPositions[i * 3 + 2] = -999.0;
+            } else {
+                collapseDustPositions[i * 3] += collapseDustVelocities[i * 3];
+                collapseDustPositions[i * 3 + 1] += collapseDustVelocities[i * 3 + 1];
+                collapseDustPositions[i * 3 + 2] += collapseDustVelocities[i * 3 + 2];
+                collapseDustVelocities[i * 3] *= 0.985;
+                collapseDustVelocities[i * 3 + 1] *= 0.985;
+                collapseDustVelocities[i * 3 + 2] *= 0.97;
+            }
+        }
+        if (hasActive) {
+            collapseDustMesh.geometry.attributes.position.needsUpdate = true;
+            collapseDustMesh.visible = true;
+        } else {
+            collapseDustMesh.visible = false;
+        }
     }
 
     // Handle Manual FPV Controller Input (WASD / Gamepad)
@@ -4763,76 +5379,66 @@ function animate() {
         windVy = Math.sin(dirRad) * spd * 0.035;
     }
 
-    // Update Disaster Smoke Particles (Rising plumes drifting with atmospheric wind)
-    const particleSpeedMult = Math.min(2.5, Math.max(1.0, simSpeedMult * 0.7));
-    if (smokeParticles) {
-        const pos = smokeParticles.geometry.attributes.position.array;
-        const speeds = smokeParticles.speeds;
-        const origins = smokeParticles.origins;
-        for (let i = 0; i < speeds.length; i++) {
-            pos[i * 3 + 2] += speeds[i] * particleSpeedMult;
-            pos[i * 3] += windVx + (Math.random() - 0.48) * 0.18;
-            pos[i * 3 + 1] += windVy + (Math.random() - 0.48) * 0.18;
-            if (pos[i * 3 + 2] > 65) {
-                const orig = origins[i % origins.length];
-                pos[i * 3] = orig.x + (Math.random() - 0.5) * 10;
-                pos[i * 3 + 1] = orig.y + (Math.random() - 0.5) * 10;
-                pos[i * 3 + 2] = orig.z;
+    // Update Disaster Particles (Throttled to ~30 FPS to eliminate WebGL buffer transfer overhead on high-Hz displays)
+    if (now - lastParticleUpdate >= 30) {
+        lastParticleUpdate = now;
+        const particleSpeedMult = Math.min(2.5, Math.max(1.0, simSpeedMult * 0.7));
+        if (smokeParticles) {
+            const pos = smokeParticles.geometry.attributes.position.array;
+            const speeds = smokeParticles.speeds;
+            const origins = smokeParticles.origins;
+            for (let i = 0; i < speeds.length; i++) {
+                pos[i * 3 + 2] += speeds[i] * particleSpeedMult;
+                pos[i * 3] += windVx + (Math.random() - 0.48) * 0.18;
+                pos[i * 3 + 1] += windVy + (Math.random() - 0.48) * 0.18;
+                if (pos[i * 3 + 2] > 65) {
+                    const orig = origins[i % origins.length];
+                    pos[i * 3] = orig.x + (Math.random() - 0.5) * 10;
+                    pos[i * 3 + 1] = orig.y + (Math.random() - 0.5) * 10;
+                    pos[i * 3 + 2] = orig.z;
+                }
+            }
+            smokeParticles.geometry.attributes.position.needsUpdate = true;
+        }
+
+        // Update Disaster Flame & Ember Particles (Turbulent flickering fires at ground zero)
+        if (flameParticles) {
+            const fPos = flameParticles.geometry.attributes.position.array;
+            const fSpeeds = flameParticles.speeds;
+            const fOrigins = flameParticles.origins;
+            for (let i = 0; i < fSpeeds.length; i++) {
+                fPos[i * 3 + 2] += fSpeeds[i] * particleSpeedMult;
+                fPos[i * 3] += (Math.random() - 0.5) * 0.35 + windVx * 0.4;
+                fPos[i * 3 + 1] += (Math.random() - 0.5) * 0.35 + windVy * 0.4;
+                if (fPos[i * 3 + 2] > 16) {
+                    const orig = fOrigins[i % fOrigins.length];
+                    fPos[i * 3] = orig.x + (Math.random() - 0.5) * 6;
+                    fPos[i * 3 + 1] = orig.y + (Math.random() - 0.5) * 6;
+                    fPos[i * 3 + 2] = orig.z + Math.random() * 2.0;
+                }
+            }
+            flameParticles.geometry.attributes.position.needsUpdate = true;
+            flameParticles.material.opacity = 0.65 + Math.sin(tSec * 16 * particleSpeedMult) * 0.25;
+        }
+
+        // Update Ground Wash Dust
+        if (washParticles && droneMeshes.size > 0) {
+            const pos = washParticles.geometry.attributes.position.array;
+            let pIdx = 0;
+            droneMeshes.forEach((mesh) => {
+                if (mesh.position.z < 15.0 && pIdx < pos.length - 9) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const r = 2.0 + Math.random() * 4.0;
+                    pos[pIdx] = mesh.position.x + Math.cos(angle) * r;
+                    pos[pIdx + 1] = mesh.position.y + Math.sin(angle) * r;
+                    pos[pIdx + 2] = 0.2 + Math.random() * 0.8;
+                    pIdx += 3;
+                }
+            });
+            if (pIdx > 0) {
+                washParticles.geometry.attributes.position.needsUpdate = true;
             }
         }
-        smokeParticles.geometry.attributes.position.needsUpdate = true;
-    }
-
-    // Update Disaster Flame & Ember Particles (Turbulent flickering fires at ground zero)
-    if (flameParticles) {
-        const fPos = flameParticles.geometry.attributes.position.array;
-        const fSpeeds = flameParticles.speeds;
-        const fOrigins = flameParticles.origins;
-        for (let i = 0; i < fSpeeds.length; i++) {
-            fPos[i * 3 + 2] += fSpeeds[i] * particleSpeedMult;
-            fPos[i * 3] += (Math.random() - 0.5) * 0.35 + windVx * 0.4;
-            fPos[i * 3 + 1] += (Math.random() - 0.5) * 0.35 + windVy * 0.4;
-            if (fPos[i * 3 + 2] > 16) {
-                const orig = fOrigins[i % fOrigins.length];
-                fPos[i * 3] = orig.x + (Math.random() - 0.5) * 6;
-                fPos[i * 3 + 1] = orig.y + (Math.random() - 0.5) * 6;
-                fPos[i * 3 + 2] = orig.z + Math.random() * 2.0;
-            }
-        }
-        flameParticles.geometry.attributes.position.needsUpdate = true;
-        flameParticles.material.opacity = 0.65 + Math.sin(tSec * 16 * particleSpeedMult) * 0.25;
-    }
-
-    // Animate Holographic Click-to-Dispatch Waypoint Beacon
-    if (dispatchBeaconMesh && dispatchBeaconMesh.visible) {
-        const pulseRing = dispatchBeaconMesh.getObjectByName("pulseRing");
-        if (pulseRing) {
-            const s = 1.0 + ((performance.now() * 0.0035) % 2.8);
-            pulseRing.scale.set(s, s, 1.0);
-            pulseRing.material.opacity = Math.max(0.05, 0.75 - s * 0.22);
-        }
-        const marker = dispatchBeaconMesh.getObjectByName("marker");
-        if (marker) {
-            marker.rotation.z += 0.04;
-            marker.rotation.x += 0.02;
-        }
-    }
-
-    // Update Ground Wash Dust
-    if (washParticles && droneMeshes.size > 0) {
-        const pos = washParticles.geometry.attributes.position.array;
-        let pIdx = 0;
-        droneMeshes.forEach((mesh) => {
-            if (mesh.position.z < 15.0 && pIdx < pos.length - 9) {
-                const angle = Math.random() * Math.PI * 2;
-                const r = 2.0 + Math.random() * 4.0;
-                pos[pIdx] = mesh.position.x + Math.cos(angle) * r;
-                pos[pIdx + 1] = mesh.position.y + Math.sin(angle) * r;
-                pos[pIdx + 2] = 0.2 + Math.random() * 0.8;
-                pIdx += 3;
-            }
-        });
-        washParticles.geometry.attributes.position.needsUpdate = true;
     }
 
     // Handle Investor Pitch Choreography
@@ -4843,10 +5449,12 @@ function animate() {
         if (activeCamMode === "fpv") {
             const targetMesh = droneMeshes.get(selectedDroneId) || droneMeshes.values().next().value;
             if (targetMesh) {
-                const forward = new THREE.Vector3(0, 1, 0).applyQuaternion(targetMesh.quaternion);
-                const camPos = targetMesh.position.clone().sub(forward.clone().multiplyScalar(14)).add(new THREE.Vector3(0, 0, 6));
-                cameraTheater.position.lerp(camPos, 0.08);
-                controlsTheater.target.lerp(targetMesh.position.clone().add(forward.clone().multiplyScalar(10)), 0.12);
+                _fpvForward.set(0, 1, 0).applyQuaternion(targetMesh.quaternion);
+                _fpvCamPos.copy(targetMesh.position).addScaledVector(_fpvForward, -14);
+                _fpvCamPos.z += 6;
+                cameraTheater.position.lerp(_fpvCamPos, 0.08);
+                _fpvTarget.copy(targetMesh.position).addScaledVector(_fpvForward, 10);
+                controlsTheater.target.lerp(_fpvTarget, 0.12);
             }
         } else if (activeCamMode === "gcs") {
             cameraTheater.position.set(0, -145, 26);
@@ -4859,9 +5467,8 @@ function animate() {
 
     // Update SLAM Camera to follow focused drone smoothly
     if (slamDroneMesh && controlsSLAM) {
-        const offset = new THREE.Vector3(0, -45, 30);
-        const desiredPos = slamDroneMesh.position.clone().add(offset);
-        cameraSLAM.position.lerp(desiredPos, 0.06);
+        _slamDesiredPos.copy(slamDroneMesh.position).add(_slamOffset);
+        cameraSLAM.position.lerp(_slamDesiredPos, 0.06);
         controlsSLAM.target.lerp(slamDroneMesh.position, 0.1);
         controlsSLAM.update();
     }
@@ -4871,31 +5478,30 @@ function animate() {
         const elapsed = performance.now() - smoothPanStartTime;
         smoothPanProgress = Math.min(1.0, elapsed / smoothPanDuration);
         const ease = 1 - Math.pow(1 - smoothPanProgress, 3);
-        const delta = smoothPanTarget.clone().sub(smoothPanStartTarget);
-        controlsTheater.target.copy(smoothPanStartTarget.clone().add(delta.clone().multiplyScalar(ease)));
-        cameraTheater.position.copy(smoothPanStartCam.clone().add(delta.clone().multiplyScalar(ease)));
+        _smoothPanDelta.copy(smoothPanTarget).sub(smoothPanStartTarget).multiplyScalar(ease);
+        controlsTheater.target.copy(smoothPanStartTarget).add(_smoothPanDelta);
+        cameraTheater.position.copy(smoothPanStartCam).add(_smoothPanDelta);
     }
 
     // Keyboard WASD / Arrow keys map panning
     if (controlsTheater && cameraTheater && (activeCamMode === "orbit" || activeCamMode === "top")) {
-        const forward = new THREE.Vector3();
-        cameraTheater.getWorldDirection(forward);
-        forward.z = 0;
-        if (forward.lengthSq() > 0.001) {
-            forward.normalize();
-            const right = new THREE.Vector3().crossVectors(forward, cameraTheater.up).normalize();
-            const moveVec = new THREE.Vector3();
+        cameraTheater.getWorldDirection(_navForward);
+        _navForward.z = 0;
+        if (_navForward.lengthSq() > 0.001) {
+            _navForward.normalize();
+            _navRight.crossVectors(_navForward, cameraTheater.up).normalize();
+            _navMoveVec.set(0, 0, 0);
             const panSpeed = (pressedNavKeys["shift"] ? 4.5 : 2.0);
 
-            if (pressedNavKeys["w"] || pressedNavKeys["arrowup"]) moveVec.add(forward);
-            if (pressedNavKeys["s"] || pressedNavKeys["arrowdown"]) moveVec.sub(forward);
-            if (pressedNavKeys["d"] || pressedNavKeys["arrowright"]) moveVec.add(right);
-            if (pressedNavKeys["a"] || pressedNavKeys["arrowleft"]) moveVec.sub(right);
+            if (pressedNavKeys["w"] || pressedNavKeys["arrowup"]) _navMoveVec.add(_navForward);
+            if (pressedNavKeys["s"] || pressedNavKeys["arrowdown"]) _navMoveVec.sub(_navForward);
+            if (pressedNavKeys["d"] || pressedNavKeys["arrowright"]) _navMoveVec.add(_navRight);
+            if (pressedNavKeys["a"] || pressedNavKeys["arrowleft"]) _navMoveVec.sub(_navRight);
 
-            if (moveVec.lengthSq() > 0) {
-                moveVec.normalize().multiplyScalar(panSpeed);
-                controlsTheater.target.add(moveVec);
-                cameraTheater.position.add(moveVec);
+            if (_navMoveVec.lengthSq() > 0) {
+                _navMoveVec.normalize().multiplyScalar(panSpeed);
+                controlsTheater.target.add(_navMoveVec);
+                cameraTheater.position.add(_navMoveVec);
             }
         }
     }
@@ -4906,7 +5512,7 @@ function animate() {
     if (rendererTheater && sceneTheater && cameraTheater) {
         rendererTheater.render(sceneTheater, cameraTheater);
         // Render Military Aerospace HUD Layer on Viewport 1
-        renderMilitaryHUD();
+        if (isHudEnabled) renderMilitaryHUD();
     }
     if (rendererSLAM && sceneSLAM && cameraSLAM && (activeViewportMode !== "theater")) {
         rendererSLAM.render(sceneSLAM, cameraSLAM);
@@ -4915,6 +5521,11 @@ function animate() {
 
 // Automated 60-Second Investor Presentation Choreography
 let currentInvestorPhase = -1;
+const _investorCamTarget = new THREE.Vector3();
+const _investorLookTarget = new THREE.Vector3();
+const _investorOffsetPhase2 = new THREE.Vector3(30, -30, 20);
+const _investorOffsetPhase3 = new THREE.Vector3(-20, -20, 12);
+
 function handleInvestorChoreography() {
     const elapsedSec = (performance.now() - investorStartTime) / 1000;
     const titleEl = document.getElementById("investor-phase-title");
@@ -4934,8 +5545,10 @@ function handleInvestorChoreography() {
         const orbitAngle = elapsedSec * 0.12;
         const camX = Math.sin(orbitAngle) * 360;
         const camY = -Math.cos(orbitAngle) * 360;
-        cameraTheater.position.lerp(new THREE.Vector3(camX, camY, 240), 0.05);
-        controlsTheater.target.lerp(new THREE.Vector3(0, 0, 25), 0.05);
+        _investorCamTarget.set(camX, camY, 240);
+        _investorLookTarget.set(0, 0, 25);
+        cameraTheater.position.lerp(_investorCamTarget, 0.05);
+        controlsTheater.target.lerp(_investorLookTarget, 0.05);
     } else if (elapsedSec < 30) {
         // Phase 2: Non-Line-Of-Sight Relay Deployment Over Collapsed Skyscraper
         if (titleEl) titleEl.textContent = "PHASE 2: NON-LINE-OF-SIGHT AERIAL RELAY BRIDGING";
@@ -4943,7 +5556,8 @@ function handleInvestorChoreography() {
 
         const relayMesh = droneMeshes.get("RELAY_1");
         if (relayMesh) {
-            cameraTheater.position.lerp(relayMesh.position.clone().add(new THREE.Vector3(30, -30, 20)), 0.05);
+            _investorCamTarget.copy(relayMesh.position).add(_investorOffsetPhase2);
+            cameraTheater.position.lerp(_investorCamTarget, 0.05);
             controlsTheater.target.lerp(relayMesh.position, 0.08);
         }
     } else if (elapsedSec < 45) {
@@ -4955,7 +5569,8 @@ function handleInvestorChoreography() {
         selectDrone("UAV_1", false);
         const uavMesh = droneMeshes.get("UAV_1");
         if (uavMesh) {
-            cameraTheater.position.lerp(uavMesh.position.clone().add(new THREE.Vector3(-20, -20, 12)), 0.05);
+            _investorCamTarget.copy(uavMesh.position).add(_investorOffsetPhase3);
+            cameraTheater.position.lerp(_investorCamTarget, 0.05);
             controlsTheater.target.lerp(uavMesh.position, 0.08);
         }
     } else if (elapsedSec < 60) {
@@ -4963,8 +5578,10 @@ function handleInvestorChoreography() {
         if (titleEl) titleEl.textContent = "PHASE 4: AUTONOMOUS RECOVERY & RETURN-TO-LAUNCH (RTL)";
         if (descEl) descEl.textContent = "Upon completing disaster surveillance or reaching low-battery thresholds, drones execute deconflicted corridor retreat and controlled touchdown on recovery pads.";
 
-        cameraTheater.position.lerp(new THREE.Vector3(0, -340, 210), 0.04);
-        controlsTheater.target.lerp(new THREE.Vector3(0, 0, 20), 0.04);
+        _investorCamTarget.set(0, -340, 210);
+        _investorLookTarget.set(0, 0, 20);
+        cameraTheater.position.lerp(_investorCamTarget, 0.04);
+        controlsTheater.target.lerp(_investorLookTarget, 0.04);
     } else {
         // Loop back to Phase 1 for continuous demo
         investorStartTime = performance.now();
@@ -4975,7 +5592,10 @@ function handleInvestorChoreography() {
 // Military Aerospace Heads-Up Display (MIL-STD-1787D) Web Overlay Engine
 // ============================================================================
 
+let _cachedActiveGPUInfo = null;
+
 function getActiveGPUInfo() {
+    if (_cachedActiveGPUInfo) return _cachedActiveGPUInfo;
     let unmasked = "";
     try {
         if (rendererTheater && rendererTheater.getContext) {
@@ -4996,30 +5616,38 @@ function getActiveGPUInfo() {
     } else if (isAmd) {
         cleanName = "AMD RADEON (INT)";
     }
-    return { unmasked, isNvidia, isAmd, cleanName };
+    _cachedActiveGPUInfo = { unmasked, isNvidia, isAmd, cleanName };
+    return _cachedActiveGPUInfo;
 }
 
 let hudRadarAngle = 0;
+let hudCanvasW = 800;
+let hudCanvasH = 600;
+const _hudProjVec = new THREE.Vector3();
+let _canvasMilitaryHud = null;
+let _ctxMilitaryHud = null;
 
 function renderMilitaryHUD() {
-    const canvas = document.getElementById("web-military-hud");
+    if (!isHudEnabled) return;
+    if (!_canvasMilitaryHud) {
+        _canvasMilitaryHud = document.getElementById("web-military-hud");
+    }
+    const canvas = _canvasMilitaryHud;
     if (!canvas) return;
 
-    const parent = canvas.parentElement;
-    if (!parent) return;
-
-    const w = parent.clientWidth || 800;
-    const h = parent.clientHeight || 600;
-
-    if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
+    if (canvas.width !== hudCanvasW || canvas.height !== hudCanvasH) {
+        canvas.width = hudCanvasW;
+        canvas.height = hudCanvasH;
     }
 
-    const ctx = canvas.getContext("2d");
+    const w = hudCanvasW;
+    const h = hudCanvasH;
+    if (!_ctxMilitaryHud) {
+        _ctxMilitaryHud = canvas.getContext("2d");
+    }
+    const ctx = _ctxMilitaryHud;
+    if (!ctx) return;
     ctx.clearRect(0, 0, w, h);
-
-    if (!isHudEnabled) return;
 
     // Resolve focused drone data
     let drone = null;
@@ -5399,11 +6027,11 @@ function renderMilitaryHUD() {
         // Project PoIs
         if (latestTelemetry.pois) {
             latestTelemetry.pois.forEach(poi => {
-                const vec = new THREE.Vector3(poi.position[0], poi.position[1], poi.position[2]);
-                vec.project(cameraTheater);
-                if (vec.z < 1.0) {
-                    const sx = (vec.x * 0.5 + 0.5) * w;
-                    const sy = (-vec.y * 0.5 + 0.5) * h;
+                _hudProjVec.set(poi.position[0], poi.position[1], poi.position[2]);
+                _hudProjVec.project(cameraTheater);
+                if (_hudProjVec.z < 1.0) {
+                    const sx = (_hudProjVec.x * 0.5 + 0.5) * w;
+                    const sy = (-_hudProjVec.y * 0.5 + 0.5) * h;
                     const isTarget = (poi.id === drone.assigned_poi_id);
                     const color = poi.is_completed ? COLOR_GREEN : (poi.priority === "CRITICAL" ? COLOR_PURPLE : COLOR_YELLOW);
 
@@ -5437,11 +6065,11 @@ function renderMilitaryHUD() {
             latestTelemetry.drones.forEach(peer => {
                 if (peer.id === selectedDroneId) return;
                 const peerPos = peer.position || [0, 0, 0];
-                const vec = new THREE.Vector3(peerPos[0], peerPos[1], peerPos[2]);
-                vec.project(cameraTheater);
-                if (vec.z < 1.0) {
-                    const sx = (vec.x * 0.5 + 0.5) * w;
-                    const sy = (-vec.y * 0.5 + 0.5) * h;
+                _hudProjVec.set(peerPos[0], peerPos[1], peerPos[2]);
+                _hudProjVec.project(cameraTheater);
+                if (_hudProjVec.z < 1.0) {
+                    const sx = (_hudProjVec.x * 0.5 + 0.5) * w;
+                    const sy = (-_hudProjVec.y * 0.5 + 0.5) * h;
                     const dist = Math.hypot(peerPos[0] - pos[0], peerPos[1] - pos[1], peerPos[2] - pos[2]);
                     const isRelay = peer.role === "RELAY";
                     const col = isRelay ? COLOR_YELLOW : COLOR_CYAN;

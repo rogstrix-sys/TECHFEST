@@ -165,58 +165,56 @@ class DroneEKF:
         # Extract estimated acceleration subtracting estimated bias
         a_hat = accel_meas - self.x[6:9]
 
-        # State transition matrix F
-        F = np.eye(9, dtype=np.float64)
-        F[0:3, 3:6] = np.eye(3) * dt
-        F[0:3, 6:9] = -0.5 * (dt ** 2) * np.eye(3)
-        F[3:6, 6:9] = -dt * np.eye(3)
+        if getattr(self, "_last_dt", None) != dt:
+            if not hasattr(self, "_F"):
+                self._F = np.eye(9, dtype=np.float64)
+            dt_sq_half = -0.5 * (dt ** 2)
+            for i in range(3):
+                self._F[i, 3 + i] = dt
+                self._F[i, 6 + i] = dt_sq_half
+                self._F[3 + i, 6 + i] = -dt
+            self._last_dt = dt
+            self._Q_dt = self.Q * dt
 
         # Non-linear state propagation
         self.x[0:3] += self.x[3:6] * dt + 0.5 * a_hat * (dt ** 2)
         self.x[3:6] += a_hat * dt
 
         # Covariance propagation
-        self.P = F @ self.P @ F.T + self.Q * dt
+        self.P = self._F @ self.P @ self._F.T + self._Q_dt
+        self.P = 0.5 * (self.P + self.P.T)
 
     def update_gps(self, gps_pos: np.ndarray, gps_vel: np.ndarray, hdop: float = 1.0) -> None:
         """
         EKF Measurement update with GPS 3D position and velocity (6x1 observation).
+        Vectorized block update directly extracting submatrices to avoid redundant 6x9 allocations.
         """
-        H = np.zeros((6, 9), dtype=np.float64)
-        H[0:3, 0:3] = np.eye(3)
-        H[3:6, 3:6] = np.eye(3)
-
-        z = np.hstack([gps_pos, gps_vel])
-        z_pred = H @ self.x
-        residual = z - z_pred
-
+        residual = np.hstack([gps_pos, gps_vel]) - self.x[0:6]
+        hdop_sq = hdop ** 2
         R = np.block([
-            [self.R_gps_pos * (hdop ** 2), np.zeros((3, 3))],
-            [np.zeros((3, 3)), self.R_gps_vel * (hdop ** 2)],
+            [self.R_gps_pos * hdop_sq, np.zeros((3, 3))],
+            [np.zeros((3, 3)), self.R_gps_vel * hdop_sq],
         ])
 
-        S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
+        S = self.P[0:6, 0:6] + R
+        K = np.linalg.solve(S.T, self.P[0:6, :]).T
 
         self.x += K @ residual
-        self.P = (np.eye(9) - K @ H) @ self.P
+        self.P -= K @ self.P[0:6, :]
+        self.P = 0.5 * (self.P + self.P.T)
 
     def update_baro(self, baro_alt: float) -> None:
         """
         EKF Measurement update with Barometer altitude (1x1 observation).
+        Vectorized 1D kalman update in-place without temporary matrix objects.
         """
-        H = np.zeros((1, 9), dtype=np.float64)
-        H[0, 2] = 1.0
+        residual = float(baro_alt) - self.x[2]
+        S = float(self.P[2, 2] + self.R_baro[0, 0])
+        K = self.P[:, 2] / S
 
-        z = np.array([baro_alt])
-        residual = z - (H @ self.x)
-
-        S_mat = H @ self.P @ H.T + self.R_baro
-        S = float(S_mat[0, 0])
-        K = (self.P @ H.T) / S
-
-        self.x += K.flatten() * float(residual[0])
-        self.P = (np.eye(9) - K @ H) @ self.P
+        self.x += K * residual
+        self.P -= np.outer(K, self.P[2, :])
+        self.P = 0.5 * (self.P + self.P.T)
 
     @property
     def estimated_position(self) -> np.ndarray:

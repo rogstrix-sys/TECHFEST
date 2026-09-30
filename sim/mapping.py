@@ -27,18 +27,79 @@ class LiDARPoint:
     obstacle_id: Optional[str] = None
 
 
-@dataclass
 class LiDARScan:
     """A full spherical / cylindrical sweep of LiDAR points at a given timestamp."""
-    timestamp: float
-    drone_id: str
-    sensor_origin: np.ndarray  # [x, y, z] in world frame
-    points: List[LiDARPoint] = field(default_factory=list)
-    _pts_array: Optional[np.ndarray] = None
+
+    def __init__(
+        self,
+        timestamp: float,
+        drone_id: str,
+        sensor_origin: np.ndarray,
+        points: Optional[List[LiDARPoint]] = None,
+        _pts_array: Optional[np.ndarray] = None,
+        _obs_ids: Optional[np.ndarray] = None,
+        _dists: Optional[np.ndarray] = None,
+    ) -> None:
+        self.timestamp = float(timestamp)
+        self.drone_id = str(drone_id)
+        self.sensor_origin = np.asarray(sensor_origin, dtype=np.float64)
+        self._points = points
+        self._pts_array = _pts_array
+        self._obs_ids = _obs_ids
+        self._dists = _dists
+
+        if self._points is not None and self._pts_array is None:
+            if self._points:
+                self._pts_array = np.array(
+                    [[p.x, p.y, p.z, p.intensity] for p in self._points],
+                    dtype=np.float64,
+                )
+                self._obs_ids = np.array([p.obstacle_id or "GROUND" for p in self._points], dtype=object)
+                self._dists = np.array([p.range_m for p in self._points], dtype=np.float64)
+            else:
+                self._pts_array = np.zeros((0, 4), dtype=np.float64)
+                self._obs_ids = np.zeros(0, dtype=object)
+                self._dists = np.zeros(0, dtype=np.float64)
+
+    @property
+    def points(self) -> List[LiDARPoint]:
+        """Lazy materialization of LiDARPoint objects for backward compatibility."""
+        if self._points is None:
+            if self._pts_array is not None and len(self._pts_array) > 0:
+                pts = self._pts_array
+                dists = self._dists if self._dists is not None else np.linalg.norm(pts[:, :3] - self.sensor_origin, axis=1)
+                obs_ids = self._obs_ids if self._obs_ids is not None else ["GROUND"] * len(pts)
+                self._points = [
+                    LiDARPoint(
+                        x=float(pts[i, 0]),
+                        y=float(pts[i, 1]),
+                        z=float(pts[i, 2]),
+                        range_m=float(dists[i]),
+                        intensity=float(pts[i, 3]),
+                        obstacle_id=str(obs_ids[i]) if obs_ids[i] is not None else None,
+                    )
+                    for i in range(len(pts))
+                ]
+            else:
+                self._points = []
+        return self._points
+
+    @points.setter
+    def points(self, val: List[LiDARPoint]) -> None:
+        self._points = val
+        if val:
+            self._pts_array = np.array([[p.x, p.y, p.z, p.intensity] for p in val], dtype=np.float64)
+            self._obs_ids = np.array([p.obstacle_id or "GROUND" for p in val], dtype=object)
+            self._dists = np.array([p.range_m for p in val], dtype=np.float64)
+        else:
+            self._pts_array = np.zeros((0, 4), dtype=np.float64)
+            self._obs_ids = np.zeros(0, dtype=object)
+            self._dists = np.zeros(0, dtype=np.float64)
 
     def to_dict(self) -> Dict[str, Any]:
-        if getattr(self, "_pts_array", None) is not None:
+        if self._pts_array is not None:
             pts_data = self._pts_array.tolist()
+            num_pts = len(self._pts_array)
         else:
             pts_data = [
                 [
@@ -49,11 +110,12 @@ class LiDARScan:
                 ]
                 for p in self.points
             ]
+            num_pts = len(self.points)
         return {
             "timestamp": round(float(self.timestamp), 3),
             "drone_id": self.drone_id,
             "origin": [round(float(c), 2) for c in self.sensor_origin],
-            "num_points": len(self.points),
+            "num_points": num_pts,
             "points": pts_data,
         }
 
@@ -275,26 +337,23 @@ class LiDARScanner:
         self._body_ray_dirs = self._precompute_ray_directions()
 
     def _precompute_ray_directions(self) -> np.ndarray:
-        """Precomputes unit ray direction vectors in sensor frame [N_rays, 3]."""
+        """Precomputes unit ray direction vectors in sensor frame [N_rays, 3] using vectorized broadcasting."""
         num_azimuth = int(round(self.horizontal_fov_deg / self.horizontal_resolution_deg))
-        azimuths = np.linspace(-np.pi, np.pi, num_azimuth, endpoint=False)
+        azimuths = np.linspace(-np.pi, np.pi, num_azimuth, endpoint=False, dtype=np.float64)
         elevations = np.linspace(
             np.radians(self.vertical_fov_min_deg),
             np.radians(self.vertical_fov_max_deg),
-            self.vertical_channels
+            self.vertical_channels,
+            dtype=np.float64,
         )
 
-        dirs = []
-        for el in elevations:
-            cos_el = np.cos(el)
-            sin_el = np.sin(el)
-            for az in azimuths:
-                dx = cos_el * np.cos(az)
-                dy = cos_el * np.sin(az)
-                dz = sin_el
-                dirs.append([dx, dy, dz])
+        el_grid, az_grid = np.meshgrid(elevations, azimuths, indexing="ij")
+        cos_el = np.cos(el_grid)
+        dx = cos_el * np.cos(az_grid)
+        dy = cos_el * np.sin(az_grid)
+        dz = np.sin(el_grid)
 
-        return np.asarray(dirs, dtype=np.float64)
+        return np.column_stack([dx.ravel(), dy.ravel(), dz.ravel()])
 
     def scan(
         self,
@@ -329,11 +388,8 @@ class LiDARScanner:
 
         scan = LiDARScan(timestamp=sim_time, drone_id=drone_id, sensor_origin=pos)
 
-        # Broadphase filter: only test obstacles within max_range + bounding radius
-        active_obstacles: List[ObstacleAABB] = []
-        for obs in obstacles:
-            if obs.distance_to_point(pos) <= self.max_range:
-                active_obstacles.append(obs)
+        # Broadphase filter: utilize persistent BVH acceleration over obstacle fleet
+        active_obstacles: List[ObstacleAABB] = list(obstacles)
 
         closest_dist = np.full(N_rays, self.max_range, dtype=np.float64)
         hit_obs_idx = np.full(N_rays, -1, dtype=np.int32)
@@ -353,14 +409,13 @@ class LiDARScanner:
             safe_dirs = np.where(np.abs(world_ray_dirs) > 1e-7, world_ray_dirs, 1e-7)
             inv_dirs = 1.0 / safe_dirs
             if len(active_obstacles) > 6:
+                obs_key = (id(obstacles), len(obstacles))
                 if (
                     getattr(self, "_cached_bvh", None) is None
-                    or getattr(self, "_cached_obstacles_id", None) != id(active_obstacles)
-                    or getattr(self, "_cached_obstacles_len", 0) != len(active_obstacles)
+                    or getattr(self, "_cached_bvh_key", None) != obs_key
                 ):
                     self._cached_bvh = ObstacleBVH(active_obstacles, max_leaf_size=4)
-                    self._cached_obstacles_id = id(active_obstacles)
-                    self._cached_obstacles_len = len(active_obstacles)
+                    self._cached_bvh_key = obs_key
                 self._cached_bvh.intersect_rays(pos, inv_dirs, closest_dist, hit_obs_idx, is_ground, self.min_range)
             else:
                 for idx, obs in enumerate(active_obstacles):
@@ -420,24 +475,15 @@ class LiDARScanner:
             range_factor = np.maximum(0.2, 1.0 - (dists / self.max_range) * 0.5)
             intensities = np.minimum(1.0, cos_incidence * range_factor)
 
-            active_obs_ids = [str(getattr(obs, "id", "OBS")) for obs in active_obstacles]
-            obs_id_strings = [
-                "GROUND" if ground_hits[i] else active_obs_ids[obs_indices[i]]
-                for i in range(len(valid_indices))
-            ]
+            if len(active_obstacles) > 0:
+                active_obs_ids = np.array([str(getattr(obs, "id", "OBS")) for obs in active_obstacles], dtype=object)
+                obs_id_arr = np.where(ground_hits, "GROUND", active_obs_ids[np.maximum(0, obs_indices)])
+            else:
+                obs_id_arr = np.full(len(valid_indices), "GROUND", dtype=object)
 
-            for i in range(len(valid_indices)):
-                scan.points.append(
-                    LiDARPoint(
-                        x=float(hit_positions[i, 0]),
-                        y=float(hit_positions[i, 1]),
-                        z=float(hit_positions[i, 2]),
-                        range_m=float(dists[i]),
-                        intensity=float(intensities[i]),
-                        obstacle_id=obs_id_strings[i],
-                    )
-                )
             scan._pts_array = np.column_stack([np.round(hit_positions, 2), np.round(intensities, 2)])
+            scan._obs_ids = obs_id_arr
+            scan._dists = dists
 
         return scan
 
@@ -503,6 +549,7 @@ class OccupancyGridMap3D:
         # Sparse dictionary of active voxels keyed by (ix, iy, iz)
         self.voxels: Dict[Tuple[int, int, int], VoxelNode] = {}
         self._occupied_keys: Set[Tuple[int, int, int]] = set()
+        self._free_keys: Set[Tuple[int, int, int]] = set()
         self._previously_occupied_keys: Set[Tuple[int, int, int]] = set()
         self._modified_keys: Set[Tuple[int, int, int]] = set()
         self.total_surveyed_points: int = 0
@@ -539,77 +586,111 @@ class OccupancyGridMap3D:
         """
         Integrates an individual UAV LiDAR scan into the 3D occupancy map and collaborative point cloud.
         Records 3D hits from this drone into the fused spatial structure map.
-        Free space voxels along rays are cleared; hit endpoints are incremented.
+        Free space voxels along rays are cleared; hit endpoints are incremented using vectorized NumPy operations.
         """
         origin = scan.sensor_origin
         if not self.is_in_bounds(origin):
             return
 
-        self.total_surveyed_points += len(scan.points)
-        drone_id = scan.drone_id or "UNKNOWN"
-        if drone_id not in self.drone_points:
-            self.drone_points[drone_id] = deque(maxlen=25000)
-        d_deque = self.drone_points[drone_id]
+        pts_arr = scan._pts_array
+        if pts_arr is None or len(pts_arr) == 0:
+            if scan._points and len(scan._points) > 0:
+                pts_arr = np.array([[p.x, p.y, p.z, p.intensity] for p in scan._points], dtype=np.float64)
+            else:
+                return
 
         inv = self.inv_voxel_size
         vsz = self.voxel_size
         bx, by, bz = self.bounds_x, self.bounds_y, self.bounds_z
 
-        for pt in scan.points:
-            px, py, pz, p_int = pt.x, pt.y, pt.z, pt.intensity
-            if not (bx[0] <= px <= bx[1] and by[0] <= py <= by[1] and bz[0] <= pz <= bz[1]):
-                continue
+        # Vectorized bounds filtering
+        in_bounds_mask = (
+            (pts_arr[:, 0] >= bx[0]) & (pts_arr[:, 0] <= bx[1]) &
+            (pts_arr[:, 1] >= by[0]) & (pts_arr[:, 1] <= by[1]) &
+            (pts_arr[:, 2] >= bz[0]) & (pts_arr[:, 2] <= bz[1])
+        )
+        if not np.any(in_bounds_mask):
+            return
 
-            pt_tuple = (float(px), float(py), float(pz), float(p_int))
+        valid_pts = pts_arr[in_bounds_mask]
+        self.total_surveyed_points += len(valid_pts)
 
-            # 1. Deduplicated Spatial Point Cloud Map for 3D City & Structures
-            # 0.8m spatial bins preserve sharp building facades, rooftops, rubble, and towers
-            sp_key = (int(round(px * 1.25)), int(round(py * 1.25)), int(round(pz * 1.25)))
-            self.spatial_point_map[sp_key] = (float(px), float(py), float(pz), float(p_int), drone_id)
+        drone_id = scan.drone_id or "UNKNOWN"
+        if drone_id not in self.drone_points:
+            self.drone_points[drone_id] = deque(maxlen=25000)
+        d_deque = self.drone_points[drone_id]
 
-            # 2. Accumulated hits for backwards compatibility with test fixtures
+        # 1 & 2. Spatial point cloud map & point history tracking
+        sp_keys = np.round(valid_pts[:, :3] * 1.25).astype(np.int32)
+        _, unique_sp_idx = np.unique(sp_keys, axis=0, return_index=True)
+        for idx in unique_sp_idx:
+            k = (int(sp_keys[idx, 0]), int(sp_keys[idx, 1]), int(sp_keys[idx, 2]))
+            self.spatial_point_map[k] = (float(valid_pts[idx, 0]), float(valid_pts[idx, 1]), float(valid_pts[idx, 2]), float(valid_pts[idx, 3]), drone_id)
+
+        for i in range(len(valid_pts)):
+            pt_tuple = (float(valid_pts[i, 0]), float(valid_pts[i, 1]), float(valid_pts[i, 2]), float(valid_pts[i, 3]))
             self.accumulated_hits.append(pt_tuple)
-
-            # Per-drone point tracking (bound to 25,000 points per drone with O(1) deque)
             d_deque.append(pt_tuple)
 
-            # 3. Update Hit Voxel in 3D Occupancy Grid
-            hit_key = (int(math.floor(px * inv)), int(math.floor(py * inv)), int(math.floor(pz * inv)))
+        # 3. Update Hit Voxels in 3D Occupancy Grid (vectorized grid keys & unique aggregation)
+        voxel_indices = np.floor(valid_pts[:, :3] * inv).astype(np.int32)
+        unique_vox_keys, hit_counts = np.unique(voxel_indices, axis=0, return_counts=True)
+
+        for k_idx in range(len(unique_vox_keys)):
+            ix, iy, iz = int(unique_vox_keys[k_idx, 0]), int(unique_vox_keys[k_idx, 1]), int(unique_vox_keys[k_idx, 2])
+            hit_key = (ix, iy, iz)
+            count = int(hit_counts[k_idx])
             voxel = self.voxels.get(hit_key)
             if voxel is None:
-                c = np.array([(hit_key[0] + 0.5) * vsz, (hit_key[1] + 0.5) * vsz, (hit_key[2] + 0.5) * vsz], dtype=np.float64)
+                c = np.array([(ix + 0.5) * vsz, (iy + 0.5) * vsz, (iz + 0.5) * vsz], dtype=np.float64)
                 voxel = VoxelNode(
-                    ix=hit_key[0],
-                    iy=hit_key[1],
-                    iz=hit_key[2],
+                    ix=ix,
+                    iy=iy,
+                    iz=iz,
                     center=c,
                     log_odds=0.0
                 )
                 self.voxels[hit_key] = voxel
-            voxel.log_odds = min(self.l_max, max(self.l_min, voxel.log_odds + self.l_occ))
+            voxel.log_odds = min(self.l_max, max(self.l_min, voxel.log_odds + count * self.l_occ))
             self._modified_keys.add(hit_key)
             if voxel.log_odds >= 0.619:
                 self._occupied_keys.add(hit_key)
+                self._free_keys.discard(hit_key)
+            elif voxel.log_odds <= -0.619:
+                self._free_keys.add(hit_key)
+                self._occupied_keys.discard(hit_key)
             else:
                 self._occupied_keys.discard(hit_key)
+                self._free_keys.discard(hit_key)
 
         # 4. Fast Free-Space Ray-Marching (sampled along rays for rapid clearance)
-        # Sample every 8th ray to clear air corridors with zero CPU stutter
-        if scan.points:
-            hit_world_pts = np.array([[p.x, p.y, p.z] for p in scan.points[::8]], dtype=np.float64)
+        # Sample every 8th ray from valid_pts to clear air corridors with zero CPU stutter
+        if len(valid_pts) > 0:
+            hit_world_pts = valid_pts[::8, :3]
             if len(hit_world_pts) > 0:
                 ray_vecs = hit_world_pts - origin
                 dists = np.linalg.norm(ray_vecs, axis=1)
                 step_size = vsz * 2.5
-                for idx in range(len(hit_world_pts)):
-                    d = float(dists[idx])
-                    if d <= vsz:
-                        continue
-                    num_steps = min(max_traversal_steps, int(d / step_size))
-                    r_vec = ray_vecs[idx]
-                    for s in range(1, num_steps):
-                        sample_pt = origin + r_vec * (s * step_size / d)
-                        free_key = (int(math.floor(sample_pt[0] * inv)), int(math.floor(sample_pt[1] * inv)), int(math.floor(sample_pt[2] * inv)))
+                valid_ray_mask = dists > vsz
+                if np.any(valid_ray_mask):
+                    active_vecs = ray_vecs[valid_ray_mask]
+                    active_dists = dists[valid_ray_mask]
+
+                    free_keys_set = set()
+                    for idx in range(len(active_vecs)):
+                        d = float(active_dists[idx])
+                        num_steps = min(max_traversal_steps, int(d / step_size))
+                        r_vec = active_vecs[idx]
+                        inv_d = 1.0 / d
+                        for s in range(1, num_steps):
+                            sample_pt = origin + r_vec * (s * step_size * inv_d)
+                            free_keys_set.add((
+                                int(math.floor(sample_pt[0] * inv)),
+                                int(math.floor(sample_pt[1] * inv)),
+                                int(math.floor(sample_pt[2] * inv))
+                            ))
+
+                    for free_key in free_keys_set:
                         free_vox = self.voxels.get(free_key)
                         if free_vox is None:
                             c = np.array([(free_key[0] + 0.5) * vsz, (free_key[1] + 0.5) * vsz, (free_key[2] + 0.5) * vsz], dtype=np.float64)
@@ -623,8 +704,15 @@ class OccupancyGridMap3D:
                             self.voxels[free_key] = free_vox
                         free_vox.log_odds = min(self.l_max, max(self.l_min, free_vox.log_odds + self.l_free))
                         self._modified_keys.add(free_key)
-                        if free_vox.log_odds < 0.619:
+                        if free_vox.log_odds <= -0.619:
+                            self._free_keys.add(free_key)
                             self._occupied_keys.discard(free_key)
+                        elif free_vox.log_odds >= 0.619:
+                            self._occupied_keys.add(free_key)
+                            self._free_keys.discard(free_key)
+                        else:
+                            self._occupied_keys.discard(free_key)
+                            self._free_keys.discard(free_key)
 
     def get_occupied_voxels(self, max_count: int = 1500) -> List[Dict[str, Any]]:
         """
@@ -686,13 +774,10 @@ class OccupancyGridMap3D:
         }
 
     def compute_metrics(self) -> Dict[str, float]:
-        """Calculates quantitative SLAM mapping metrics for analytics and reporting."""
+        """Calculates quantitative SLAM mapping metrics for analytics and reporting in O(1) time."""
         total_cells = len(self.voxels)
         occupied_count = len(self._occupied_keys)
-        free_count = 0
-        for v in self.voxels.values():
-            if v.log_odds <= -0.619:
-                free_count += 1
+        free_count = len(self._free_keys)
 
         voxel_vol = self.voxel_size ** 3
         mapped_volume_m3 = total_cells * voxel_vol
@@ -974,11 +1059,13 @@ class BayesianThermalGrid:
     def seed_priors(self, poi_positions: Sequence[Sequence[float]], elevated_p: float = 0.25) -> None:
         """Seed higher prior probabilities in the vicinity of designated disaster sites."""
         self._dirty = True
-        for pos in poi_positions:
-            px, py = float(pos[0]), float(pos[1])
-            dists = np.hypot(self.cell_xs - px, self.cell_ys - py)
-            mask = dists <= 45.0
-            self.grid[mask] = np.maximum(self.grid[mask], elevated_p)
+        if not poi_positions:
+            return
+        poi_arr = np.asarray(poi_positions, dtype=np.float64)
+        dx = self.cell_xs[None, :, :] - poi_arr[:, 0, None, None]
+        dy = self.cell_ys[None, :, :] - poi_arr[:, 1, None, None]
+        mask = np.any((dx * dx + dy * dy) <= (45.0 ** 2), axis=0)
+        self.grid[mask] = np.maximum(self.grid[mask], elevated_p)
 
     def update_flir_scan(
         self,
@@ -991,21 +1078,41 @@ class BayesianThermalGrid:
         P(S | D) = P(D | S) * P(S) / [P(D | S)*P(S) + P(D | ~S)*(1 - P(S))]
         """
         dx, dy = float(drone_pos[0]), float(drone_pos[1])
-        dists = np.hypot(self.cell_xs - dx, self.cell_ys - dy)
-        in_fov = dists <= fov_radius
+        # Fast bounding box culling: drone FOV only interacts with a localized slice
+        ix_min = max(0, int(math.floor((dx - fov_radius - self.bounds_x[0]) / self.cell_size)))
+        ix_max = min(self.nx, int(math.ceil((dx + fov_radius - self.bounds_x[0]) / self.cell_size)) + 1)
+        iy_min = max(0, int(math.floor((dy - fov_radius - self.bounds_y[0]) / self.cell_size)))
+        iy_max = min(self.ny, int(math.ceil((dy + fov_radius - self.bounds_y[0]) / self.cell_size)) + 1)
+
+        if ix_min >= ix_max or iy_min >= iy_max:
+            return
+
+        sub_xs = self.cell_xs[ix_min:ix_max, iy_min:iy_max]
+        sub_ys = self.cell_ys[ix_min:ix_max, iy_min:iy_max]
+        sub_dists_sq = (sub_xs - dx) ** 2 + (sub_ys - dy) ** 2
+        in_fov = sub_dists_sq <= (fov_radius ** 2)
 
         if not np.any(in_fov):
             return
 
         self._dirty = True
-        self.visited[in_fov] = True
+        self.visited[ix_min:ix_max, iy_min:iy_max][in_fov] = True
 
         # Check which cells within FOV contain a survivor signature
-        surv_near_cell = np.zeros((self.nx, self.ny), dtype=bool)
+        surv_near_cell = np.zeros(sub_xs.shape, dtype=bool)
         if survivor_positions:
-            for s_pos in survivor_positions:
-                s_dist = np.hypot(self.cell_xs - float(s_pos[0]), self.cell_ys - float(s_pos[1]))
-                surv_near_cell |= (s_dist <= (self.cell_size * 0.85))
+            s_arr = np.asarray(survivor_positions, dtype=np.float64)
+            s_mask = (
+                (s_arr[:, 0] >= dx - fov_radius - self.cell_size) &
+                (s_arr[:, 0] <= dx + fov_radius + self.cell_size) &
+                (s_arr[:, 1] >= dy - fov_radius - self.cell_size) &
+                (s_arr[:, 1] <= dy + fov_radius + self.cell_size)
+            )
+            if np.any(s_mask):
+                active_s = s_arr[s_mask]
+                sdx = sub_xs[None, :, :] - active_s[:, 0, None, None]
+                sdy = sub_ys[None, :, :] - active_s[:, 1, None, None]
+                surv_near_cell = np.any((sdx * sdx + sdy * sdy) <= ((self.cell_size * 0.85) ** 2), axis=0)
 
         # Cells with a detected heat signature:
         # P(D|S) = 0.92, P(D|~S) = 0.05
@@ -1013,10 +1120,11 @@ class BayesianThermalGrid:
         p_d_given_not_s = 0.05
 
         detect_mask = in_fov & surv_near_cell
+        sub_grid = self.grid[ix_min:ix_max, iy_min:iy_max]
         if np.any(detect_mask):
-            p_prior = self.grid[detect_mask]
+            p_prior = sub_grid[detect_mask]
             p_evidence = p_d_given_s * p_prior + p_d_given_not_s * (1.0 - p_prior)
-            self.grid[detect_mask] = np.clip((p_d_given_s * p_prior) / np.maximum(p_evidence, 1e-6), 0.001, 0.999)
+            sub_grid[detect_mask] = np.clip((p_d_given_s * p_prior) / np.maximum(p_evidence, 1e-6), 0.001, 0.999)
 
         # Cells within FOV with NO heat signature:
         # P(~D|S) = 0.08, P(~D|~S) = 0.95
@@ -1025,9 +1133,9 @@ class BayesianThermalGrid:
 
         no_detect_mask = in_fov & (~surv_near_cell)
         if np.any(no_detect_mask):
-            p_prior = self.grid[no_detect_mask]
+            p_prior = sub_grid[no_detect_mask]
             p_evidence = p_not_d_given_s * p_prior + p_not_d_given_not_s * (1.0 - p_prior)
-            self.grid[no_detect_mask] = np.clip((p_not_d_given_s * p_prior) / np.maximum(p_evidence, 1e-6), 0.001, 0.999)
+            sub_grid[no_detect_mask] = np.clip((p_not_d_given_s * p_prior) / np.maximum(p_evidence, 1e-6), 0.001, 0.999)
 
     def get_highest_entropy_target(self, current_pos: Sequence[float]) -> Optional[np.ndarray]:
         """
@@ -1065,6 +1173,11 @@ class BayesianThermalGrid:
             h_xs = self.cell_xs[hot_mask]
             h_ys = self.cell_ys[hot_mask]
             h_ps = self.grid[hot_mask]
+            if len(h_ps) > 150:
+                top_idx = np.argsort(h_ps)[-150:]
+                h_xs = h_xs[top_idx]
+                h_ys = h_ys[top_idx]
+                h_ps = h_ps[top_idx]
             for x, y, p in zip(h_xs, h_ys, h_ps):
                 hotspots.append({
                     "x": round(float(x), 1),
