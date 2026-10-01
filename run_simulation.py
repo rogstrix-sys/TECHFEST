@@ -196,7 +196,7 @@ def main() -> None:
             print(f"[!] Port {args.port} is in use by another process.")
             print(f"[+] Automatically selecting available port: {active_port}")
 
-        url = f"http://localhost:{active_port}"
+        url = f"http://127.0.0.1:{active_port}"
         print("=" * 72)
         print("  UAV-X: 3D RESILIENT MULTI-HOP AERIAL SWARM COCKPIT")
         print("=" * 72)

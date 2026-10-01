@@ -74,3 +74,6 @@ desktop.ini
 # Media & Demonstration Video Outputs
 *.mp4
 scripts/video_preview/
+
+# Local scratch scripts
+scratch/
