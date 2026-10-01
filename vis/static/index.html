@@ -80,40 +80,40 @@
             </div>
         </div>
         <!-- ROW 2: Controls (always fully visible) -->
-        <div class="hud-header-row2">
-            <button id="btn-investor" class="btn btn-investor" title="Launch 4-Phase Executive Swarm Demonstration">&#9733; DEMO</button>
-            <button id="btn-dispatch" class="btn btn-outline text-cyan" title="Click anywhere on the 3D City map (or Shift+Click) to dispatch selected UAV to custom waypoint">🎯 DISPATCH</button>
-            <button id="btn-night" class="btn btn-outline text-neon-yellow" title="Toggle Tactical Night Operations & Searchlights">NIGHT</button>
-            <button id="btn-chaos" class="btn btn-outline btn-chaos" title="Dynamic Fault Injection: Swarm Self-Healing Test">⚡ CHAOS</button>
-            <button id="btn-collapse" class="btn btn-outline text-neon-yellow" title="Dynamic Obstacle Collapse: Mid-mission structural failure & emergency reroute">💥 COLLAPSE</button>
-            <button id="btn-byzantine" class="btn btn-outline text-purple" title="Byzantine Fault Tolerant (BFT) Swarm Consensus Test: Inject adversarial bid">🛡️ BFT TEST</button>
-            <button id="btn-heatmap" class="btn btn-outline text-cyan" title="Toggle Predictive Survivor Thermal Probability Heatmap Overlay">🔥 HEATMAP</button>
-            <button id="btn-toggle-voxels" class="btn btn-outline text-dim" title="Toggle 3D OctoMap Occupancy Voxels (Holographic Scan Cubes)">🧊 VOXELS: OFF</button>
-            <button id="btn-export-ply" class="btn btn-outline text-purple" title="1-Click Net 3D Point Cloud Export (.PLY fused from all UAV LiDAR sensors for CloudCompare/Blender)">PLY</button>
-            <select id="select-formation" class="select-control text-neon-yellow" title="Swarm Tactical Formations" style="border-color: rgba(255, 214, 0, 0.4); font-weight: 700; font-size: 11px;">
+        <div class="hud-header-row2" role="toolbar" aria-label="Tactical Cockpit Controls">
+            <button id="btn-investor" class="btn btn-investor" title="Launch 4-Phase Executive Swarm Demonstration" aria-label="Launch Executive Swarm Demo">&#9733; DEMO</button>
+            <button id="btn-dispatch" class="btn btn-outline text-cyan" title="Click anywhere on the 3D City map (or Shift+Click) to dispatch selected UAV to custom waypoint" aria-label="Interactive Click to Dispatch Waypoint">🎯 DISPATCH</button>
+            <button id="btn-night" class="btn btn-outline text-neon-yellow" title="Toggle Tactical Night Operations & Searchlights" aria-label="Toggle Night Operations">NIGHT</button>
+            <button id="btn-chaos" class="btn btn-outline btn-chaos" title="Dynamic Fault Injection: Swarm Self-Healing Test" aria-label="Dynamic Fault Injection Chaos Test">⚡ CHAOS</button>
+            <button id="btn-collapse" class="btn btn-outline text-neon-yellow" title="Dynamic Obstacle Collapse: Mid-mission structural failure & emergency reroute" aria-label="Dynamic Obstacle Collapse Test">💥 COLLAPSE</button>
+            <button id="btn-byzantine" class="btn btn-outline text-purple" title="Byzantine Fault Tolerant (BFT) Swarm Consensus Test: Inject adversarial bid" aria-label="Byzantine Fault Tolerant Consensus Test">🛡️ BFT TEST</button>
+            <button id="btn-heatmap" class="btn btn-outline text-cyan" title="Toggle Predictive Survivor Thermal Probability Heatmap Overlay" aria-label="Toggle Survivor Thermal Heatmap">🔥 HEATMAP</button>
+            <button id="btn-toggle-voxels" class="btn btn-outline text-dim" title="Toggle 3D OctoMap Occupancy Voxels (Holographic Scan Cubes)" aria-label="Toggle 3D Occupancy Voxels">🧊 VOXELS: OFF</button>
+            <button id="btn-export-ply" class="btn btn-outline text-purple" title="1-Click Net 3D Point Cloud Export (.PLY fused from all UAV LiDAR sensors for CloudCompare/Blender)" aria-label="Export Net 3D Point Cloud PLY">PLY</button>
+            <select id="select-formation" class="select-control text-neon-yellow" title="Swarm Tactical Formations" aria-label="Select Swarm Tactical Formation" style="border-color: rgba(255, 214, 0, 0.4); font-weight: 700; font-size: 11px;">
                 <option value="AUTONOMOUS">FORMATION: AUTO</option>
                 <option value="V_FORMATION">FORMATION: V-SHAPE</option>
                 <option value="LINE_SWEEP">FORMATION: LINE SWEEP</option>
                 <option value="PERIMETER_ORBIT">FORMATION: PERIMETER ORBIT</option>
             </select>
-            <button id="btn-manual" class="btn btn-outline text-cyan" title="Manual FPV Controller Mode (WASD / Gamepad)">FPV: AUTO</button>
-            <button id="btn-toggle-hud" class="btn btn-outline text-dim" title="Toggle Military HUD (H)">HUD: OFF</button>
-            <button id="btn-toggle-comms" class="btn btn-outline text-cyan" title="Toggle Tactical Radio Comms Feed">COMMS</button>
-            <button id="btn-export-debrief" class="btn btn-outline text-neon-green" title="Export Executive Mission Debrief Report (JSON &amp; Summary)">DEBRIEF</button>
-            <button id="btn-toggle-telemetry" class="btn btn-outline text-cyan" title="Toggle Drone Telemetry">TELEM</button>
-            <button id="btn-snapshot" class="btn btn-outline text-neon-green" title="Capture Snapshot">&#128247; SNAP</button>
-            <button id="btn-toggle-analytics" class="btn btn-outline text-purple" title="Toggle Analytics Dashboard">CHARTS</button>
-            <div class="view-mode-group">
-                <button class="btn btn-sm btn-mode" data-mode="split">SPLIT</button>
-                <button class="btn btn-sm btn-mode active" data-mode="theater">THEATER</button>
-                <button class="btn btn-sm btn-mode" data-mode="slam">SLAM</button>
-                <button class="btn btn-sm btn-mode" data-mode="pip">PiP</button>
+            <button id="btn-manual" class="btn btn-outline text-cyan" title="Manual FPV Controller Mode (WASD / Gamepad)" aria-label="Toggle Manual FPV Mode">FPV: AUTO</button>
+            <button id="btn-toggle-hud" class="btn btn-outline text-dim" title="Toggle Military HUD (H)" aria-label="Toggle Military HUD Overlay">HUD: OFF</button>
+            <button id="btn-toggle-comms" class="btn btn-outline text-cyan" title="Toggle Tactical Radio Comms Feed" aria-label="Toggle Tactical Radio Comms Feed" aria-expanded="false" aria-controls="tactical-comms-panel">COMMS</button>
+            <button id="btn-export-debrief" class="btn btn-outline text-neon-green" title="Export Executive Mission Debrief Report (JSON &amp; Summary)" aria-label="Open Executive Mission Debrief" aria-expanded="false" aria-controls="debrief-modal">DEBRIEF</button>
+            <button id="btn-toggle-telemetry" class="btn btn-outline text-cyan" title="Toggle Drone Telemetry" aria-label="Toggle Swarm Fleet Telemetry" aria-expanded="true" aria-controls="fleet-list">TELEM</button>
+            <button id="btn-snapshot" class="btn btn-outline text-neon-green" title="Capture Snapshot" aria-label="Capture High Resolution Snapshot">&#128247; SNAP</button>
+            <button id="btn-toggle-analytics" class="btn btn-outline text-purple" title="Toggle Analytics Dashboard" aria-label="Toggle Telemetry Analytics Dashboard" aria-expanded="false" aria-controls="analytics-drawer">CHARTS</button>
+            <div class="view-mode-group" role="group" aria-label="Viewport View Modes">
+                <button class="btn btn-sm btn-mode" data-mode="split" aria-label="Split View: Theater and SLAM">SPLIT</button>
+                <button class="btn btn-sm btn-mode active" data-mode="theater" aria-label="Theater View: 3D City Diorama">THEATER</button>
+                <button class="btn btn-sm btn-mode" data-mode="slam" aria-label="SLAM View: Autonomous LiDAR Perception">SLAM</button>
+                <button class="btn btn-sm btn-mode" data-mode="pip" aria-label="Picture-in-Picture View">PiP</button>
             </div>
-            <button id="btn-pause" class="btn btn-outline" title="Pause / Resume (Space)">PAUSE</button>
-            <button id="btn-reset" class="btn btn-outline" title="Reset Simulation">RESET</button>
-            <button id="btn-retreat" class="btn btn-outline text-neon-yellow" title="Autonomous Fleet RTL">RETREAT (RTL)</button>
-            <button id="btn-export-csv" class="btn btn-outline text-neon-yellow" title="Export Telemetry CSV">CSV</button>
-            <select id="select-speed" class="select-control text-neon-yellow" title="Simulation Speed Multiplier" style="font-weight: 700; font-size: 11px;">
+            <button id="btn-pause" class="btn btn-outline" title="Pause / Resume (Space)" aria-label="Pause or Resume Simulation">PAUSE</button>
+            <button id="btn-reset" class="btn btn-outline" title="Reset Simulation" aria-label="Reset Simulation">RESET</button>
+            <button id="btn-retreat" class="btn btn-outline text-neon-yellow" title="Autonomous Fleet RTL" aria-label="Trigger Fleet Autonomous Retreat">RETREAT (RTL)</button>
+            <button id="btn-export-csv" class="btn btn-outline text-neon-yellow" title="Export Telemetry CSV" aria-label="Export Telemetry CSV">CSV</button>
+            <select id="select-speed" class="select-control text-neon-yellow" title="Simulation Speed Multiplier" aria-label="Select Simulation Speed Multiplier" style="font-weight: 700; font-size: 11px;">
                 <option value="1.0">SPEED: 1.0x</option>
                 <option value="2.0">SPEED: 2.0x</option>
                 <option value="5.0">SPEED: 5.0x</option>
@@ -168,10 +168,11 @@
     </div>
 
     <!-- Click-to-Inspect Telemetry Card with PFD Flight Instrument -->
-    <div id="drone-inspect-panel" class="glass-panel inspect-panel hidden">
+    <!-- Click-to-Inspect Telemetry Card with PFD Flight Instrument -->
+    <div id="drone-inspect-panel" class="glass-panel inspect-panel hidden" role="region" aria-label="Drone Telemetry Inspection Panel">
         <div class="panel-header">
             <h3 id="inspect-id">UAV-1 TELEMETRY</h3>
-            <button id="btn-close-inspect" class="btn-close">&times;</button>
+            <button id="btn-close-inspect" class="btn-close" aria-label="Close Drone Inspection Panel">&times;</button>
         </div>
         <!-- Primary Flight Display (PFD) Artificial Horizon -->
         <div class="pfd-wrapper">
@@ -195,16 +196,16 @@
     </div>
 
     <!-- Tactical Visual Comms Chatter Floating Banner (No Audio Voice) -->
-    <div id="hud-comms-ticker" class="hud-comms-ticker hidden">
+    <div id="hud-comms-ticker" class="hud-comms-ticker hidden" role="status" aria-live="polite">
         <span class="ticker-badge" id="ticker-badge">[GCS COMMS]</span>
         <span class="ticker-text" id="ticker-msg">Tactical radio network synchronized.</span>
     </div>
 
     <!-- Tactical Radio Comms Feed Drawer -->
-    <div id="tactical-comms-panel" class="tactical-comms-panel glass-panel hidden">
+    <div id="tactical-comms-panel" class="tactical-comms-panel glass-panel hidden" role="region" aria-label="Tactical Radio Comms Feed">
         <div class="panel-header">
             <h3><span class="pulse-dot green"></span> TACTICAL RADIO COMMS • LIVE FEED</h3>
-            <button id="btn-close-comms" class="btn-close">&times;</button>
+            <button id="btn-close-comms" class="btn-close" aria-label="Close Tactical Radio Comms Feed">&times;</button>
         </div>
         <div id="comms-log-list" class="comms-log-list">
             <!-- Dynamically populated comms events -->
@@ -212,29 +213,29 @@
     </div>
 
     <!-- Executive Mission Debrief Modal -->
-    <div id="debrief-modal" class="debrief-modal glass-panel hidden">
+    <div id="debrief-modal" class="debrief-modal glass-panel hidden" role="dialog" aria-modal="true" aria-labelledby="debrief-title">
         <div class="modal-header">
-            <h3>★ UAV-X EXECUTIVE MISSION DEBRIEF REPORT ★</h3>
-            <button id="btn-close-debrief" class="btn-close">&times;</button>
+            <h3 id="debrief-title">★ UAV-X EXECUTIVE MISSION DEBRIEF REPORT ★</h3>
+            <button id="btn-close-debrief" class="btn-close" aria-label="Close Mission Debrief">&times;</button>
         </div>
         <div class="modal-body" id="debrief-modal-body">
             <!-- Dynamically populated debrief report -->
         </div>
         <div class="modal-footer">
-            <button id="btn-download-debrief-json" class="btn btn-outline text-neon-green">DOWNLOAD JSON</button>
-            <button id="btn-download-flight-csv" class="btn btn-outline text-neon-yellow">DOWNLOAD FLIGHT RECORDER CSV</button>
-            <button id="btn-dismiss-debrief" class="btn btn-outline">CLOSE</button>
+            <button id="btn-download-debrief-json" class="btn btn-outline text-neon-green" aria-label="Download Debrief Report as JSON">DOWNLOAD JSON</button>
+            <button id="btn-download-flight-csv" class="btn btn-outline text-neon-yellow" aria-label="Download Flight Recorder Telemetry CSV">DOWNLOAD FLIGHT RECORDER CSV</button>
+            <button id="btn-dismiss-debrief" class="btn btn-outline" aria-label="Close Debrief Dialog">CLOSE</button>
         </div>
     </div>
 
     <!-- Scientific Analytical Graphing Dashboard Drawer -->
-    <div id="analytics-drawer" class="analytics-drawer glass-panel hidden">
+    <div id="analytics-drawer" class="analytics-drawer glass-panel hidden" role="region" aria-label="Scientific Telemetry Analytics Dashboard">
         <div class="panel-header">
             <div class="analytics-title">
                 <span class="pulse-dot purple"></span>
                 <h3>SCIENTIFIC TELEMETRY & MULTI-HOP ANALYTICS DASHBOARD</h3>
             </div>
-            <button id="btn-close-analytics" class="btn-close">&times;</button>
+            <button id="btn-close-analytics" class="btn-close" aria-label="Close Analytics Dashboard">&times;</button>
         </div>
         <div class="analytics-grid">
             <!-- Chart 1: EKF Convergence -->
@@ -317,13 +318,13 @@
     <footer class="hud-bottom glass-panel">
         <div class="panel-header-inline">
             <h3>DISASTER SURVEY SITES &bull; <span class="text-neon-yellow" style="font-size: 10px; font-weight: normal;">PRIORITY QUEUE</span></h3>
-            <div class="cam-buttons">
-                <button class="btn btn-sm btn-cam active" data-cam="orbit">ORBIT</button>
-                <button class="btn btn-sm btn-cam" data-cam="top">TACTICAL TOP</button>
-                <button class="btn btn-sm btn-cam" data-cam="fpv">FPV CHASE</button>
-                <button class="btn btn-sm btn-cam" data-cam="gcs">GCS MAST</button>
-                <button class="btn btn-sm btn-cam" data-cam="flir">FLIR THERMAL</button>
-                <button class="btn btn-sm btn-drag-mode" id="btn-toggle-pan" title="Toggle Drag/Pan: Click to switch Left-Click between Move Map (Drag) and Rotate. (You can also use Right-Click Drag, WASD keys, or Double-Click anywhere).">&#9995; DRAG: OFF</button>
+            <div class="cam-buttons" role="group" aria-label="Camera Perspectives">
+                <button class="btn btn-sm btn-cam active" data-cam="orbit" aria-label="Orbit Camera View">ORBIT</button>
+                <button class="btn btn-sm btn-cam" data-cam="top" aria-label="Tactical Top-Down Camera View">TACTICAL TOP</button>
+                <button class="btn btn-sm btn-cam" data-cam="fpv" aria-label="FPV Chase Drone Camera View">FPV CHASE</button>
+                <button class="btn btn-sm btn-cam" data-cam="gcs" aria-label="GCS Mast Radar Camera View">GCS MAST</button>
+                <button class="btn btn-sm btn-cam" data-cam="flir" aria-label="FLIR Thermal Infrared Camera View">FLIR THERMAL</button>
+                <button class="btn btn-sm btn-drag-mode" id="btn-toggle-pan" title="Toggle Drag/Pan: Click to switch Left-Click between Move Map (Drag) and Rotate. (You can also use Right-Click Drag, WASD keys, or Double-Click anywhere)." aria-label="Toggle Left-Click Drag Map Mode">&#9995; DRAG: OFF</button>
             </div>
         </div>
         <div id="poi-list" class="poi-grid">

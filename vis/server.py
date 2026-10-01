@@ -477,24 +477,24 @@ def create_default_simulation() -> SwarmSimulationCore:
     # 3. Add heterogeneous fleet of 16 UAVs spawning on their designated launch pads on the GCS Apron
     fleet_init = [
         # Heavy Disaster Surveyors (Front row along tactical apron y = -575)
-        ("UAV_1", DroneRole.SURVEY, [-70.0, -575.0, 0.45]),
-        ("UAV_2", DroneRole.SURVEY, [-50.0, -575.0, 0.45]),
-        ("UAV_3", DroneRole.SURVEY, [-30.0, -575.0, 0.45]),
-        ("UAV_4", DroneRole.SURVEY, [-10.0, -575.0, 0.45]),
-        ("UAV_5", DroneRole.SURVEY, [10.0, -575.0, 0.45]),
-        ("UAV_6", DroneRole.SURVEY, [30.0, -575.0, 0.45]),
-        ("UAV_7", DroneRole.SURVEY, [50.0, -575.0, 0.45]),
-        ("UAV_8", DroneRole.SURVEY, [70.0, -575.0, 0.45]),
+        ("UAV_1", DroneRole.SURVEY, [-70.0, -575.0, 0.75]),
+        ("UAV_2", DroneRole.SURVEY, [-50.0, -575.0, 0.75]),
+        ("UAV_3", DroneRole.SURVEY, [-30.0, -575.0, 0.75]),
+        ("UAV_4", DroneRole.SURVEY, [-10.0, -575.0, 0.75]),
+        ("UAV_5", DroneRole.SURVEY, [10.0, -575.0, 0.75]),
+        ("UAV_6", DroneRole.SURVEY, [30.0, -575.0, 0.75]),
+        ("UAV_7", DroneRole.SURVEY, [50.0, -575.0, 0.75]),
+        ("UAV_8", DroneRole.SURVEY, [70.0, -575.0, 0.75]),
         # Elevated High-Altitude Multi-Hop Relays (Relay pad row y = -566)
-        ("RELAY_1", DroneRole.RELAY, [-45.0, -566.0, 0.45]),
-        ("RELAY_2", DroneRole.RELAY, [-15.0, -566.0, 0.45]),
-        ("RELAY_3", DroneRole.RELAY, [15.0, -566.0, 0.45]),
-        ("RELAY_4", DroneRole.RELAY, [45.0, -566.0, 0.45]),
+        ("RELAY_1", DroneRole.RELAY, [-45.0, -566.0, 0.75]),
+        ("RELAY_2", DroneRole.RELAY, [-15.0, -566.0, 0.75]),
+        ("RELAY_3", DroneRole.RELAY, [15.0, -566.0, 0.75]),
+        ("RELAY_4", DroneRole.RELAY, [45.0, -566.0, 0.75]),
         # Rapid Reconnaissance Scouts (Scout pad row y = -583)
-        ("SCOUT_1", DroneRole.SURVEY, [-45.0, -583.0, 0.45]),
-        ("SCOUT_2", DroneRole.SURVEY, [-15.0, -583.0, 0.45]),
-        ("SCOUT_3", DroneRole.SURVEY, [15.0, -583.0, 0.45]),
-        ("SCOUT_4", DroneRole.SURVEY, [45.0, -583.0, 0.45]),
+        ("SCOUT_1", DroneRole.SURVEY, [-45.0, -583.0, 0.75]),
+        ("SCOUT_2", DroneRole.SURVEY, [-15.0, -583.0, 0.75]),
+        ("SCOUT_3", DroneRole.SURVEY, [15.0, -583.0, 0.75]),
+        ("SCOUT_4", DroneRole.SURVEY, [45.0, -583.0, 0.75]),
     ]
     for d_id, role, pos in fleet_init:
         drone = Drone(d_id, role=role, initial_pos=np.array(pos, dtype=np.float64))
@@ -556,6 +556,7 @@ class SimulationServer:
         self._sent_voxels: Set[Tuple[int, int, int]] = set()
         self._cached_obs_list: Optional[List[Dict[str, Any]]] = None
         self._obs_dirty: bool = True
+        self._completion_dwell_time: float = 0.0
 
     def reset(self, scenario: Optional[str] = None) -> None:
         """Reset simulation and SLAM occupancy grid to initial disaster scenario."""
@@ -574,6 +575,7 @@ class SimulationServer:
         self._cached_occupied_voxels = None
         self._cached_mapping_metrics = None
         self._sent_voxels = set()
+        self._completion_dwell_time = 0.0
 
     async def broadcast_loop(self) -> None:
         """Asynchronous simulation execution, LiDAR perception, and telemetry broadcast loop."""
@@ -594,6 +596,24 @@ class SimulationServer:
                     self.step_count += 1
                     # Step simulation
                     snapshot = self.sim.step(dt=step_dt)
+
+                    # Mission Re-Cycle Failsafe: When mission budget completes or all drones have returned and landed,
+                    # wait a graceful 10-second debrief period and then seamlessly cycle the simulation so the live cockpit never stays frozen.
+                    is_all_done = (snapshot.sim_time >= 1200.0) or (
+                        snapshot.sim_time > 60.0 and all(
+                            d.flight_mode in (FlightMode.LANDED, FlightMode.COMPLETED)
+                            for d in self.sim.drones.values()
+                        )
+                    )
+                    if is_all_done:
+                        self._completion_dwell_time += step_dt
+                        if self._completion_dwell_time >= 10.0:
+                            self.reset()
+                            self._completion_dwell_time = 0.0
+                            continue
+                    else:
+                        self._completion_dwell_time = 0.0
+
                     data = snapshot.to_dict()
                     data["scenario"] = self.scenario
                     data["sim_speed"] = self.sim_speed

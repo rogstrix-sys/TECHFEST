@@ -227,7 +227,7 @@ function initTheaterViewport() {
     const skyTex = new THREE.CanvasTexture(skyCanvas);
     theaterSkyTex = skyTex;
     sceneTheater.background = skyTex;
-    sceneTheater.fog = new THREE.FogExp2(0x95c7f2, 0.00018);
+    sceneTheater.fog = new THREE.Fog(0x7fb2e2, 3500, 12000);
 
     // 2. Camera (3/4 Elevated Isometric Perspective matching reference photograph)
     cameraTheater = new THREE.PerspectiveCamera(46, width / height, 1, 12000);
@@ -270,14 +270,14 @@ function initTheaterViewport() {
         });
     }
 
-    // 5. Lighting (Warm Crisp Sun & Sky Ambient Fill)
-    const hemiLight = new THREE.HemisphereLight(0xe4f2ff, 0x2e421c, 0.85);
+    // 5. Lighting (Warm Crisp Sun & High-Contrast Directional Shadows)
+    const hemiLight = new THREE.HemisphereLight(0xd6eaff, 0x1f2e14, 0.42);
     hemiLight.position.set(0, 0, 300);
     hemiLightTheater = hemiLight;
     ambientLightTheater = hemiLight;
     sceneTheater.add(hemiLight);
 
-    const sunLight = new THREE.DirectionalLight(0xfffaee, 1.35);
+    const sunLight = new THREE.DirectionalLight(0xfff6e5, 1.75);
     sunLight.position.set(240, -190, 320); // Front-right sun casting crisp soft shadows
     sunLight.castShadow = true;
     sunLight.shadow.mapSize.width = 1024;
@@ -293,7 +293,7 @@ function initTheaterViewport() {
     dirLightTheater = sunLight;
     sceneTheater.add(sunLight);
 
-    const fillLight = new THREE.DirectionalLight(0x9eccff, 0.35);
+    const fillLight = new THREE.DirectionalLight(0x7fb5ff, 0.18);
     fillLight.position.set(-220, 210, 160);
     fillLightTheater = fillLight;
     sceneTheater.add(fillLight);
@@ -305,12 +305,43 @@ function initTheaterViewport() {
         createTheaterTerrain();
     }
 
-    // 7. Base ground plane outside the diorama tray (Expansive natural parkland landscape fading into horizon haze)
-    const outerGroundGeo = new THREE.PlaneGeometry(6000, 6000);
+    function createGrassGroundTexture() {
+        const c = document.createElement("canvas");
+        c.width = 1024;
+        c.height = 1024;
+        const ctx = c.getContext("2d");
+        
+        // Deep dirt brown base
+        ctx.fillStyle = "#2a1e12";
+        ctx.fillRect(0, 0, 1024, 1024);
+        
+        // Draw thousands of grass blades
+        for (let i = 0; i < 90000; i++) {
+            const x = Math.random() * 1024;
+            const y = Math.random() * 1024;
+            const h = 8 + Math.random() * 20;
+            // Harmonious parrot green tones
+            ctx.fillStyle = `hsl(${85 + Math.random() * 25}, ${60 + Math.random() * 30}%, ${25 + Math.random() * 25}%)`;
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate((Math.random() - 0.5) * 0.7);
+            ctx.fillRect(0, 0, 3, -h);
+            ctx.restore();
+        }
+        
+        const tex = new THREE.CanvasTexture(c);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(40, 40); // Tile it densely across 3200x3200
+        return tex;
+    }
+
+    // 7. Base ground plane outside the diorama tray (Lush Parrot-Green Forest Meadow)
+    const outerGroundGeo = new THREE.PlaneGeometry(3200, 3200);
     const outerGroundMat = new THREE.MeshStandardMaterial({
-        color: 0x1a4016, // Rich botanical green complementary to diorama parkland
+        map: createGrassGroundTexture(),
         roughness: 0.95,
-        metalness: 0.02,
+        metalness: 0.0,
     });
     const outerGround = new THREE.Mesh(outerGroundGeo, outerGroundMat);
     outerGround.position.set(0, 0, -10.5);
@@ -320,8 +351,11 @@ function initTheaterViewport() {
     outerGroundMesh = outerGround;
     sceneTheater.add(outerGround);
 
-    // 7. GCS Base Station Compound — positioned 75m south of 1000m black boundary at (0, -575, 0.1)
-    createGCSBase(0, -575, 0.1);
+    // 7. GCS Base Station Compound — positioned 75m south of 1000m black boundary at (0, -575, 0.2)
+    createGCSBase(0, -575, 0.2);
+
+    // 7b. Dense Parrot-Green Forest in surrounding outside terrain (Big and Small Trees + Plants)
+    createDenseParrotForest(sceneTheater);
 
     // 8. Particle Systems
     initParticleSystems();
@@ -900,6 +934,220 @@ function createGCSBase(x, y, z) {
     group.add(dome);
 
     sceneTheater.add(group);
+}
+
+// ------------------------------------------------------------------------
+// Dense Parrot-Green Forest Surrounding the Outside World
+// Features big and small canopy trees, pine trees, and ground shrubs with
+// natural harmonious parrot-green tones and zero performance overhead.
+// ------------------------------------------------------------------------
+function createDenseParrotForest(scene) {
+    const forestGroup = new THREE.Group();
+    forestGroup.name = "DenseParrotForest";
+
+    // 1. Materials with harmonious, natural-contrast parrot-green tones
+    const parrotFoliageMat = new THREE.MeshStandardMaterial({
+        color: 0x6db822, // Natural parrot green
+        roughness: 0.80,
+        metalness: 0.04,
+        flatShading: true,
+    });
+
+    const trunkMat = new THREE.MeshStandardMaterial({
+        color: 0x4d3824, // Soft natural bark brown
+        roughness: 0.90,
+        metalness: 0.02,
+        flatShading: true,
+    });
+
+    const bushMat = new THREE.MeshStandardMaterial({
+        color: 0x62ad20, // Vibrant parrot green shrubbery
+        roughness: 0.84,
+        metalness: 0.04,
+        flatShading: true,
+    });
+
+    // 2. Base Geometries (aligned with +Z as up, base rooted at local Z = 0)
+    // Conifer / Pine
+    const pineTrunkGeo = new THREE.CylinderGeometry(1.2, 2.2, 18, 5);
+    pineTrunkGeo.rotateX(Math.PI / 2);
+    pineTrunkGeo.translate(0, 0, 9);
+
+    const pineFoliageGeo = new THREE.ConeGeometry(11.5, 32.0, 5);
+    pineFoliageGeo.rotateX(Math.PI / 2);
+    pineFoliageGeo.translate(0, 0, 25);
+
+    // Deciduous / Broadleaf Canopy
+    const decTrunkGeo = new THREE.CylinderGeometry(1.5, 2.8, 20, 5);
+    decTrunkGeo.rotateX(Math.PI / 2);
+    decTrunkGeo.translate(0, 0, 10);
+
+    const decFoliageGeo = new THREE.DodecahedronGeometry(13.8, 1);
+    decFoliageGeo.translate(0, 0, 24);
+
+    // Low Ground Bushes & Shrubs
+    const bushGeo = new THREE.DodecahedronGeometry(7.2, 0);
+    bushGeo.scale(1.3, 1.3, 0.65);
+    bushGeo.translate(0, 0, 4.5);
+
+    // 3. Hardware-Accelerated Instanced Meshes (3 draw calls for 6,800 trees/plants)
+    const PINE_COUNT = 2400;
+    const DEC_COUNT = 2400;
+    const BUSH_COUNT = 2000;
+
+    const pineTrunkMesh = new THREE.InstancedMesh(pineTrunkGeo, trunkMat, PINE_COUNT);
+    const pineFoliageMesh = new THREE.InstancedMesh(pineFoliageGeo, parrotFoliageMat, PINE_COUNT);
+    const decTrunkMesh = new THREE.InstancedMesh(decTrunkGeo, trunkMat, DEC_COUNT);
+    const decFoliageMesh = new THREE.InstancedMesh(decFoliageGeo, parrotFoliageMat, DEC_COUNT);
+    const bushMesh = new THREE.InstancedMesh(bushGeo, bushMat, BUSH_COUNT);
+
+    pineTrunkMesh.castShadow = true;
+    pineFoliageMesh.castShadow = true;
+    pineFoliageMesh.receiveShadow = true;
+
+    decTrunkMesh.castShadow = true;
+    decFoliageMesh.castShadow = true;
+    decFoliageMesh.receiveShadow = true;
+
+    bushMesh.castShadow = true;
+    bushMesh.receiveShadow = true;
+
+    // Harmonious parrot green palette (normal, natural contrast)
+    const PARROT_GREENS = [
+        new THREE.Color(0x6cb827), // Classic parrot green
+        new THREE.Color(0x78c72a), // Bright sunny parrot green
+        new THREE.Color(0x63ad20), // Lush mid parrot green
+        new THREE.Color(0x82d134), // Soft fresh parrot green
+        new THREE.Color(0x5ca31c), // Deep rich parrot green
+        new THREE.Color(0x71bf28), // Golden parrot green
+        new THREE.Color(0x569919), // Forest parrot green
+    ];
+
+    // Seeded PRNG for stable, identical layout on re-renders
+    let seed = 83921;
+    function rand() {
+        seed = (seed * 9301 + 49297) % 233280;
+        return seed / 233280;
+    }
+
+    const dummy = new THREE.Object3D();
+    const groundZ = -10.5;
+
+    function isExcluded(x, y) {
+        // Exclude city diorama tray & perimeter mountains (|X| < 515, |Y| < 515)
+        if (Math.abs(x) < 515 && Math.abs(y) < 515) return true;
+        // Exclude GCS Base Station compound & UAV pad apron at y = -575
+        if (Math.abs(x) < 130 && y >= -640 && y <= -515) return true;
+        // Exclude approach flight corridor south of GCS
+        if (Math.abs(x) < 35 && y >= -690 && y <= -575) return true;
+        return false;
+    }
+
+    function samplePosition() {
+        for (let attempt = 0; attempt < 50; attempt++) {
+            const side = Math.floor(rand() * 4); // 0: N, 1: S, 2: E, 3: W
+            const dist = 520 + Math.pow(rand(), 1.15) * (1550 - 520);
+            let spread = (rand() - 0.5) * 2 * (dist + 350);
+            spread = Math.max(-1550, Math.min(1550, spread));
+
+            let x = 0, y = 0;
+            if (side === 0) { x = spread; y = dist; }
+            else if (side === 1) { x = spread; y = -dist; }
+            else if (side === 2) { x = dist; y = spread; }
+            else { x = -dist; y = spread; }
+
+            if (!isExcluded(x, y)) {
+                return [x, y];
+            }
+        }
+        return [1400 + rand() * 600, 1400 + rand() * 600];
+    }
+
+    // Populate Conifer Trees (Big, Medium, Small)
+    for (let i = 0; i < PINE_COUNT; i++) {
+        const [x, y] = samplePosition();
+        const rType = rand();
+        let scale;
+        if (rType < 0.28) {
+            scale = 1.45 + rand() * 0.85; // Big giant forest tree (Height ~38-60m)
+        } else if (rType < 0.70) {
+            scale = 0.90 + rand() * 0.45; // Medium forest tree (Height ~24-36m)
+        } else {
+            scale = 0.45 + rand() * 0.35; // Small tree (Height ~12-22m)
+        }
+
+        dummy.position.set(x, y, groundZ);
+        dummy.rotation.set((rand() - 0.5) * 0.08, (rand() - 0.5) * 0.08, rand() * Math.PI * 2);
+        dummy.scale.set(scale, scale, scale);
+        dummy.updateMatrix();
+
+        pineTrunkMesh.setMatrixAt(i, dummy.matrix);
+        pineFoliageMesh.setMatrixAt(i, dummy.matrix);
+
+        const col = PARROT_GREENS[Math.floor(rand() * PARROT_GREENS.length)];
+        pineFoliageMesh.setColorAt(i, col);
+    }
+
+    // Populate Deciduous Canopy Trees (Big, Medium, Small)
+    for (let i = 0; i < DEC_COUNT; i++) {
+        const [x, y] = samplePosition();
+        const rType = rand();
+        let scale;
+        if (rType < 0.30) {
+            scale = 1.40 + rand() * 0.80; // Big giant canopy tree
+        } else if (rType < 0.72) {
+            scale = 0.85 + rand() * 0.45; // Medium canopy tree
+        } else {
+            scale = 0.45 + rand() * 0.32; // Small sapling
+        }
+
+        dummy.position.set(x, y, groundZ);
+        dummy.rotation.set((rand() - 0.5) * 0.08, (rand() - 0.5) * 0.08, rand() * Math.PI * 2);
+        dummy.scale.set(scale, scale, scale);
+        dummy.updateMatrix();
+
+        decTrunkMesh.setMatrixAt(i, dummy.matrix);
+        decFoliageMesh.setMatrixAt(i, dummy.matrix);
+
+        const col = PARROT_GREENS[Math.floor(rand() * PARROT_GREENS.length)];
+        decFoliageMesh.setColorAt(i, col);
+    }
+
+    // Populate Bushes, Shrubs & Undergrowth Plants
+    for (let i = 0; i < BUSH_COUNT; i++) {
+        const [x, y] = samplePosition();
+        const scale = 0.75 + rand() * 0.85;
+
+        dummy.position.set(x, y, groundZ);
+        dummy.rotation.set((rand() - 0.5) * 0.1, (rand() - 0.5) * 0.1, rand() * Math.PI * 2);
+        dummy.scale.set(scale, scale, scale);
+        dummy.updateMatrix();
+
+        bushMesh.setMatrixAt(i, dummy.matrix);
+
+        const col = PARROT_GREENS[Math.floor(rand() * PARROT_GREENS.length)];
+        bushMesh.setColorAt(i, col);
+    }
+
+    // Mark instanced buffers for GPU upload
+    pineTrunkMesh.instanceMatrix.needsUpdate = true;
+    pineFoliageMesh.instanceMatrix.needsUpdate = true;
+    if (pineFoliageMesh.instanceColor) pineFoliageMesh.instanceColor.needsUpdate = true;
+
+    decTrunkMesh.instanceMatrix.needsUpdate = true;
+    decFoliageMesh.instanceMatrix.needsUpdate = true;
+    if (decFoliageMesh.instanceColor) decFoliageMesh.instanceColor.needsUpdate = true;
+
+    bushMesh.instanceMatrix.needsUpdate = true;
+    if (bushMesh.instanceColor) bushMesh.instanceColor.needsUpdate = true;
+
+    forestGroup.add(pineTrunkMesh);
+    forestGroup.add(pineFoliageMesh);
+    forestGroup.add(decTrunkMesh);
+    forestGroup.add(decFoliageMesh);
+    forestGroup.add(bushMesh);
+
+    scene.add(forestGroup);
 }
 
 function initParticleSystems() {
@@ -1608,7 +1856,7 @@ function updateDrones(dronesData) {
         }
 
         // Snap to initial pose on first packet or when sitting on ground launch pad
-        if (!mesh.hasInitialPose || drone.flight_mode === "IDLE" || drone.flight_mode === "LANDED" || (drone.position && drone.position[2] <= 0.55)) {
+        if (!mesh.hasInitialPose || drone.flight_mode === "IDLE" || drone.flight_mode === "LANDED" || (drone.position && drone.position[2] <= 0.85)) {
             mesh.position.copy(mesh.basePosition);
             mesh.quaternion.copy(mesh.targetQuaternion);
             mesh.hasInitialPose = true;
@@ -4118,18 +4366,18 @@ function toggleNightOps() {
             }
             droneSearchlights.forEach(sl => { sl.intensity = 3.5; });
         } else {
-            ambientLightTheater.intensity = 0.85;
-            ambientLightTheater.color.setHex(0xe4f2ff);
-            dirLightTheater.intensity = 1.35;
-            dirLightTheater.color.setHex(0xfffaee);
-            if (fillLightTheater) fillLightTheater.intensity = 0.35;
+            ambientLightTheater.intensity = 0.42;
+            ambientLightTheater.color.setHex(0xd6eaff);
+            dirLightTheater.intensity = 1.75;
+            dirLightTheater.color.setHex(0xfff6e5);
+            if (fillLightTheater) fillLightTheater.intensity = 0.18;
             if (activeCamMode !== "flir") {
                 if (theaterSkyTex) {
                     sceneTheater.background = theaterSkyTex;
                 } else {
                     sceneTheater.background = new THREE.Color(0x060a12);
                 }
-                sceneTheater.fog.color.setHex(0x95c7f2);
+                sceneTheater.fog.color.setHex(0x7fb2e2);
             }
             droneSearchlights.forEach(sl => { sl.intensity = 0.0; });
         }
@@ -4801,11 +5049,14 @@ function initUIControls() {
     if (btnAnalytics && drawerAnalytics) {
         btnAnalytics.addEventListener("click", () => {
             drawerAnalytics.classList.toggle("hidden");
+            const isOpen = !drawerAnalytics.classList.contains("hidden");
+            btnAnalytics.setAttribute("aria-expanded", String(isOpen));
         });
     }
     if (btnCloseAnalytics && drawerAnalytics) {
         btnCloseAnalytics.addEventListener("click", () => {
             drawerAnalytics.classList.add("hidden");
+            if (btnAnalytics) btnAnalytics.setAttribute("aria-expanded", "false");
         });
     }
 
@@ -4816,11 +5067,14 @@ function initUIControls() {
     if (btnToggleComms && drawerComms) {
         btnToggleComms.addEventListener("click", () => {
             drawerComms.classList.toggle("hidden");
+            const isOpen = !drawerComms.classList.contains("hidden");
+            btnToggleComms.setAttribute("aria-expanded", String(isOpen));
         });
     }
     if (btnCloseComms && drawerComms) {
         btnCloseComms.addEventListener("click", () => {
             drawerComms.classList.add("hidden");
+            if (btnToggleComms) btnToggleComms.setAttribute("aria-expanded", "false");
         });
     }
 
@@ -5099,6 +5353,35 @@ function initUIControls() {
     // Keyboard Drone Quick-Select Hotkeys & Map Pan Nav Keys
     window.addEventListener("keydown", (e) => {
         if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) return;
+
+        if (e.key === "Escape") {
+            const modalDebrief = document.getElementById("debrief-modal");
+            if (modalDebrief && !modalDebrief.classList.contains("hidden")) {
+                modalDebrief.classList.add("hidden");
+                const btnDebrief = document.getElementById("btn-export-debrief");
+                if (btnDebrief) btnDebrief.setAttribute("aria-expanded", "false");
+                return;
+            }
+            const drawerAnalytics = document.getElementById("analytics-drawer");
+            if (drawerAnalytics && !drawerAnalytics.classList.contains("hidden")) {
+                drawerAnalytics.classList.add("hidden");
+                const btnAnalytics = document.getElementById("btn-toggle-analytics");
+                if (btnAnalytics) btnAnalytics.setAttribute("aria-expanded", "false");
+                return;
+            }
+            const drawerComms = document.getElementById("tactical-comms-panel");
+            if (drawerComms && !drawerComms.classList.contains("hidden")) {
+                drawerComms.classList.add("hidden");
+                const btnComms = document.getElementById("btn-toggle-comms");
+                if (btnComms) btnComms.setAttribute("aria-expanded", "false");
+                return;
+            }
+            const inspectPanel = document.getElementById("drone-inspect-panel");
+            if (inspectPanel && !inspectPanel.classList.contains("hidden")) {
+                inspectPanel.classList.add("hidden");
+                return;
+            }
+        }
 
         const k = e.key.toLowerCase();
         pressedNavKeys[k] = true;
